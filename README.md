@@ -2,15 +2,15 @@
 
 A research-oriented A-share systematic trading framework built around a modular pipeline:
 
-**Data → Panel → Feature → Signal → Backtest → Diagnostics → Constraints**
+Data → Panel → Feature → Signal → Backtest → Diagnostics → Constraints
 
-This project focuses on **daily-frequency / low-frequency research workflows**, not production live trading.
+This project focuses on daily-frequency / low-frequency research workflows, not production live trading.
 
 ---
 
 ## Overview
 
-This repository started from an A-share data engineering pipeline and was extended into a research-oriented trading system with the following layers:
+This repository started from an A-share data engineering pipeline and was extended into a research-oriented trading system.
 
 ### Data Layer
 - AkShare-based ingestion
@@ -36,7 +36,7 @@ This repository started from an A-share data engineering pipeline and was extend
 
 ## Project Status
 
-**Current status: V1 complete**
+Current status: V1 complete
 
 ### Included in V1
 - standardized research panel access
@@ -58,19 +58,19 @@ This repository started from an A-share data engineering pipeline and was extend
 
 ## Repository Structure
 
-```text
-├─ A_share_Analytical_DWH.ipynb
-├─ run_demo.py
-├─ requirements.txt
-├─ src/
-│  └─ qsys/
-│     ├─ data/
-│     ├─ features/
-│     ├─ signals/
-│     ├─ backtest/
-│     ├─ research/
-│     └─ utils/
-└─ tests/
+    .
+    ├─ A_share_Analytical_DWH.ipynb
+    ├─ run_demo.py
+    ├─ requirements.txt
+    ├─ src/
+    │  └─ qsys/
+    │     ├─ data/
+    │     ├─ features/
+    │     ├─ signals/
+    │     ├─ backtest/
+    │     ├─ research/
+    │     └─ utils/
+    └─ tests/
 
 ---
 
@@ -115,6 +115,104 @@ This repository started from an A-share data engineering pipeline and was extend
 
 ### 1. Install dependencies
 
-```bash
-pip install -r requirements.txt
+    pip install -r requirements.txt
 
+### 2. Generate synthetic demo feature store
+
+    PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
+
+This creates:
+
+    data/processed/feature_store/v1/
+
+---
+
+### 3. Run demos
+
+Run all:
+
+    python run_demo.py --mode all
+
+Or:
+
+    python run_demo.py --mode signal
+    python run_demo.py --mode diagnostics
+    python run_demo.py --mode backtest
+    python run_demo.py --mode impact
+
+---
+
+## Example Workflow
+
+1. Load feature-store data  
+2. Construct signal  
+   Example: rank(ret_20d) - 0.5 * zscore(vol_20d)  
+3. Run diagnostics  
+   - IC / Rank IC  
+   - quantile spread  
+   - exposure analysis  
+4. Construct portfolio  
+5. Run backtest  
+6. Evaluate constraint impact  
+
+---
+
+## Synthetic Demo Note
+
+This repository does not include full market datasets.
+
+To make it runnable:
+
+    PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
+
+This is for:
+- smoke testing
+- architecture validation
+- demo usage
+
+It does NOT represent real trading performance.
+
+---
+
+## Legacy Notebook
+
+A_share_Analytical_DWH.ipynb is kept as the original pipeline.
+
+Current system:
+
+    src/qsys/
+
+---
+
+## Testing
+
+    PYTHONPATH=src pytest -q
+
+---
+
+## Future Work
+
+- integrate real standardized panel outputs  
+- improve execution assumptions  
+- benchmark comparison  
+- richer exposure controls  
+- report / tearsheet generation  
+- broader strategy research support  
+
+---
+
+## Summary
+
+This project is a research-oriented A-share systematic trading framework focused on:
+
+- modular architecture  
+- reproducible research  
+- signal diagnostics  
+- portfolio behavior analysis  
+
+It aims to answer:
+
+- Does a signal have predictive power?  
+- How stable is the alpha?  
+- What exposures drive the signal?  
+- How do constraints affect performance?  
