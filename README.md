@@ -59,7 +59,6 @@ This repository started from an A-share data engineering pipeline and was extend
 ## Repository Structure
 
 ```text
-.
 ├─ A_share_Analytical_DWH.ipynb
 ├─ run_demo.py
 ├─ requirements.txt
