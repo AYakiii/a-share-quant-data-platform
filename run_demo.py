@@ -10,12 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SRC_PATH = PROJECT_ROOT / "src"
 
 
-def _run_module(module: str) -> int:
+def _run_module(module: str, module_args: list[str] | None = None) -> int:
     env = dict(**__import__("os").environ)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{SRC_PATH}:{existing}" if existing else str(SRC_PATH)
 
-    cmd = [sys.executable, "-m", module]
+    cmd = [sys.executable, "-m", module, *(module_args or [])]
     print(f"\n=== Running: {module} ===")
     result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env)
     return result.returncode
@@ -23,7 +23,7 @@ def _run_module(module: str) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run demo workflows for the A-share research-oriented trading system."
+        description="Run synthetic demo workflows only (deprecated for real-data research)."
     )
     parser.add_argument(
         "--mode",
@@ -39,25 +39,30 @@ def main() -> None:
         help="Which demo to run.",
     )
     args = parser.parse_args()
+    print(
+        "[DEPRECATED] run_demo.py is synthetic/demo-only. "
+        "Use qsys.utils.build_real_feature_store and explicit --feature-root workflows for real data."
+    )
 
+    default_feature_root = "data/processed/feature_store/v1"
     module_map = {
-        "synthetic": ["qsys.utils.generate_synthetic_feature_store"],
-        "signal": ["qsys.utils.signal_engine_example"],
-        "diagnostics": ["qsys.utils.research_diagnostics_example"],
-        "backtest": ["qsys.utils.backtest_example"],
-        "impact": ["qsys.utils.constraint_impact_example"],
+        "synthetic": [("qsys.utils.generate_synthetic_feature_store", [])],
+        "signal": [("qsys.utils.signal_engine_example", ["--feature-root", default_feature_root])],
+        "diagnostics": [("qsys.utils.research_diagnostics_example", ["--feature-root", default_feature_root])],
+        "backtest": [("qsys.utils.backtest_example", ["--feature-root", default_feature_root])],
+        "impact": [("qsys.utils.constraint_impact_example", ["--feature-root", default_feature_root])],
         "all": [
-            "qsys.utils.generate_synthetic_feature_store",
-            "qsys.utils.signal_engine_example",
-            "qsys.utils.research_diagnostics_example",
-            "qsys.utils.backtest_example",
-            "qsys.utils.constraint_impact_example",
+            ("qsys.utils.generate_synthetic_feature_store", []),
+            ("qsys.utils.signal_engine_example", ["--feature-root", default_feature_root]),
+            ("qsys.utils.research_diagnostics_example", ["--feature-root", default_feature_root]),
+            ("qsys.utils.backtest_example", ["--feature-root", default_feature_root]),
+            ("qsys.utils.constraint_impact_example", ["--feature-root", default_feature_root]),
         ],
     }
 
     failures: list[str] = []
-    for module in module_map[args.mode]:
-        code = _run_module(module)
+    for module, module_args in module_map[args.mode]:
+        code = _run_module(module, module_args)
         if code != 0:
             failures.append(module)
 

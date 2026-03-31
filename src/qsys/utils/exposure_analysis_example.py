@@ -10,7 +10,7 @@ from qsys.signals.engine import demo_alpha_signal, load_feature_store_frame
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run exposure diagnostics on demo alpha")
-    parser.add_argument("--feature-root", default="data/processed/feature_store/v1")
+    parser.add_argument("--feature-root", required=True)
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
     parser.add_argument("--symbols", nargs="*", default=None)

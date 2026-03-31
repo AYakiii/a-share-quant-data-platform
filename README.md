@@ -60,7 +60,7 @@ Current status: V1 complete
 
     .
     ├─ A_share_Analytical_DWH.ipynb
-    ├─ run_demo.py
+    ├─ run_demo.py (deprecated for real-data workflow)
     ├─ requirements.txt
     ├─ src/
     │  └─ qsys/
@@ -108,6 +108,7 @@ Current status: V1 complete
 ### src/qsys/utils/
 - CLI / example entrypoints
 - synthetic demo data generator
+- real-data feature store builder for Colab/local research
 
 ---
 
@@ -117,9 +118,12 @@ Current status: V1 complete
 
     pip install -r requirements.txt
 
-### 2. Generate synthetic demo feature store
+### 2. Build real feature store (recommended)
 
-    PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
+    PYTHONPATH=src python -m qsys.utils.build_real_feature_store \
+      --feature-root data/processed/feature_store/v1 \
+      --start-date 2020-01-01 \
+      --limit 300
 
 This creates:
 
@@ -127,18 +131,42 @@ This creates:
 
 ---
 
-### 3. Run demos
+### 3. Run research/backtest with explicit feature root
 
-Run all:
+    PYTHONPATH=src python -m qsys.utils.signal_engine_example \
+      --feature-root data/processed/feature_store/v1
 
-    python run_demo.py --mode all
+    PYTHONPATH=src python -m qsys.utils.research_diagnostics_example \
+      --feature-root data/processed/feature_store/v1
 
-Or:
+    PYTHONPATH=src python -m qsys.utils.backtest_example \
+      --feature-root data/processed/feature_store/v1
 
-    python run_demo.py --mode signal
-    python run_demo.py --mode diagnostics
-    python run_demo.py --mode backtest
-    python run_demo.py --mode impact
+    PYTHONPATH=src python -m qsys.utils.constraint_impact_example \
+      --feature-root data/processed/feature_store/v1
+
+---
+
+## Colab + real data
+
+Use these notebooks in order:
+
+1. `01_build_real_feature_store.ipynb`
+2. `02_signal_research.ipynb`
+3. `03_backtest.ipynb`
+
+Real-data feature builder output schema includes:
+
+- `trade_date`, `ts_code`
+- `open`, `high`, `low`, `close`
+- `volume`, `amount`, `turnover`, `outstanding_share`
+- `ret_1d`, `ret_5d`, `ret_20d`
+- `vol_20d`, `amount_20d`, `turnover_5d`, `turnover_20d`
+- `market_cap`
+- `fwd_ret_5d`, `fwd_ret_20d`
+- `is_tradable`
+
+All research/backtest example entrypoints now require `--feature-root` explicitly to avoid fragile implicit paths in Colab.
 
 ---
 
@@ -157,13 +185,14 @@ Or:
 
 ---
 
-## Synthetic Demo Note
+## Synthetic Demo Note (optional)
 
 This repository does not include full market datasets.
 
-To make it runnable:
+If you only need a smoke test:
 
     PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
+    python run_demo.py --mode all
 
 This is for:
 - smoke testing
