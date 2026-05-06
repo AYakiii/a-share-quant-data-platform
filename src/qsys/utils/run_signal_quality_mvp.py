@@ -14,12 +14,14 @@ from qsys.research.signal_quality.quantile import (
     compute_quantile_forward_returns,
     compute_quantile_spread,
 )
+from qsys.signals.engine import load_feature_store_frame
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Signal quality MVP")
     p.add_argument("--feature-root", required=True)
-    p.add_argument("--signal-col", required=True)
+    p.add_argument("--signal-col", default=None)
+    p.add_argument("--signal-preset", choices=["momentum_vol"], default=None)
     p.add_argument("--fwd-cols", nargs="+", required=True)
     p.add_argument("--start-date", default=None)
     p.add_argument("--end-date", default=None)
@@ -28,15 +30,75 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _compute_momentum_vol_signal(features: pd.DataFrame) -> pd.Series:
+    required = ["ret_20d", "vol_20d"]
+    missing = [c for c in required if c not in features.columns]
+    if missing:
+        raise KeyError(f"signal preset 'momentum_vol' requires columns: {missing}")
+
+    base = features[required].dropna(subset=required).copy()
+    ret_rank = base.groupby(level="date")["ret_20d"].rank(pct=True)
+    vol_mean = base.groupby(level="date")["vol_20d"].transform("mean")
+    vol_std = base.groupby(level="date")["vol_20d"].transform("std").replace(0.0, pd.NA)
+    vol_z = ((base["vol_20d"] - vol_mean) / vol_std).fillna(0.0)
+    return (ret_rank - 0.5 * vol_z).rename("signal")
+
+
+def build_signal_quality_input(
+    feature_root: str,
+    signal_col: str | None,
+    signal_preset: str | None,
+    fwd_cols: list[str],
+    start_date: str | None,
+    end_date: str | None,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Build aligned signal-quality frame from raw feature store for either mode."""
+
+    if signal_preset is None:
+        if signal_col is None:
+            raise ValueError("either --signal-col or --signal-preset must be provided")
+        return prepare_signal_quality_frame(
+            feature_root=feature_root,
+            signal_col=signal_col,
+            fwd_ret_cols=fwd_cols,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    features = load_feature_store_frame(feature_root=feature_root, start_date=start_date, end_date=end_date)
+    missing_fwd = [c for c in fwd_cols if c not in features.columns]
+    if missing_fwd:
+        raise KeyError(f"forward return columns not found: {missing_fwd}")
+
+    if signal_preset == "momentum_vol":
+        signal = _compute_momentum_vol_signal(features)
+    else:
+        raise KeyError(f"unsupported signal preset: {signal_preset}")
+
+    out = pd.concat([signal, features[fwd_cols]], axis=1)
+    before = len(out)
+    out = out.dropna(subset=["signal", *fwd_cols]).sort_index()
+    after = len(out)
+    stats = {
+        "n_rows_before": float(before),
+        "n_rows_after": float(after),
+        "coverage_ratio": float(after / before) if before > 0 else 0.0,
+        "n_dates": float(out.index.get_level_values("date").nunique()) if len(out) else 0.0,
+        "n_assets": float(out.index.get_level_values("asset").nunique()) if len(out) else 0.0,
+    }
+    return out, stats
+
+
 def main() -> None:
     args = parse_args()
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    df, coverage = prepare_signal_quality_frame(
+    df, coverage = build_signal_quality_input(
         feature_root=args.feature_root,
         signal_col=args.signal_col,
-        fwd_ret_cols=args.fwd_cols,
+        signal_preset=args.signal_preset,
+        fwd_cols=args.fwd_cols,
         start_date=args.start_date,
         end_date=args.end_date,
     )
