@@ -10,6 +10,7 @@ from qsys.utils.report_rebalance_policy_comparison import (
     build_summary_metrics,
     generate_report,
     load_comparison_outputs,
+    build_market_benchmark_metrics,
 )
 
 
@@ -149,3 +150,36 @@ def test_generate_report_writes_outputs(tmp_path) -> None:
     for p in saved.values():
         assert p.exists()
         assert p.stat().st_size > 0
+
+
+def test_market_benchmark_metrics_calculation() -> None:
+    dates = pd.to_datetime(["2024-01-01", "2024-01-02"])
+    outputs = {
+        "buffered_daily_returns": pd.DataFrame({"date": dates, "net_return": [0.0, 0.01], "cumulative_net_return": [0.0, 0.01]}),
+        "equal_weight_daily_returns": pd.DataFrame({"date": dates, "net_return": [0.0, 0.005], "cumulative_net_return": [0.0, 0.005]}),
+        "csi300_daily_returns": pd.DataFrame({"date": dates, "net_return": [0.0, 0.008], "cumulative_net_return": [0.0, 0.008]}),
+    }
+    m = build_market_benchmark_metrics(outputs)
+    assert {"policy", "total_return", "annualized_return", "annualized_vol", "sharpe", "max_drawdown"}.issubset(m.columns)
+
+
+def test_generate_report_without_market_files_keeps_backward_outputs(tmp_path) -> None:
+    _write_minimal_outputs(tmp_path, include_equal=False)
+    saved = generate_report(tmp_path)
+    assert "summary_metrics" in saved and "policy_diff_metrics" in saved
+    assert "market_benchmark_metrics" not in saved
+
+
+def test_generate_report_with_market_files_writes_market_outputs(tmp_path) -> None:
+    _write_minimal_outputs(tmp_path, include_equal=True)
+    dates = pd.to_datetime(["2024-01-01", "2024-01-02"])
+    mdf = pd.DataFrame({"date": dates, "gross_return": [0.0, 0.01], "net_return": [0.0, 0.01], "cumulative_net_return": [0.0, 0.01], "policy": ["CSI300", "CSI300"]})
+    mdf.to_csv(tmp_path / "csi300_daily_returns.csv", index=False)
+    mdf.assign(policy="CSI500").to_csv(tmp_path / "csi500_daily_returns.csv", index=False)
+    mdf.assign(policy="SHANGHAI_COMPOSITE").to_csv(tmp_path / "shanghai_composite_daily_returns.csv", index=False)
+
+    saved = generate_report(tmp_path)
+    for k in ["market_benchmark_metrics", "buffered_excess_return_vs_benchmarks", "market_benchmark_comparison_plot"]:
+        assert k in saved
+        assert saved[k].exists()
+        assert saved[k].stat().st_size > 0

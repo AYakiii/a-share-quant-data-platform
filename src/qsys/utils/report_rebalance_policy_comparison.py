@@ -25,6 +25,9 @@ OPTIONAL_FILES = {
     "strict_weights": "strict_weights.csv",
     "buffered_weights": "buffered_weights.csv",
     "equal_weight_weights": "equal_weight_weights.csv",
+    "csi300_daily_returns": "csi300_daily_returns.csv",
+    "csi500_daily_returns": "csi500_daily_returns.csv",
+    "shanghai_composite_daily_returns": "shanghai_composite_daily_returns.csv",
 }
 
 
@@ -181,6 +184,74 @@ def plot_turnover(outputs: dict[str, pd.DataFrame], output_path: str | Path) -> 
     plt.close()
 
 
+
+def _curve_metrics(df: pd.DataFrame) -> dict[str, float]:
+    net = pd.to_numeric(df["net_return"], errors="coerce").fillna(0.0)
+    n = len(net)
+    total = float((1.0 + net).prod() - 1.0) if n else 0.0
+    ann = float((1.0 + total) ** (252.0 / n) - 1.0) if n else 0.0
+    vol = float(net.std(ddof=0) * np.sqrt(252.0)) if n else 0.0
+    sharpe = float(ann / vol) if vol > 0 else 0.0
+    cum = (1.0 + net).cumprod()
+    mdd = float((cum / cum.cummax() - 1.0).min()) if n else 0.0
+    return {"total_return": total, "annualized_return": ann, "annualized_vol": vol, "sharpe": sharpe, "max_drawdown": mdd}
+
+
+def build_market_benchmark_metrics(outputs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    mapping = {
+        "buffered_top_n": "buffered_daily_returns",
+        "equal_weight": "equal_weight_daily_returns",
+        "CSI300": "csi300_daily_returns",
+        "CSI500": "csi500_daily_returns",
+        "SHANGHAI_COMPOSITE": "shanghai_composite_daily_returns",
+    }
+    rows = []
+    for policy, key in mapping.items():
+        if key not in outputs:
+            continue
+        m = _curve_metrics(outputs[key])
+        rows.append({"policy": policy, **m})
+    return pd.DataFrame(rows)
+
+
+def build_buffered_excess_return_vs_benchmarks(outputs: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    metrics = build_market_benchmark_metrics(outputs).set_index("policy") if len(build_market_benchmark_metrics(outputs)) else pd.DataFrame()
+    if "buffered_top_n" not in metrics.index:
+        return pd.DataFrame(columns=["benchmark", "buffered_total_return", "benchmark_total_return", "excess_return", "outperformed"])
+    b = float(metrics.loc["buffered_top_n", "total_return"])
+    rows=[]
+    for bench in ["equal_weight", "CSI300", "CSI500", "SHANGHAI_COMPOSITE"]:
+        if bench not in metrics.index:
+            continue
+        bt = float(metrics.loc[bench, "total_return"])
+        ex = b - bt
+        rows.append({"benchmark": bench, "buffered_total_return": b, "benchmark_total_return": bt, "excess_return": ex, "outperformed": bool(ex > 0)})
+    return pd.DataFrame(rows)
+
+
+def plot_market_benchmark_comparison(outputs: dict[str, pd.DataFrame], output_path: str | Path) -> None:
+    import matplotlib.pyplot as plt
+
+    plt.figure(figsize=(8, 4))
+    for key, label in [
+        ("buffered_daily_returns", "buffered_top_n"),
+        ("equal_weight_daily_returns", "equal_weight"),
+        ("csi300_daily_returns", "CSI300"),
+        ("csi500_daily_returns", "CSI500"),
+        ("shanghai_composite_daily_returns", "SHANGHAI_COMPOSITE"),
+    ]:
+        if key not in outputs:
+            continue
+        df = outputs[key]
+        if "date" not in df.columns or "cumulative_net_return" not in df.columns:
+            continue
+        plt.plot(pd.to_datetime(df["date"]), pd.to_numeric(df["cumulative_net_return"], errors="coerce"), label=label)
+    plt.title("Market Benchmark Comparison")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=120)
+    plt.close()
+
 def generate_report(output_dir: str | Path) -> dict[str, Path]:
     """Generate summary CSV/PNG report files from saved experiment outputs."""
 
@@ -200,12 +271,28 @@ def generate_report(output_dir: str | Path) -> dict[str, Path]:
     plot_cumulative_net_return(outputs, curve_path)
     plot_turnover(outputs, turnover_path)
 
-    return {
+    saved = {
         "summary_metrics": summary_path,
         "policy_diff_metrics": diff_path,
         "cumulative_net_return_plot": curve_path,
         "turnover_plot": turnover_path,
     }
+
+    market_keys = {"csi300_daily_returns", "csi500_daily_returns", "shanghai_composite_daily_returns"}
+    if len(market_keys.intersection(set(outputs.keys()))):
+        m = build_market_benchmark_metrics(outputs)
+        ex = build_buffered_excess_return_vs_benchmarks(outputs)
+        m_path = root / "market_benchmark_metrics.csv"
+        ex_path = root / "buffered_excess_return_vs_benchmarks.csv"
+        plot_path = root / "market_benchmark_comparison.png"
+        m.to_csv(m_path, index=False)
+        ex.to_csv(ex_path, index=False)
+        plot_market_benchmark_comparison(outputs, plot_path)
+        saved["market_benchmark_metrics"] = m_path
+        saved["buffered_excess_return_vs_benchmarks"] = ex_path
+        saved["market_benchmark_comparison_plot"] = plot_path
+
+    return saved
 
 
 def parse_args() -> argparse.Namespace:
