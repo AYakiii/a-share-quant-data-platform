@@ -245,3 +245,98 @@ It aims to answer:
 - How stable is the alpha?  
 - What exposures drive the signal?  
 - How do constraints affect performance?  
+
+## Buffered Rebalance Policy
+
+Strict Top-N rebalancing can create excessive turnover when small cross-sectional rank moves cause large portfolio changes. The buffered policy separates signal ranking from trade execution and is designed for daily/low-frequency multi-factor research.
+
+### Core idea
+
+- **Signal** decides which assets are attractive.
+- **Rebalance policy** decides whether the portfolio should actually trade.
+- **Portfolio weights** decide how much to hold.
+- **Cost model** evaluates the trading drag from turnover.
+
+### Buffered Top-N rules
+
+Default behavior in this repository:
+
+- buy new asset if `rank <= buy_rank`
+- sell existing holding only if `rank > sell_rank`
+- keep assets in the buffer zone `(buy_rank, sell_rank]`
+- do not force buys when holdings remain above `min_holding_n`
+- trim holdings if count exceeds `max_holding_n`
+- skip tiny weight changes below `min_trade_weight`
+- charge transaction cost with `turnover * cost_bps / 10000`
+
+### Module layout
+
+```text
+src/qsys/rebalance/
+- policies.py
+- costs.py
+- backtest.py
+- diagnostics.py
+
+src/qsys/utils/
+- buffered_rebalance_example.py
+- run_buffered_rebalance_from_feature_store.py
+- compare_rebalance_policies_from_feature_store.py
+```
+
+### Synthetic demo
+
+```bash
+PYTHONPATH=src python src/qsys/utils/buffered_rebalance_example.py
+```
+
+### Run from feature store
+
+```bash
+PYTHONPATH=src python src/qsys/utils/run_buffered_rebalance_from_feature_store.py \
+  --feature-root data/processed/feature_store/v1 \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --target-n 50 \
+  --buy-rank 50 \
+  --sell-rank 100 \
+  --rebalance weekly \
+  --cost-bps 20
+```
+
+### Compare strict vs buffered policies
+
+```bash
+PYTHONPATH=src python src/qsys/utils/compare_rebalance_policies_from_feature_store.py \
+  --feature-root data/processed/feature_store/v1 \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --target-n 50 \
+  --rebalance weekly \
+  --cost-bps 20 \
+  --output-dir outputs/rebalance_experiments \
+  --run-name strict_vs_buffered_2024
+```
+
+Output files:
+
+- `comparison.csv`
+- `strict_daily_returns.csv`
+- `buffered_daily_returns.csv`
+- `strict_turnover.csv`
+- `buffered_turnover.csv`
+- `strict_trades.csv`
+- `buffered_trades.csv`
+- `strict_weights.csv`
+- `buffered_weights.csv`
+
+### Diagnostics
+
+- `summarize_trades`: daily action counts, turnover, and rank summaries.
+- `holding_period_summary`: holding-segment duration statistics.
+- `analyze_trade_forward_returns`: ex-post buy/sell forward return stats by horizon.
+- `rank_migration_matrix`: transition counts of held-asset rank buckets over time.
+
+### Interpretation
+
+Buffered policy is not automatically better than strict Top-N. Evaluate with after-cost return, turnover reduction, total cost reduction, holding-period stability, buy/sell forward-return diagnostics, and robustness across parameter settings.
