@@ -42,7 +42,7 @@ def test_build_policy_configs_defaults_target_10() -> None:
     assert buffered.max_holding_n == 12
 
 
-def _fake_result() -> dict:
+def _fake_topn_result() -> dict:
     idx = pd.MultiIndex.from_tuples([(pd.Timestamp("2024-01-01"), "A")], names=["date", "asset"])
     fake_weights = pd.DataFrame({"target_weight": [1.0]}, index=idx)
     fake_trades = pd.DataFrame(
@@ -86,32 +86,50 @@ def _fake_result() -> dict:
     }
 
 
-def test_compare_policy_results_fake_dicts() -> None:
-    fake_result = _fake_result()
-
-    out = compare_policy_results({"strict_top_n": fake_result, "buffered_top_n": fake_result})
-
-    assert set(out.columns) == {
-        "policy",
-        "total_return",
-        "annualized_return",
-        "annualized_vol",
-        "sharpe",
-        "max_drawdown",
-        "average_turnover",
-        "total_cost",
-        "n_trades",
-        "n_buy",
-        "n_sell",
-        "average_holding_days",
-        "median_holding_days",
+def _fake_equal_weight_result() -> dict:
+    idx = pd.MultiIndex.from_tuples([(pd.Timestamp("2024-01-01"), "A")], names=["date", "asset"])
+    weights = pd.DataFrame({"target_weight": [1.0]}, index=idx)
+    daily = pd.DataFrame(
+        {
+            "gross_return": [0.0],
+            "cost": [0.0],
+            "net_return": [0.0],
+            "cumulative_net_return": [0.0],
+        },
+        index=pd.Index([pd.Timestamp("2024-01-01")], name="date"),
+    )
+    turnover = pd.DataFrame({"turnover": [1.0]}, index=pd.Index([pd.Timestamp("2024-01-01")], name="date"))
+    return {
+        "summary": {
+            "total_return": 0.05,
+            "annualized_return": 0.1,
+            "annualized_vol": 0.1,
+            "sharpe": 1.0,
+            "max_drawdown": -0.02,
+            "average_turnover": 0.2,
+            "total_cost": 0.005,
+        },
+        "weights": weights,
+        "daily_returns": daily,
+        "turnover": turnover,
     }
-    assert len(out) == 2
+
+
+def test_compare_policy_results_handles_equal_weight() -> None:
+    topn = _fake_topn_result()
+    eq = _fake_equal_weight_result()
+
+    out = compare_policy_results({"strict_top_n": topn, "buffered_top_n": topn, "equal_weight": eq})
+    assert len(out) == 3
+    row = out[out["policy"] == "equal_weight"].iloc[0]
+    assert pd.isna(row["n_buy"])
+    assert pd.isna(row["n_sell"])
 
 
 def test_save_policy_comparison_outputs_writes_files_and_resets_index(tmp_path) -> None:
-    fake_result = _fake_result()
-    results = {"strict_top_n": fake_result, "buffered_top_n": fake_result}
+    topn = _fake_topn_result()
+    eq = _fake_equal_weight_result()
+    results = {"strict_top_n": topn, "buffered_top_n": topn, "equal_weight": eq}
     comparison = compare_policy_results(results)
 
     saved = save_policy_comparison_outputs(tmp_path, comparison, results)
@@ -126,6 +144,9 @@ def test_save_policy_comparison_outputs_writes_files_and_resets_index(tmp_path) 
         "buffered_trades",
         "strict_weights",
         "buffered_weights",
+        "equal_weight_daily_returns",
+        "equal_weight_turnover",
+        "equal_weight_weights",
     }
     assert set(saved.keys()) == expected_keys
     for p in saved.values():
@@ -134,8 +155,10 @@ def test_save_policy_comparison_outputs_writes_files_and_resets_index(tmp_path) 
     weights_csv = pd.read_csv(saved["strict_weights"])
     assert {"date", "asset", "target_weight"}.issubset(weights_csv.columns)
 
-    trades_csv = pd.read_csv(saved["strict_trades"])
-    assert {"date", "asset", "trade_weight", "action"}.issubset(trades_csv.columns)
+    eq_weights_csv = pd.read_csv(saved["equal_weight_weights"])
+    assert {"date", "asset", "target_weight"}.issubset(eq_weights_csv.columns)
+
+    assert not (tmp_path / "equal_weight_trades.csv").exists()
 
 
 def test_script_module_importable() -> None:

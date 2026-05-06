@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from qsys.rebalance import BufferedTopNPolicyConfig, run_buffered_topn_backtest
+from qsys.rebalance import BufferedTopNPolicyConfig, build_equal_weight_benchmark, run_buffered_topn_backtest
 from qsys.rebalance.diagnostics import holding_period_summary, summarize_trades
 from qsys.signals.engine import load_feature_store_frame
 from qsys.utils.run_buffered_rebalance_from_feature_store import build_demo_signal_and_returns
@@ -78,12 +78,25 @@ def compare_policy_results(results: dict[str, dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for policy, result in results.items():
         summary = result["summary"]
-        trades = result["trades"]
-        trade_sum = summarize_trades(trades)
-        holding_sum = holding_period_summary(result["weights"])
 
-        n_buy = int(trade_sum["n_buy"].sum()) if len(trade_sum) else 0
-        n_sell = int(trade_sum["n_sell"].sum()) if len(trade_sum) else 0
+        trades = result.get("trades", None)
+        weights = result.get("weights", None)
+
+        if trades is not None:
+            trade_sum = summarize_trades(trades)
+            n_trades = int(len(trades))
+            n_buy = int(trade_sum["n_buy"].sum()) if len(trade_sum) else 0
+            n_sell = int(trade_sum["n_sell"].sum()) if len(trade_sum) else 0
+            holding_sum = holding_period_summary(weights) if weights is not None else {}
+            avg_holding = float(holding_sum.get("average_holding_days", float("nan")))
+            med_holding = float(holding_sum.get("median_holding_days", float("nan")))
+        else:
+            turnover = result.get("turnover")
+            n_trades = int((turnover["turnover"] > 0).sum()) if turnover is not None and len(turnover) else 0
+            n_buy = float("nan")
+            n_sell = float("nan")
+            avg_holding = float("nan")
+            med_holding = float("nan")
 
         rows.append(
             {
@@ -95,11 +108,11 @@ def compare_policy_results(results: dict[str, dict[str, Any]]) -> pd.DataFrame:
                 "max_drawdown": summary.get("max_drawdown", 0.0),
                 "average_turnover": summary.get("average_turnover", 0.0),
                 "total_cost": summary.get("total_cost", 0.0),
-                "n_trades": int(len(trades)),
+                "n_trades": n_trades,
                 "n_buy": n_buy,
                 "n_sell": n_sell,
-                "average_holding_days": float(holding_sum.get("average_holding_days", 0.0)),
-                "median_holding_days": float(holding_sum.get("median_holding_days", 0.0)),
+                "average_holding_days": avg_holding,
+                "median_holding_days": med_holding,
             }
         )
 
@@ -122,26 +135,23 @@ def save_policy_comparison_outputs(
     comparison.to_csv(cmp_path, index=False)
     saved["comparison"] = cmp_path
 
-    strict = results["strict_top_n"]
-    buffered = results["buffered_top_n"]
-
-    file_specs = [
-        ("strict_daily_returns", strict["daily_returns"]),
-        ("buffered_daily_returns", buffered["daily_returns"]),
-        ("strict_turnover", strict["turnover"]),
-        ("buffered_turnover", buffered["turnover"]),
-        ("strict_trades", strict["trades"]),
-        ("buffered_trades", buffered["trades"]),
-        ("strict_weights", strict["weights"]),
-        ("buffered_weights", buffered["weights"]),
+    file_specs: list[tuple[str, pd.DataFrame]] = [
+        ("strict_daily_returns", results["strict_top_n"]["daily_returns"]),
+        ("buffered_daily_returns", results["buffered_top_n"]["daily_returns"]),
+        ("strict_turnover", results["strict_top_n"]["turnover"]),
+        ("buffered_turnover", results["buffered_top_n"]["turnover"]),
+        ("strict_trades", results["strict_top_n"]["trades"]),
+        ("buffered_trades", results["buffered_top_n"]["trades"]),
+        ("strict_weights", results["strict_top_n"]["weights"]),
+        ("buffered_weights", results["buffered_top_n"]["weights"]),
+        ("equal_weight_daily_returns", results["equal_weight"]["daily_returns"]),
+        ("equal_weight_turnover", results["equal_weight"]["turnover"]),
+        ("equal_weight_weights", results["equal_weight"]["weights"]),
     ]
 
     for name, df in file_specs:
         path = out / f"{name}.csv"
-        if isinstance(df.index, pd.MultiIndex):
-            df.reset_index().to_csv(path, index=False)
-        else:
-            df.reset_index().to_csv(path, index=False)
+        df.reset_index().to_csv(path, index=False)
         saved[name] = path
 
     return saved
@@ -165,8 +175,18 @@ def main() -> None:
 
     strict_result = run_buffered_topn_backtest(signal_df, returns_df, strict_cfg)
     buffered_result = run_buffered_topn_backtest(signal_df, returns_df, buffered_cfg)
+    equal_weight_result = build_equal_weight_benchmark(
+        returns_df=returns_df,
+        rebalance=args.rebalance,
+        return_col="ret_1d",
+        cost_bps=args.cost_bps,
+    )
 
-    results = {"strict_top_n": strict_result, "buffered_top_n": buffered_result}
+    results = {
+        "strict_top_n": strict_result,
+        "buffered_top_n": buffered_result,
+        "equal_weight": equal_weight_result,
+    }
     comparison = compare_policy_results(results)
 
     print("=== Policy Comparison ===")
@@ -175,6 +195,8 @@ def main() -> None:
     print(strict_cfg)
     print("\n=== Buffered Config ===")
     print(buffered_cfg)
+    print("\n=== Equal Weight Benchmark ===")
+    print("Same-universe equal-weight benchmark using the same returns_df universe.")
 
     if args.output_dir:
         base_dir = Path(args.output_dir)
