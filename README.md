@@ -129,6 +129,8 @@ This creates:
 
     data/processed/feature_store/v1/
 
+This path is for real/processed feature-store data.
+
 ---
 
 ### 3. Run research/backtest with explicit feature root
@@ -174,7 +176,8 @@ All research/backtest example entrypoints now require `--feature-root` explicitl
 
 1. Load feature-store data  
 2. Construct signal  
-   Example: rank(ret_20d) - 0.5 * zscore(vol_20d)  
+   Baseline candidate: rank(ret_20d)  
+   Experimental variant: rank(ret_20d) - 0.5 * zscore(vol_20d)  
 3. Run diagnostics  
    - IC / Rank IC  
    - quantile spread  
@@ -193,6 +196,10 @@ If you only need a smoke test:
 
     PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
     python run_demo.py --mode all
+
+Default synthetic output path:
+
+    data/sample/feature_store/v1/
 
 This is for:
 - smoke testing
