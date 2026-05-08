@@ -118,7 +118,10 @@ class SignalEngine:
 
 
 def demo_alpha_signal(features: pd.DataFrame) -> pd.Series:
-    """Demo alpha: rank(ret_20d) - 0.5 * zscore(vol_20d)."""
+    """Experimental demo alpha: rank(ret_20d) - 0.5 * zscore(vol_20d).
+
+    This helper is retained for experiments/examples and is not the official baseline.
+    """
 
     engine = SignalEngine()
     signals = engine.build_transformed_signals(
@@ -135,3 +138,11 @@ def demo_alpha_signal(features: pd.DataFrame) -> pd.Series:
         },
     )
     return engine.combine(signals, weights={"rank_ret_20d": 1.0, "z_vol_20d": -0.5})
+
+
+def baseline_momentum_signal(features: pd.DataFrame) -> pd.Series:
+    """Baseline momentum candidate: cross-sectional rank(ret_20d) by date."""
+
+    if "ret_20d" not in features.columns:
+        raise KeyError("Feature column not found: ret_20d")
+    return rank_cross_section(features["ret_20d"], pct=True).rename("baseline_momentum_signal")
