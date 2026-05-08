@@ -1,0 +1,48 @@
+{
+  "project": "a-share-quant-data-platform",
+  "workflow": ["Data", "Panel", "Feature", "Signal", "Portfolio", "Backtest", "Diagnostics", "Constraints", "Report"],
+  "modules": [
+    {
+      "name": "data_panel",
+      "main_files": ["src/qsys/data/panel/daily_panel.py"],
+      "key_functions_classes": ["DailyPanelConfig", "DailyPanelReader", "load_daily_panel"],
+      "inputs": ["parquet partitions"],
+      "outputs": ["MultiIndex [date, asset] panel DataFrame"],
+      "dependencies": ["pandas", "pyarrow/parquet"],
+      "implemented_status": "implemented",
+      "limitations": ["读取能力为主，缺少强校验层"],
+      "technical_debt": ["与真实数据构建脚本的契约未制度化"],
+      "future_extensions": ["schema version validation", "data quality report"],
+      "related_tests": ["tests/data/test_daily_panel.py"],
+      "related_documents": ["docs/notion_project_review/02_data_pipeline.md", "docs/notion_project_review/03_panel_and_feature_store.md"]
+    },
+    {
+      "name": "features",
+      "main_files": ["src/qsys/features/compute.py", "src/qsys/features/store.py", "src/qsys/features/registry.py"],
+      "key_functions_classes": ["FeatureRegistry", "default_feature_registry", "compute_features", "materialize_and_store_features"],
+      "inputs": ["normalized panel"],
+      "outputs": ["feature frame", "feature-store partitions"],
+      "dependencies": ["pandas"],
+      "implemented_status": "implemented",
+      "limitations": ["feature schema evolution 较弱"],
+      "technical_debt": ["与 utils/build_real_feature_store.py 功能重叠"],
+      "future_extensions": ["feature registry versioning", "metadata registry"],
+      "related_tests": ["tests/features/test_feature_compute.py"],
+      "related_documents": ["docs/notion_project_review/03_panel_and_feature_store.md"]
+    },
+    {
+      "name": "signals",
+      "main_files": ["src/qsys/signals/engine.py", "src/qsys/signals/transforms.py", "src/qsys/signals/combine.py"],
+      "key_functions_classes": ["SignalEngine", "winsorize_cross_section", "zscore_cross_section", "rank_cross_section", "linear_combine", "demo_alpha_signal"],
+      "inputs": ["feature columns"],
+      "outputs": ["alpha signal series"],
+      "dependencies": ["pandas", "numpy"],
+      "implemented_status": "implemented",
+      "limitations": ["默认信号简单，缺少配置持久化"],
+      "technical_debt": ["实验参数与结果追踪机制不足"],
+      "future_extensions": ["recipe config files", "signal versioning"],
+      "related_tests": ["tests/signals/test_engine.py", "tests/signals/test_transforms.py"],
+      "related_documents": ["docs/notion_project_review/04_signal_engine.md", "docs/notion_project_review/08_model_review.md"]
+    }
+  ]
+}
