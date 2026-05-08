@@ -1,21 +1,32 @@
-# 02 Data Pipeline
+# 02_data_pipeline（V2）
 
-## 数据源与获取
-- 真实数据脚本：`qsys/utils/build_real_feature_store.py`，通过 AkShare `stock_zh_a_spot_em` + `stock_zh_a_daily`。
-- 含重试：`_safe_fetch_daily(retries, retry_wait)`。
+## 模块为什么存在
+数据层的核心职责是把外部行情源转换为可研究、可回测、可复用的标准输入。当前主入口为 `src/qsys/utils/build_real_feature_store.py`。
 
-## 标准化与存储
-- `_normalize_daily_frame` 统一到字段：`trade_date`, `ts_code`, OHLCV, amount/turnover, ret/vol/fwd_ret, `is_tradable`。
-- 输出按 `trade_date=YYYY-MM-DD/data.parquet` 分区。
+## 在主流程中的位置
+Data 阶段：负责从 AkShare 获取日线数据并标准化，输出后续 Panel/Feature 的基础分区文件。
 
-## parquet / sqlite / metadata
-- parquet：已实现并主路径。
-- sqlite metadata：README 声明存在历史能力，但当前 `src/qsys` 主流程中未见活跃 sqlite 注册逻辑（需进一步核验 legacy notebook）。
+## 核心协作关系
+- `_fetch_symbol_universe`：构建股票池。
+- `_safe_fetch_daily`：带重试的数据抓取。
+- `_normalize_daily_frame`：字段标准化、衍生收益/波动/流动性列、`is_tradable`。
+- `build_real_feature_store`：按 `trade_date=.../data.parquet` 落盘。
 
-## 数据质量
-- 缺失列补 NA、数值强转、日期校验。
-- `is_tradable` 基于 open/close/volume/amount 可用性。
+## 输入/输出
+- 输入：AkShare 数据、symbols、日期过滤、重试参数。
+- 输出：parquet 分区数据（研究层统一输入）。
 
-## 技术债与改进
-- 技术债：数据接入在 util 脚本，不在独立 data ingestion package。
-- 建议：增加 schema version、数据完整性审计、增量 watermark。
+## 设计选择
+- 采用“先标准化再分区写入”的简单可追踪流程。
+- 使用 `REQUIRED_COLUMNS` 强约束输出字段。
+
+## MVP 与技术债
+- MVP：日期过滤+分区写入具备“轻量增量”能力，但不是完整增量调度系统。
+- 技术债：缺 raw zone、缺数据质量审计日志、缺 schema version 管理。
+
+## sqlite metadata / incremental update 状态
+- sqlite metadata：README 提及，但在当前 `src/qsys` 主链路未见强耦合实现，判定为“文档提及但待验证”。
+- incremental update：当前更多是“部分实现”（通过日期过滤和分区增写），不是完整可编排框架。
+
+## 相关测试
+- `tests/utils/test_build_real_feature_store.py`

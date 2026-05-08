@@ -1,14 +1,16 @@
-# 06 Diagnostics
+# 06_diagnostics
+## 指标实现
+- IC/Rank IC：`qsys.research.ic.daily_ic` / `daily_rank_ic` / `ic_summary`。
+- quantile return：`quantile_mean_forward_returns`、`quantile_spread`。
+- decay：`qsys.research.decay.decay_analysis`。
+- turnover：`signal_autocorrelation`、`top_n_turnover`。
+- exposure：`size_exposure_daily`、`group_exposure_daily`、`compute_portfolio_exposure`。
 
-## 已实现
-- IC/Rank IC：`research/ic.py`。
-- quantile return/top-minus-bottom：`research/quantiles.py` 与 `research/signal_quality/quantile.py`。
-- turnover/decay：`research/turnover.py`, `research/decay.py`。
-- exposure：`research/exposure.py`, `risk/exposure.py`, `research/portfolio_exposure.py`。
+## 解释与风险
+- Rank IC 高不代表可交易收益稳定；需联动 turnover 与成本。
+- quantile spread 对分组边界敏感，样本小易误读。
+- exposure 结果需区分“信号暴露”与“组合暴露”。
 
-## 解释框架
-- Rank IC 看排序预测能力；quantile spread 看分层可交易性；turnover 看可实施性；decay 看持有期适配。
-
-## 弱点与误读风险
-- 小样本时期 IC 波动易误读。
-- 若未统一 universe/可交易过滤，诊断可能偏乐观。
+## 弱点
+- 缺统一 diagnostics report schema。
+- 缺显著性/稳健性统计（bootstrap、子区间一致性）。

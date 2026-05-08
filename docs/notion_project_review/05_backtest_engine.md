@@ -1,18 +1,28 @@
-# 05 Backtest Engine
+# 05_backtest_engine（V2）
 
-## strict_top_n 主栈
-- `build_top_n_portfolio`：支持 long_only/long_short、liquidity filter、max_single_weight、size-aware scaling、group cap。
-- `run_backtest_from_signal` / `run_backtest_from_weights`：处理调仓频率、收益对齐、成本与指标。
+## 模块为什么存在
+回测层负责把信号映射到组合与收益曲线，是研究结论可验证的核心执行层。
 
-## buffered_top_n 与 benchmark
-- `qsys/rebalance/policies.py::BufferedTopNPolicyConfig` + `build_buffered_top_n_weights`。
-- `qsys/rebalance/backtest.py::run_buffered_topn_backtest`。
-- benchmark: `rebalance/benchmarks.py`, `rebalance/index_benchmarks.py`。
+## 在主流程中的位置
+Signal → Portfolio → Backtest：
+- 组合构建：`build_top_n_portfolio`。
+- 执行对齐：`align_next_day_returns`、`align_weights_and_returns`。
+- 成本：`compute_turnover`、`compute_daily_cost`。
+- 绩效：`summarize_metrics`。
 
-## 执行与成本
-- execution 支持 `next_close`（`next_open` 请求会回退说明）。
-- cost = turnover * (transaction_cost_bps + slippage_bps)。
+## 输入/输出
+- 输入：signal、asset returns、`BacktestConfig`。
+- 输出：net/gross returns、turnover、cost、summary。
 
-## 局限
-- 成本模型线性且简化。
-- 无真实成交仿真、无冲击成本曲线。
+## 设计选择
+- `BacktestConfig` 集中配置再平衡频率、执行方式、成本参数。
+- 规则型组合（top_n）简化了实验门槛，适合 MVP 快速研究。
+
+## MVP 与技术债
+- MVP：执行假设简化，成本模型线性。
+- 技术债：`execution=next_open` 仍 fallback 行为需长期策略定义；未纳入冲击成本/容量限制。
+
+## 相关测试
+- `tests/backtest/test_portfolio.py`
+- `tests/backtest/test_portfolio_constraints.py`
+- `tests/backtest/test_simulator_metrics.py`

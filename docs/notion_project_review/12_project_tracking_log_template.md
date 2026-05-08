@@ -1,6 +1,5 @@
-# 12 Project Tracking Log Template
-
-## Phase Log 模板
+# 12_project_tracking_log_template
+## Phase 记录模板
 - Phase name:
 - Date:
 - Goal:
