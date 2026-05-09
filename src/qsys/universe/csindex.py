@@ -6,6 +6,20 @@ import numpy as np
 import pandas as pd
 
 
+def to_ak_symbol(code: str) -> str:
+    c = str(code).strip().lower()
+    if c.startswith(("sh", "sz", "bj")) and len(c) == 8:
+        return c
+    digits = "".join(ch for ch in c if ch.isdigit())
+    if len(digits) != 6:
+        raise ValueError(f"Unsupported symbol/code format: {code}")
+    if digits.startswith(("60", "68")):
+        return f"sh{digits}"
+    if digits.startswith(("00", "30")):
+        return f"sz{digits}"
+    return f"bj{digits}"
+
+
 def fetch_index_components(index_symbol: str) -> pd.DataFrame:
     import akshare as ak
 
@@ -16,7 +30,8 @@ def normalize_component_codes(df: pd.DataFrame) -> pd.Series:
     for col in ["品种代码", "成分券代码", "代码", "code"]:
         if col in df.columns:
             s = df[col].astype(str).str.strip()
-            return s[s != ""]
+            s = s[s != ""].map(to_ak_symbol)
+            return s
     raise ValueError("index component dataframe missing security-code column")
 
 

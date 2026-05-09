@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -12,9 +13,9 @@ from qsys.universe import csindex
 
 def _fake_fetch(index_symbol: str) -> pd.DataFrame:
     mapping = {
-        "000300": ["000001", "000002", "000003"],
-        "000905": ["000003", "000004", "000005"],
-        "000852": ["000005", "000006", "000007"],
+        "000300": ["000001", "600000", "300750"],
+        "000905": ["300750", "000004", "830000"],
+        "000852": ["830000", "000006", "000007"],
     }
     return pd.DataFrame({"品种代码": mapping[index_symbol]})
 
@@ -30,6 +31,7 @@ def test_n_is_configurable_and_capped(monkeypatch) -> None:
     assert len(symbols2) == 3
     assert int(meta2["actual_n"].iloc[0]) == 3
     assert int(meta2["requested_n"].iloc[0]) == 1000
+    assert all(s.startswith(("sh", "sz", "bj")) for s in symbols)
 
 
 def test_generated_filenames_include_n_and_seed(tmp_path, monkeypatch) -> None:
@@ -49,6 +51,9 @@ def test_generated_filenames_include_n_and_seed(tmp_path, monkeypatch) -> None:
     assert metadata_path.exists()
     assert "n50_seed42" in symbols_path.name
     assert "n50_seed42" in metadata_path.name
+    lines = [x.strip() for x in symbols_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    assert all(x.startswith(("sh", "sz", "bj")) for x in lines)
+    assert not any(re.fullmatch(r"\\d{6}", x) for x in lines)
 
 
 def test_cli_explicit_output_paths_override_generated_names(tmp_path, monkeypatch) -> None:
