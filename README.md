@@ -208,6 +208,44 @@ This is for:
 
 It does NOT represent real trading performance.
 
+## Universe sample builder (configurable)
+
+Build an index-derived universe sample with configurable sample size (`--n`), output directory, and name:
+
+Quick smoke test (`n=50`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 50 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_smoke
+
+Small research sample (`n=100`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 100 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_small
+
+Broader research sample (`n=300` or `n=500`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 300 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_large_mid
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 500 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_large
+
 ---
 
 ## Legacy Notebook
