@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from qsys.reporting.artifacts import write_run_manifest, write_warnings
 
 REQUIRED_FILES = {
     "comparison": "comparison.csv",
@@ -291,6 +292,26 @@ def generate_report(output_dir: str | Path) -> dict[str, Path]:
         saved["market_benchmark_metrics"] = m_path
         saved["buffered_excess_return_vs_benchmarks"] = ex_path
         saved["market_benchmark_comparison_plot"] = plot_path
+
+    manifest = {
+        "run_id": root.name,
+        "created_at": pd.Timestamp.utcnow().isoformat(),
+        "code_commit": None,
+        "feature_root": None,
+        "data_range": None,
+        "universe": None,
+        "signal_recipe": "external_comparison_input",
+        "portfolio_rule": "strict_vs_buffered_vs_equal_weight",
+        "rebalance_rule": "inferred_from_input_artifacts",
+        "execution_assumption": "from_source_artifacts",
+        "cost_model": "from_source_artifacts",
+        "benchmark": ["equal_weight", "CSI300", "CSI500", "SHANGHAI_COMPOSITE"],
+        "diagnostics_requested": ["summary_metrics", "policy_diff_metrics", "benchmark_comparison"],
+        "known_limitations": ["report_generated_from_existing_csv_outputs"],
+        "warnings": [],
+    }
+    saved["run_manifest"] = write_run_manifest(root, manifest)
+    saved["warnings"] = write_warnings(root, [])
 
     return saved
 
