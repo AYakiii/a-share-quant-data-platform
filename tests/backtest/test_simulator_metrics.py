@@ -5,6 +5,8 @@ import pytest
 pd = pytest.importorskip("pandas")
 
 from qsys.backtest.simulator import BacktestConfig, run_backtest_from_signal
+from qsys.backtest.simulator import _rebalance_dates as simulator_rebalance_dates
+from qsys.rebalance.backtest import _rebalance_dates as rebalance_rebalance_dates
 
 
 def test_simulator_and_metrics_contract() -> None:
@@ -27,3 +29,9 @@ def test_simulator_and_metrics_contract() -> None:
     assert "cumulative_return" in summary
     assert "sharpe" in summary
     assert "turnover" in summary
+
+
+def test_rebalance_date_convention_matches_rebalance_module() -> None:
+    dates = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-08", "2024-01-09"])
+    assert simulator_rebalance_dates(dates, "weekly") == rebalance_rebalance_dates(dates, "weekly")
+    assert simulator_rebalance_dates(dates, "monthly") == rebalance_rebalance_dates(dates, "monthly")

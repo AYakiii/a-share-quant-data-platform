@@ -129,6 +129,8 @@ This creates:
 
     data/processed/feature_store/v1/
 
+This path is for real/processed feature-store data.
+
 ---
 
 ### 3. Run research/backtest with explicit feature root
@@ -174,7 +176,8 @@ All research/backtest example entrypoints now require `--feature-root` explicitl
 
 1. Load feature-store data  
 2. Construct signal  
-   Example: rank(ret_20d) - 0.5 * zscore(vol_20d)  
+   Baseline candidate: rank(ret_20d)  
+   Experimental variant: rank(ret_20d) - 0.5 * zscore(vol_20d)  
 3. Run diagnostics  
    - IC / Rank IC  
    - quantile spread  
@@ -194,12 +197,67 @@ If you only need a smoke test:
     PYTHONPATH=src python -m qsys.utils.generate_synthetic_feature_store
     python run_demo.py --mode all
 
+Default synthetic output path:
+
+    data/sample/feature_store/v1/
+
 This is for:
 - smoke testing
 - architecture validation
 - demo usage
 
 It does NOT represent real trading performance.
+
+## Universe sample builder (configurable)
+
+Build an index-derived universe sample with configurable sample size (`--n`), output directory, and name:
+
+Quick smoke test (`n=50`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 50 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_smoke
+
+Small research sample (`n=100`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 100 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_small
+
+Broader research sample (`n=300` or `n=500`):
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 300 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_large_mid
+
+    PYTHONPATH=src python -m qsys.utils.build_universe_sample \
+      --index-list 000300 000905 000852 \
+      --n 500 \
+      --seed 42 \
+      --output-dir data/universe \
+      --name csi_large
+
+## CSI500 历史成分快照（BaoStock）
+
+构建命令示例：
+
+    PYTHONPATH=src python -m qsys.utils.build_baostock_index_members \
+      --start-date 2018-01-01 \
+      --end-date 2025-12-31 \
+      --output-root data/raw/index_constituents/baostock \
+      --freq ME
+
+该数据层用于 point-in-time CSI500 universe。后续回测应使用
+`load_index_members_asof(as_of_date=...)` 获取不晚于回测日期的最近一期快照，避免未来函数。
 
 ---
 

@@ -1,5 +1,15 @@
-data/
+# Data artifacts
+data/raw/
+data/interim/
+data/processed/feature_store/
+data/sample/feature_store/
+
+# Experiment/run outputs
+outputs/
+
+# Binary/local artifacts
 *.parquet
 *.db
 __pycache__/
 .ipynb_checkpoints/
+.pytest_cache/
