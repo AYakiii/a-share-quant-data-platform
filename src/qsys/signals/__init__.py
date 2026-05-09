@@ -1,7 +1,12 @@
 """Signal Engine v1 interfaces."""
 
 from qsys.signals.combine import linear_combine
-from qsys.signals.engine import SignalEngine, demo_alpha_signal, load_feature_store_frame
+from qsys.signals.engine import (
+    SignalEngine,
+    baseline_momentum_signal,
+    demo_alpha_signal,
+    load_feature_store_frame,
+)
 from qsys.signals.transforms import (
     neutralize_by_group,
     neutralize_by_size,
@@ -13,6 +18,7 @@ from qsys.signals.transforms import (
 __all__ = [
     "SignalEngine",
     "load_feature_store_frame",
+    "baseline_momentum_signal",
     "demo_alpha_signal",
     "linear_combine",
     "winsorize_cross_section",
