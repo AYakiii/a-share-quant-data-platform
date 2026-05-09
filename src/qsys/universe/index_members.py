@@ -1,4 +1,4 @@
-"""Index constituent snapshot loaders for point-in-time universe usage."""
+"""Point-in-time index member snapshot loaders."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def load_index_member_snapshots(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> pd.DataFrame:
-    """Load saved index-member snapshots from parquet partitions."""
+    """Load saved index member snapshots from parquet partitions."""
 
     base = Path(root) / f"index_name={index_name}"
     files = sorted(base.glob("year=*/data.parquet"))
@@ -24,17 +24,17 @@ def load_index_member_snapshots(
 
     frames = [pd.read_parquet(fp) for fp in files]
     out = pd.concat(frames, ignore_index=True)
-    for c in STANDARD_COLUMNS:
-        if c not in out.columns:
-            out[c] = pd.NA
+    for col in STANDARD_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
     out["snapshot_date"] = pd.to_datetime(out["snapshot_date"], errors="coerce")
+    if start_date:
+        out = out[out["snapshot_date"] >= pd.Timestamp(start_date)]
+    if end_date:
+        out = out[out["snapshot_date"] <= pd.Timestamp(end_date)]
 
-    if start_date is not None:
-        out = out[out["snapshot_date"] >= pd.to_datetime(start_date)]
-    if end_date is not None:
-        out = out[out["snapshot_date"] <= pd.to_datetime(end_date)]
-
-    return out[STANDARD_COLUMNS].sort_values(["snapshot_date", "asset"], kind="mergesort").reset_index(drop=True)
+    return out[STANDARD_COLUMNS].sort_values(["snapshot_date", "asset"]).reset_index(drop=True)
 
 
 def load_index_members_asof(
@@ -42,14 +42,14 @@ def load_index_members_asof(
     as_of_date: str,
     index_name: str = "csi500",
 ) -> pd.DataFrame:
-    """Load the latest snapshot not later than as_of_date (no look-ahead)."""
+    """Load the latest snapshot not later than ``as_of_date``."""
 
-    df = load_index_member_snapshots(root=root, index_name=index_name)
-    cutoff = pd.to_datetime(as_of_date)
-    eligible = df[df["snapshot_date"] <= cutoff]
+    snaps = load_index_member_snapshots(root=root, index_name=index_name)
+    asof = pd.Timestamp(as_of_date)
+    eligible = snaps[snaps["snapshot_date"] <= asof]
     if eligible.empty:
-        raise ValueError(f"No snapshot available on or before as_of_date={as_of_date}")
+        raise ValueError(f"No snapshot found on/before as_of_date={as_of_date}")
 
     latest = eligible["snapshot_date"].max()
     out = eligible[eligible["snapshot_date"] == latest].copy()
-    return out.sort_values("asset", kind="mergesort").reset_index(drop=True)
+    return out.sort_values("asset").reset_index(drop=True)
