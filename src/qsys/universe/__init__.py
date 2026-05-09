@@ -7,6 +7,7 @@ from qsys.universe.csindex import (
     normalize_component_codes,
     to_ak_symbol,
 )
+from qsys.universe.index_members import load_index_member_snapshots, load_index_members_asof
 
 __all__ = [
     "build_eligibility_mask",
@@ -15,4 +16,6 @@ __all__ = [
     "normalize_component_codes",
     "to_ak_symbol",
     "build_universe_sample",
+    "load_index_member_snapshots",
+    "load_index_members_asof",
 ]

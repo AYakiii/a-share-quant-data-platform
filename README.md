@@ -246,6 +246,19 @@ Broader research sample (`n=300` or `n=500`):
       --output-dir data/universe \
       --name csi_large
 
+## CSI500 历史成分快照（BaoStock）
+
+构建命令示例：
+
+    PYTHONPATH=src python -m qsys.utils.build_baostock_index_members \
+      --start-date 2018-01-01 \
+      --end-date 2025-12-31 \
+      --output-root data/raw/index_constituents/baostock \
+      --freq ME
+
+该数据层用于 point-in-time CSI500 universe。后续回测应使用
+`load_index_members_asof(as_of_date=...)` 获取不晚于回测日期的最近一期快照，避免未来函数。
+
 ---
 
 ## Legacy Notebook
