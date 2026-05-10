@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from qsys.backtest.simulator import BacktestConfig, run_backtest_from_signal
+from qsys.rebalance.benchmarks import build_equal_weight_benchmark
 from qsys.reporting import write_run_manifest, write_warnings
 from qsys.signals.engine import load_feature_store_frame
 
@@ -30,6 +31,28 @@ def _compute_summary_from_returns(returns: pd.Series) -> dict[str, float]:
     vol = float(r.std(ddof=0) * math.sqrt(252.0))
     sharpe = float(ann / vol) if vol > 0 else float("nan")
     return {"total_return": total, "annualized_return": ann, "annualized_vol": vol, "sharpe": sharpe}
+
+
+def _compute_benchmark_comparison(
+    strategy_returns: pd.Series,
+    benchmark_returns: pd.Series,
+) -> dict[str, float]:
+    aligned = pd.concat(
+        [
+            pd.to_numeric(strategy_returns, errors="coerce").rename("strategy"),
+            pd.to_numeric(benchmark_returns, errors="coerce").rename("benchmark"),
+        ],
+        axis=1,
+    ).dropna()
+    if aligned.empty:
+        return {"excess_return": float("nan"), "return_correlation": float("nan"), "active_return_volatility": float("nan")}
+
+    active = aligned["strategy"] - aligned["benchmark"]
+    return {
+        "excess_return": float((1.0 + aligned["strategy"]).prod() - (1.0 + aligned["benchmark"]).prod()),
+        "return_correlation": float(aligned["strategy"].corr(aligned["benchmark"])),
+        "active_return_volatility": float(active.std(ddof=0) * math.sqrt(252.0)),
+    }
 
 
 def run_baseline_portfolio_backtest(
@@ -68,9 +91,13 @@ def run_baseline_portfolio_backtest(
     summary_rows: list[dict[str, object]] = []
     daily_rows: list[dict[str, object]] = []
     turnover_rows: list[dict[str, object]] = []
+    benchmark_rows: list[dict[str, object]] = []
+    benchmark_daily_rows: list[dict[str, object]] = []
 
+    returns_df = features[["ret_1d"]].copy()
     for signal_name, sig in signals.items():
         for cost_bps in costs:
+            strategy_name = f"{signal_name}_top{top_n}_{rebalance}"
             cfg = BacktestConfig(
                 top_n=int(top_n),
                 long_only=True,
@@ -83,7 +110,6 @@ def run_baseline_portfolio_backtest(
             ret_series = pd.to_numeric(res["returns"], errors="coerce").dropna().sort_index()
             calc = _compute_summary_from_returns(ret_series)
 
-            strategy_name = f"{signal_name}_top{top_n}_{rebalance}"
             summary_rows.append(
                 {
                     "strategy_name": strategy_name,
@@ -123,16 +149,59 @@ def run_baseline_portfolio_backtest(
             )
             turnover_rows.extend(t.to_dict(orient="records"))
 
+            bench = build_equal_weight_benchmark(
+                returns_df=returns_df,
+                rebalance=rebalance,
+                return_col="ret_1d",
+                cost_bps=float(cost_bps),
+            )
+            bench_ret = pd.to_numeric(bench["daily_returns"]["net_return"], errors="coerce").rename("benchmark_return")
+            rel = _compute_benchmark_comparison(ret_series, bench_ret)
+            bench_sum = bench["summary"]
+            benchmark_rows.append(
+                {
+                    "strategy_name": strategy_name,
+                    "signal_name": signal_name,
+                    "cost_bps": float(cost_bps),
+                    "benchmark_name": "equal_weight",
+                    "total_return": calc["total_return"],
+                    "annualized_return": calc["annualized_return"],
+                    "annualized_vol": calc["annualized_vol"],
+                    "sharpe": calc["sharpe"],
+                    "max_drawdown": summary.get("max_drawdown"),
+                    "benchmark_total_return": bench_sum["total_return"],
+                    "benchmark_annualized_return": bench_sum["annualized_return"],
+                    "benchmark_annualized_vol": bench_sum["annualized_vol"],
+                    "benchmark_sharpe": bench_sum["sharpe"],
+                    "benchmark_max_drawdown": bench_sum["max_drawdown"],
+                    "excess_return": rel["excess_return"],
+                    "return_correlation": rel["return_correlation"],
+                    "active_return_volatility": rel["active_return_volatility"],
+                }
+            )
+
+            br = bench["daily_returns"].reset_index()[["date", "net_return"]].rename(columns={"net_return": "benchmark_return"})
+            br["strategy_name"] = strategy_name
+            br["cost_bps"] = float(cost_bps)
+            br["benchmark_name"] = "equal_weight"
+            benchmark_daily_rows.extend(br.to_dict(orient="records"))
+
     summary_df = pd.DataFrame(summary_rows)
     daily_df = pd.DataFrame(daily_rows)
     turnover_df = pd.DataFrame(turnover_rows)
+    benchmark_df = pd.DataFrame(benchmark_rows)
+    benchmark_daily_df = pd.DataFrame(benchmark_daily_rows)
 
     summary_fp = out / "portfolio_summary.csv"
     daily_fp = out / "daily_returns.csv"
     turnover_fp = out / "turnover.csv"
+    benchmark_fp = out / "benchmark_comparison.csv"
+    benchmark_daily_fp = out / "benchmark_daily_returns.csv"
     summary_df.to_csv(summary_fp, index=False)
     daily_df.to_csv(daily_fp, index=False)
     turnover_df.to_csv(turnover_fp, index=False)
+    benchmark_df.to_csv(benchmark_fp, index=False)
+    benchmark_daily_df.to_csv(benchmark_daily_fp, index=False)
 
     manifest = {
         "run_id": out.name,
@@ -144,7 +213,7 @@ def run_baseline_portfolio_backtest(
         "execution_assumption": "next_close_realized_returns",
         "cost_model": "turnover_times_bps",
         "benchmark": ["optional_equal_weight"],
-        "diagnostics_requested": ["portfolio_summary", "daily_returns", "turnover"],
+        "diagnostics_requested": ["portfolio_summary", "daily_returns", "turnover", "benchmark_comparison", "benchmark_daily_returns"],
         "known_limitations": [
             "portfolio-level validation only",
             "simplified turnover cost model",
@@ -159,6 +228,8 @@ def run_baseline_portfolio_backtest(
         "portfolio_summary": summary_fp,
         "daily_returns": daily_fp,
         "turnover": turnover_fp,
+        "benchmark_comparison": benchmark_fp,
+        "benchmark_daily_returns": benchmark_daily_fp,
         "run_manifest": manifest_fp,
         "warnings": warnings_fp,
     }
