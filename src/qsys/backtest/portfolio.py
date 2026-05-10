@@ -87,10 +87,11 @@ def build_top_n_portfolio(
 
         # liquidity filter (same-date only)
         if liquidity is not None and min_liquidity is not None:
-            liq_full = liquidity[liquidity.index.get_level_values("date") == date]
-            liq_g = liq_full.droplevel("date") if len(liq_full) else pd.Series(dtype=float)
-            keep_assets = liq_g[liq_g >= float(min_liquidity)].index
-            g = g[g.droplevel("date").isin(keep_assets)]
+            # Reindex directly on the same MultiIndex to avoid date/asset alignment bugs.
+            liq_g = liquidity.reindex(group.index)
+            keep = pd.to_numeric(liq_g, errors="coerce") >= float(min_liquidity)
+            keep = keep.fillna(False)
+            g = g[keep]
 
         if g.empty:
             return pd.Series(0.0, index=group.index)
