@@ -30,9 +30,11 @@ def _rebalance_dates(dates: pd.Index, rebalance: str) -> set[pd.Timestamp]:
     if rebalance == "daily":
         return set(dt)
     if rebalance == "weekly":
-        return set(pd.Series(dt, index=dt).groupby(dt.to_period("W")).head(1).index)
+        # Use period-end available date, consistent with qsys.rebalance.backtest.
+        return set(pd.Series(dt, index=dt).groupby(dt.to_period("W")).tail(1).index)
     if rebalance == "monthly":
-        return set(pd.Series(dt, index=dt).groupby(dt.to_period("M")).head(1).index)
+        # Use period-end available date, consistent with qsys.rebalance.backtest.
+        return set(pd.Series(dt, index=dt).groupby(dt.to_period("M")).tail(1).index)
     raise ValueError("rebalance must be one of {'daily', 'weekly', 'monthly'}")
 
 
