@@ -1,0 +1,32 @@
+{
+  "benchmark": [],
+  "code_commit": null,
+  "cost_model": null,
+  "created_at": "2026-05-08T17:29:01.976775+00:00",
+  "data_range": {
+    "end": null,
+    "start": null
+  },
+  "data_source_type": "synthetic",
+  "diagnostics_requested": [
+    "rank_ic",
+    "quantile_spread"
+  ],
+  "execution_assumption": "signal_quality_only_no_execution",
+  "feature_root": "data/processed/feature_store/v1",
+  "is_synthetic": true,
+  "known_limitations": [
+    "no_volatility_penalty_variants",
+    "no_ml_models",
+    "no_risk_optimizer"
+  ],
+  "portfolio_rule": null,
+  "rebalance_rule": null,
+  "research_evidence": false,
+  "run_id": "baseline_candidate_suite",
+  "signal_recipe": "rank_based_baseline_candidates_only",
+  "universe": "from_feature_store",
+  "warnings": [
+    "This run uses synthetic/sample feature-store data. Results are for pipeline validation only, not tradable-alpha evidence."
+  ]
+}
