@@ -72,3 +72,17 @@ def test_runner_include_momentum_adds_signal(tmp_path, monkeypatch) -> None:
     )
     summary = pd.read_csv(saved["portfolio_summary"])
     assert "ret_20d_momentum" in set(summary["signal_name"])
+
+
+def test_runner_with_pit_universe_enabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(mod, "load_feature_store_frame", lambda feature_root: _sample_features())
+    monkeypatch.setattr(mod, "apply_pit_index_universe_mask", lambda features, **kwargs: features.iloc[: len(features) // 2])
+
+    saved = mod.run_baseline_portfolio_backtest(
+        feature_root="ignored",
+        output_dir=str(tmp_path),
+        use_pit_universe=True,
+        universe_root="ignored_universe_root",
+        index_name="csi500",
+    )
+    assert saved["benchmark_comparison"].exists()

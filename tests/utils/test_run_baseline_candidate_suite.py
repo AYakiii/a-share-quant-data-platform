@@ -126,3 +126,16 @@ def test_runner_cli_real_conflict_with_synthetic_metadata_is_safe(tmp_path, monk
     assert manifest["research_evidence"] is False
     text = (tmp_path / "out" / "warnings.md").read_text(encoding="utf-8")
     assert "Conflict detected" in text
+
+
+def test_runner_with_pit_universe_enabled(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(suite, "load_feature_store_frame", lambda **_: _sample_features())
+    monkeypatch.setattr(suite, "apply_pit_index_universe_mask", lambda features, **kwargs: features.iloc[:4])
+    fp = suite.run_baseline_candidate_suite(
+        feature_root="ignored",
+        output_dir=str(tmp_path),
+        quantiles=3,
+        use_pit_universe=True,
+        universe_root="ignored_universe_root",
+    )
+    assert fp.exists()

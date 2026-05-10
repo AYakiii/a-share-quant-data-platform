@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from qsys.universe.baostock import fetch_csi500_members, normalize_baostock_code
-from qsys.universe.index_members import load_index_member_snapshots, load_index_members_asof
+from qsys.universe.index_members import apply_pit_index_universe_mask, load_index_member_snapshots, load_index_members_asof
 
 
 def test_normalize_baostock_code() -> None:
@@ -79,3 +79,40 @@ def test_load_index_members_asof_no_lookahead(tmp_path) -> None:
 def test_load_index_member_snapshots_missing_path(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         load_index_member_snapshots(root=tmp_path / "missing")
+
+
+def test_apply_pit_index_universe_mask_filters_by_asof_snapshot(tmp_path) -> None:
+    base = tmp_path / "index_constituents" / "baostock" / "index_name=csi500" / "year=2024"
+    base.mkdir(parents=True, exist_ok=True)
+    snaps = pd.DataFrame(
+        {
+            "index_name": ["csi500", "csi500", "csi500", "csi500"],
+            "index_code": ["000905.SH"] * 4,
+            "snapshot_date": pd.to_datetime(["2024-01-31", "2024-01-31", "2024-02-29", "2024-02-29"]),
+            "asset": ["A", "B", "B", "C"],
+            "asset_name": ["a", "b", "b", "c"],
+            "is_member": [1, 1, 1, 1],
+            "source": ["baostock"] * 4,
+            "ingested_at": [pd.Timestamp("2024-03-01", tz="UTC")] * 4,
+        }
+    )
+    snaps.to_parquet(base / "data.parquet", index=False)
+
+    idx = pd.MultiIndex.from_tuples(
+        [
+            (pd.Timestamp("2024-02-15"), "A"),
+            (pd.Timestamp("2024-02-15"), "B"),
+            (pd.Timestamp("2024-02-15"), "C"),
+            (pd.Timestamp("2024-03-05"), "A"),
+            (pd.Timestamp("2024-03-05"), "B"),
+            (pd.Timestamp("2024-03-05"), "C"),
+        ],
+        names=["date", "asset"],
+    )
+    features = pd.DataFrame({"x": [1, 2, 3, 4, 5, 6]}, index=idx)
+
+    out = apply_pit_index_universe_mask(features, universe_root=tmp_path / "index_constituents" / "baostock")
+    kept = set(out.index.tolist())
+    assert (pd.Timestamp("2024-02-15"), "C") not in kept
+    assert (pd.Timestamp("2024-03-05"), "A") not in kept
+    assert (pd.Timestamp("2024-03-05"), "C") in kept

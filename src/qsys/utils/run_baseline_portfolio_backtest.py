@@ -12,6 +12,7 @@ from qsys.backtest.simulator import BacktestConfig, run_backtest_from_signal
 from qsys.rebalance.benchmarks import build_equal_weight_benchmark
 from qsys.reporting import write_run_manifest, write_warnings
 from qsys.signals.engine import load_feature_store_frame
+from qsys.universe.index_members import apply_pit_index_universe_mask
 
 
 def _rank_signal(features: pd.DataFrame, col: str, sign: float) -> pd.Series:
@@ -63,11 +64,18 @@ def run_baseline_portfolio_backtest(
     rebalance: str = "weekly",
     cost_bps_list: list[float] | None = None,
     include_momentum_comparison: bool = False,
+    universe_root: str | None = None,
+    index_name: str = "csi500",
+    use_pit_universe: bool = False,
 ) -> dict[str, Path]:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     features = load_feature_store_frame(feature_root=feature_root)
+    if use_pit_universe:
+        if not universe_root:
+            raise ValueError("universe_root is required when use_pit_universe=True")
+        features = apply_pit_index_universe_mask(features, universe_root=universe_root, index_name=index_name)
     warnings: list[str] = []
 
     missing = [c for c in ["ret_5d", "ret_20d"] if c not in features.columns]
@@ -243,6 +251,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rebalance", choices=["daily", "weekly", "monthly"], default="weekly")
     p.add_argument("--cost-bps", nargs="+", type=float, default=[5.0, 10.0])
     p.add_argument("--include-momentum-comparison", action="store_true")
+    p.add_argument("--universe-root", default=None)
+    p.add_argument("--index-name", default="csi500")
+    p.add_argument("--use-pit-universe", action="store_true")
     return p.parse_args()
 
 
@@ -255,6 +266,9 @@ def main() -> None:
         rebalance=args.rebalance,
         cost_bps_list=args.cost_bps,
         include_momentum_comparison=args.include_momentum_comparison,
+        universe_root=args.universe_root,
+        index_name=args.index_name,
+        use_pit_universe=args.use_pit_universe,
     )
     print(saved)
 
