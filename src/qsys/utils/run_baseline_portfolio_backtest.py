@@ -1,0 +1,175 @@
+"""Run portfolio-level backtests for baseline signals."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+from qsys.backtest.simulator import BacktestConfig, run_backtest_from_signal
+from qsys.reporting import write_run_manifest, write_warnings
+from qsys.signals.engine import load_feature_store_frame
+
+
+def _rank_signal(features: pd.DataFrame, col: str, sign: float) -> pd.Series:
+    s = pd.to_numeric(features[col], errors="coerce") * float(sign)
+    return s.groupby(level="date").rank(pct=True).rename(col)
+
+
+def run_baseline_portfolio_backtest(
+    *,
+    feature_root: str,
+    output_dir: str,
+    top_n: int = 50,
+    rebalance: str = "weekly",
+    cost_bps_list: list[float] | None = None,
+    include_momentum_comparison: bool = False,
+) -> dict[str, Path]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    features = load_feature_store_frame(feature_root=feature_root)
+    warnings: list[str] = []
+
+    missing = [c for c in ["ret_5d", "ret_20d"] if c not in features.columns]
+    if missing:
+        raise KeyError(f"required baseline feature columns missing: {missing}")
+
+    signals: dict[str, pd.Series] = {
+        "ret_20d_reversal": _rank_signal(features, "ret_20d", sign=-1.0),
+        "ret_5d_reversal": _rank_signal(features, "ret_5d", sign=-1.0),
+    }
+    if include_momentum_comparison:
+        signals["ret_20d_momentum"] = _rank_signal(features, "ret_20d", sign=1.0)
+
+    if "ret_1d" not in features.columns:
+        warnings.append("feature store missing ret_1d required for portfolio return simulation")
+        raise KeyError("feature store missing ret_1d required for portfolio return simulation")
+
+    asset_returns = pd.to_numeric(features["ret_1d"], errors="coerce").rename("ret_1d")
+
+    costs = cost_bps_list if cost_bps_list is not None else [5.0, 10.0]
+    summary_rows: list[dict[str, object]] = []
+    daily_rows: list[dict[str, object]] = []
+    turnover_rows: list[dict[str, object]] = []
+
+    for signal_name, sig in signals.items():
+        for cost_bps in costs:
+            cfg = BacktestConfig(
+                top_n=int(top_n),
+                long_only=True,
+                rebalance=rebalance,
+                transaction_cost_bps=float(cost_bps),
+                slippage_bps=0.0,
+            )
+            res = run_backtest_from_signal(sig, asset_returns, config=cfg)
+            summary = dict(res["summary"])
+
+            strategy_name = f"{signal_name}_top{top_n}_{rebalance}"
+            summary_rows.append(
+                {
+                    "strategy_name": strategy_name,
+                    "signal_name": signal_name,
+                    "cost_bps": float(cost_bps),
+                    "total_return": summary.get("total_return"),
+                    "annualized_return": summary.get("annualized_return"),
+                    "annualized_vol": summary.get("annualized_vol"),
+                    "sharpe": summary.get("sharpe"),
+                    "max_drawdown": summary.get("max_drawdown"),
+                    "average_turnover": summary.get("turnover"),
+                    "total_cost": float(res["cost"].sum()) if "cost" in res else None,
+                    "n_rebalance_dates": int(res["turnover"].shape[0]) if "turnover" in res else None,
+                    "notes": "cost model: turnover × bps",
+                }
+            )
+
+            r = pd.DataFrame(
+                {
+                    "date": pd.to_datetime(res["returns"].index),
+                    "strategy_name": strategy_name,
+                    "cost_bps": float(cost_bps),
+                    "strategy_return": pd.to_numeric(res["returns"], errors="coerce").values,
+                    "gross_return": pd.to_numeric(res["gross_returns"].reindex(res["returns"].index), errors="coerce").values,
+                    "cost": pd.to_numeric(res["cost"].reindex(res["returns"].index), errors="coerce").values,
+                }
+            )
+            daily_rows.extend(r.to_dict(orient="records"))
+
+            t = pd.DataFrame(
+                {
+                    "date": pd.to_datetime(res["turnover"].index),
+                    "strategy_name": strategy_name,
+                    "cost_bps": float(cost_bps),
+                    "turnover": pd.to_numeric(res["turnover"], errors="coerce").values,
+                }
+            )
+            turnover_rows.extend(t.to_dict(orient="records"))
+
+    summary_df = pd.DataFrame(summary_rows)
+    daily_df = pd.DataFrame(daily_rows)
+    turnover_df = pd.DataFrame(turnover_rows)
+
+    summary_fp = out / "portfolio_summary.csv"
+    daily_fp = out / "daily_returns.csv"
+    turnover_fp = out / "turnover.csv"
+    summary_df.to_csv(summary_fp, index=False)
+    daily_df.to_csv(daily_fp, index=False)
+    turnover_df.to_csv(turnover_fp, index=False)
+
+    manifest = {
+        "run_id": out.name,
+        "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "feature_root": feature_root,
+        "signal_recipe": list(signals.keys()),
+        "portfolio_rule": f"long_only_top_n_{top_n}",
+        "rebalance_rule": rebalance,
+        "execution_assumption": "next_close_realized_returns",
+        "cost_model": "turnover_times_bps",
+        "benchmark": ["optional_equal_weight"],
+        "diagnostics_requested": ["portfolio_summary", "daily_returns", "turnover"],
+        "known_limitations": [
+            "portfolio-level validation only",
+            "simplified turnover cost model",
+            "no risk optimizer",
+        ],
+        "warnings": warnings,
+    }
+    manifest_fp = write_run_manifest(out, manifest)
+    warnings_fp = write_warnings(out, warnings)
+
+    return {
+        "portfolio_summary": summary_fp,
+        "daily_returns": daily_fp,
+        "turnover": turnover_fp,
+        "run_manifest": manifest_fp,
+        "warnings": warnings_fp,
+    }
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Run baseline portfolio-level backtest")
+    p.add_argument("--feature-root", required=True)
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--top-n", type=int, default=50)
+    p.add_argument("--rebalance", choices=["daily", "weekly", "monthly"], default="weekly")
+    p.add_argument("--cost-bps", nargs="+", type=float, default=[5.0, 10.0])
+    p.add_argument("--include-momentum-comparison", action="store_true")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    saved = run_baseline_portfolio_backtest(
+        feature_root=args.feature_root,
+        output_dir=args.output_dir,
+        top_n=args.top_n,
+        rebalance=args.rebalance,
+        cost_bps_list=args.cost_bps,
+        include_momentum_comparison=args.include_momentum_comparison,
+    )
+    print(saved)
+
+
+if __name__ == "__main__":
+    main()

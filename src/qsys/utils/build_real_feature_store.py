@@ -164,6 +164,7 @@ def build_real_feature_store(
     retry_wait: float = 1.0,
     request_sleep: float = 0.1,
     limit: int | None = None,
+    skip_failed_symbols: bool = False,
 ) -> Path:
     """Fetch A-share daily bars from AkShare and write Feature Store v1 partitions."""
 
@@ -172,8 +173,16 @@ def build_real_feature_store(
         raise ValueError("No symbols provided or discovered")
 
     frames: list[pd.DataFrame] = []
+    failed: list[dict[str, str]] = []
+    fetched = 0
     for idx, symbol in enumerate(target_symbols, start=1):
-        raw = _safe_fetch_daily(symbol=symbol, retries=retries, retry_wait=retry_wait)
+        try:
+            raw = _safe_fetch_daily(symbol=symbol, retries=retries, retry_wait=retry_wait)
+        except Exception as exc:
+            if skip_failed_symbols:
+                failed.append({"symbol": symbol, "error": str(exc)})
+                continue
+            raise
         if raw.empty:
             continue
         norm = _normalize_daily_frame(raw, symbol)
@@ -183,6 +192,7 @@ def build_real_feature_store(
             norm = norm[norm["trade_date"] <= end_date]
         if not norm.empty:
             frames.append(norm)
+            fetched += 1
         if request_sleep > 0:
             time.sleep(request_sleep)
         if idx % 100 == 0:
@@ -202,6 +212,12 @@ def build_real_feature_store(
         part_dir.mkdir(parents=True, exist_ok=True)
         group.to_parquet(part_dir / "data.parquet", index=False)
 
+    if skip_failed_symbols:
+        failed_fp = root / "failed_symbols.csv"
+        pd.DataFrame(failed, columns=["symbol", "error"]).to_csv(failed_fp, index=False)
+        print(f"Fetched {fetched}/{len(target_symbols)} symbols")
+        print(f"Failed {len(failed)}/{len(target_symbols)} symbols")
+
     return root
 
 
@@ -219,6 +235,7 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-wait", type=float, default=1.0)
     parser.add_argument("--request-sleep", type=float, default=0.1)
+    parser.add_argument("--skip-failed-symbols", action="store_true")
     args = parser.parse_args()
 
     root = build_real_feature_store(
@@ -230,6 +247,7 @@ def main() -> None:
         retry_wait=args.retry_wait,
         request_sleep=args.request_sleep,
         limit=args.limit,
+        skip_failed_symbols=args.skip_failed_symbols,
     )
     print(f"Feature store built at: {root}")
 

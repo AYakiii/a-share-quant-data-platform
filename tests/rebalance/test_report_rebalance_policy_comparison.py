@@ -146,7 +146,14 @@ def test_missing_equal_weight_row_returns_nan_equal_metrics() -> None:
 def test_generate_report_writes_outputs(tmp_path) -> None:
     _write_minimal_outputs(tmp_path, include_equal=True)
     saved = generate_report(tmp_path)
-    assert set(saved.keys()) == {"summary_metrics", "policy_diff_metrics", "cumulative_net_return_plot", "turnover_plot"}
+    assert set(saved.keys()) == {
+        "summary_metrics",
+        "policy_diff_metrics",
+        "cumulative_net_return_plot",
+        "turnover_plot",
+        "run_manifest",
+        "warnings",
+    }
     for p in saved.values():
         assert p.exists()
         assert p.stat().st_size > 0
