@@ -5,4 +5,5 @@ fastparquet>=2024.5.0
 scipy>=1.13
 pytest>=8.0
 akshare>=1.13
+baostock
 SQLAlchemy>=2.0
