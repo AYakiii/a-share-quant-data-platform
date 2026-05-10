@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +16,20 @@ from qsys.signals.engine import load_feature_store_frame
 def _rank_signal(features: pd.DataFrame, col: str, sign: float) -> pd.Series:
     s = pd.to_numeric(features[col], errors="coerce") * float(sign)
     return s.groupby(level="date").rank(pct=True).rename(col)
+
+
+def _compute_summary_from_returns(returns: pd.Series) -> dict[str, float]:
+    r = pd.to_numeric(returns, errors="coerce").dropna()
+    r = r.sort_index()
+    n = len(r)
+    if n == 0:
+        return {"total_return": float("nan"), "annualized_return": float("nan"), "annualized_vol": float("nan"), "sharpe": float("nan")}
+
+    total = float((1.0 + r).prod() - 1.0)
+    ann = float((1.0 + total) ** (252.0 / n) - 1.0)
+    vol = float(r.std(ddof=0) * math.sqrt(252.0))
+    sharpe = float(ann / vol) if vol > 0 else float("nan")
+    return {"total_return": total, "annualized_return": ann, "annualized_vol": vol, "sharpe": sharpe}
 
 
 def run_baseline_portfolio_backtest(
@@ -65,6 +80,8 @@ def run_baseline_portfolio_backtest(
             )
             res = run_backtest_from_signal(sig, asset_returns, config=cfg)
             summary = dict(res["summary"])
+            ret_series = pd.to_numeric(res["returns"], errors="coerce").dropna().sort_index()
+            calc = _compute_summary_from_returns(ret_series)
 
             strategy_name = f"{signal_name}_top{top_n}_{rebalance}"
             summary_rows.append(
@@ -72,10 +89,10 @@ def run_baseline_portfolio_backtest(
                     "strategy_name": strategy_name,
                     "signal_name": signal_name,
                     "cost_bps": float(cost_bps),
-                    "total_return": summary.get("total_return"),
-                    "annualized_return": summary.get("annualized_return"),
-                    "annualized_vol": summary.get("annualized_vol"),
-                    "sharpe": summary.get("sharpe"),
+                    "total_return": calc["total_return"],
+                    "annualized_return": calc["annualized_return"],
+                    "annualized_vol": calc["annualized_vol"],
+                    "sharpe": calc["sharpe"],
                     "max_drawdown": summary.get("max_drawdown"),
                     "average_turnover": summary.get("turnover"),
                     "total_cost": float(res["cost"].sum()) if "cost" in res else None,
