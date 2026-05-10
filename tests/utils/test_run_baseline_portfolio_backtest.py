@@ -36,7 +36,15 @@ def test_runner_writes_outputs_and_summary_fields(tmp_path, monkeypatch) -> None
         include_momentum_comparison=False,
     )
 
-    for key in ["portfolio_summary", "daily_returns", "turnover", "run_manifest", "warnings"]:
+    for key in [
+        "portfolio_summary",
+        "daily_returns",
+        "turnover",
+        "benchmark_comparison",
+        "benchmark_daily_returns",
+        "run_manifest",
+        "warnings",
+    ]:
         assert key in saved
         assert saved[key].exists()
 
@@ -46,6 +54,12 @@ def test_runner_writes_outputs_and_summary_fields(tmp_path, monkeypatch) -> None
 
     manifest = json.loads(saved["run_manifest"].read_text(encoding="utf-8"))
     assert manifest["portfolio_rule"] == "long_only_top_n_50"
+
+    benchmark = pd.read_csv(saved["benchmark_comparison"])
+    assert "equal_weight" in set(benchmark["benchmark_name"])
+    assert {"excess_return", "return_correlation", "active_return_volatility"}.issubset(set(benchmark.columns))
+    core = benchmark[["total_return", "annualized_return", "annualized_vol", "sharpe", "excess_return"]]
+    assert core.notna().all().all()
 
 
 def test_runner_include_momentum_adds_signal(tmp_path, monkeypatch) -> None:
