@@ -79,13 +79,6 @@ def _fetch_symbol_universe(limit: int | None = None) -> list[str]:
     return symbols
 
 
-def _to_hist_symbol(symbol: str) -> str:
-    s = str(symbol).strip().lower()
-    if len(s) >= 8 and s[:2] in {"sh", "sz", "bj"}:
-        return s[2:8]
-    return s
-
-
 def _safe_fetch_daily(symbol: str, retries: int, retry_wait: float) -> pd.DataFrame:
     import akshare as ak
 
@@ -93,18 +86,9 @@ def _safe_fetch_daily(symbol: str, retries: int, retry_wait: float) -> pd.DataFr
     for attempt in range(1, retries + 1):
         try:
             df = ak.stock_zh_a_daily(symbol=symbol, adjust="")
-            if df is not None and not df.empty:
-                return df
-
-            hist_symbol = _to_hist_symbol(symbol)
-            try:
-                hist = ak.stock_zh_a_hist(symbol=hist_symbol, period="daily", adjust="")
-            except TypeError:
-                hist = ak.stock_zh_a_hist(symbol=hist_symbol, period="daily")
-
-            if hist is not None and not hist.empty:
-                return hist
-            return pd.DataFrame()
+            if df is None or df.empty:
+                return pd.DataFrame()
+            return df
         except Exception as exc:  # pragma: no cover - network/runtime dependent
             last_error = exc
             if attempt < retries:
@@ -118,14 +102,6 @@ def _normalize_daily_frame(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
     rename_map = {
         "date": "trade_date",
         "日期": "trade_date",
-        "开盘": "open",
-        "最高": "high",
-        "最低": "low",
-        "收盘": "close",
-        "成交量": "volume",
-        "成交额": "amount",
-        "换手率": "turnover",
-        "代码": "ts_code",
         "code": "ts_code",
         "股票代码": "ts_code",
     }
@@ -136,12 +112,6 @@ def _normalize_daily_frame(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
     if "ts_code" not in df.columns:
         df["ts_code"] = _ak_spot_to_ts_code(symbol)
-    else:
-        ts = df["ts_code"].astype(str).str.strip()
-        if not ts.str.contains(r"\.").any():
-            ex = _ak_spot_to_ts_code(symbol).split(".", 1)[1]
-            ts = ts.str.zfill(6) + f".{ex}"
-        df["ts_code"] = ts
 
     df["trade_date"] = pd.to_datetime(df["trade_date"], errors="coerce")
     df = df.dropna(subset=["trade_date"]).sort_values("trade_date")
@@ -195,7 +165,6 @@ def build_real_feature_store(
     request_sleep: float = 0.1,
     limit: int | None = None,
     skip_failed_symbols: bool = False,
-    verbose: bool = False,
 ) -> Path:
     """Fetch A-share daily bars from AkShare and write Feature Store v1 partitions."""
 
@@ -204,76 +173,30 @@ def build_real_feature_store(
         raise ValueError("No symbols provided or discovered")
 
     frames: list[pd.DataFrame] = []
-    skipped: list[tuple[str, str]] = []
-    start_dt = pd.to_datetime(start_date) if start_date else None
-    end_dt = pd.to_datetime(end_date) if end_date else None
-
+    failed: list[dict[str, str]] = []
+    fetched = 0
     for idx, symbol in enumerate(target_symbols, start=1):
         try:
             raw = _safe_fetch_daily(symbol=symbol, retries=retries, retry_wait=retry_wait)
-            if verbose:
-                print(f"[DEBUG] symbol={symbol} raw_shape={raw.shape} raw_cols={list(raw.columns)}")
-                if not raw.empty:
-                    dt_col = "date" if "date" in raw.columns else ("日期" if "日期" in raw.columns else None)
-                    if dt_col:
-                        dt = pd.to_datetime(raw[dt_col], errors="coerce")
-                        if len(dt.dropna()):
-                            print(f"[DEBUG] symbol={symbol} raw_date_min={dt.min()} raw_date_max={dt.max()}")
-
-            if raw.empty:
-                reason = "raw_empty"
-                if skip_failed_symbols:
-                    skipped.append((symbol, reason))
-                    if verbose:
-                        print(f"[WARN] skip symbol={symbol} reason={reason}")
-                    continue
-                raise ValueError(f"No data fetched for symbol {symbol}")
-
-            norm = _normalize_daily_frame(raw, symbol)
-            if verbose:
-                print(f"[DEBUG] symbol={symbol} norm_shape_before_filter={norm.shape}")
-
-            norm_dt = norm.copy()
-            norm_dt["trade_date"] = pd.to_datetime(norm_dt["trade_date"], errors="coerce")
-            norm_dt = norm_dt.dropna(subset=["trade_date"])
-            if start_dt is not None:
-                norm_dt = norm_dt[norm_dt["trade_date"] >= start_dt]
-            if end_dt is not None:
-                norm_dt = norm_dt[norm_dt["trade_date"] <= end_dt]
-            norm = norm_dt.copy()
-            norm["trade_date"] = norm["trade_date"].dt.strftime("%Y-%m-%d")
-
-            if verbose:
-                print(f"[DEBUG] symbol={symbol} norm_shape_after_filter={norm.shape}")
-
-        except Exception as exc:  # pragma: no cover - network/runtime dependent
+        except Exception as exc:
             if skip_failed_symbols:
-                skipped.append((symbol, f"fetch_or_normalize_error:{exc}"))
-                if verbose:
-                    print(f"[WARN] skip symbol={symbol} reason={exc}")
+                failed.append({"symbol": symbol, "error": str(exc)})
                 continue
             raise
-
+        if raw.empty:
+            continue
+        norm = _normalize_daily_frame(raw, symbol)
+        if start_date:
+            norm = norm[norm["trade_date"] >= start_date]
+        if end_date:
+            norm = norm[norm["trade_date"] <= end_date]
         if not norm.empty:
             frames.append(norm)
-        else:
-            reason = "empty_after_date_filter"
-            if skip_failed_symbols:
-                skipped.append((symbol, reason))
-                if verbose:
-                    print(f"[WARN] skip symbol={symbol} reason={reason}")
-            elif verbose:
-                print(f"[WARN] symbol={symbol} produced no rows after date filter")
-
+            fetched += 1
         if request_sleep > 0:
             time.sleep(request_sleep)
         if idx % 100 == 0:
             print(f"Fetched {idx}/{len(target_symbols)} symbols")
-
-    if verbose and skipped:
-        print(f"[INFO] skipped_symbols={len(skipped)}")
-        for sym, reason in skipped[:20]:
-            print(f"[INFO] skipped {sym}: {reason}")
 
     if not frames:
         raise ValueError("No data fetched from AkShare for requested symbols/date range")
@@ -288,6 +211,12 @@ def build_real_feature_store(
         part_dir = root / f"trade_date={trade_date}"
         part_dir.mkdir(parents=True, exist_ok=True)
         group.to_parquet(part_dir / "data.parquet", index=False)
+
+    if skip_failed_symbols:
+        failed_fp = root / "failed_symbols.csv"
+        pd.DataFrame(failed, columns=["symbol", "error"]).to_csv(failed_fp, index=False)
+        print(f"Fetched {fetched}/{len(target_symbols)} symbols")
+        print(f"Failed {len(failed)}/{len(target_symbols)} symbols")
 
     return root
 
@@ -306,8 +235,7 @@ def main() -> None:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-wait", type=float, default=1.0)
     parser.add_argument("--request-sleep", type=float, default=0.1)
-    parser.add_argument("--skip-failed-symbols", action="store_true", help="Skip symbols that fail fetch/normalize")
-    parser.add_argument("--verbose", action="store_true", help="Print per-symbol diagnostics")
+    parser.add_argument("--skip-failed-symbols", action="store_true")
     args = parser.parse_args()
 
     root = build_real_feature_store(
@@ -320,7 +248,6 @@ def main() -> None:
         request_sleep=args.request_sleep,
         limit=args.limit,
         skip_failed_symbols=args.skip_failed_symbols,
-        verbose=args.verbose,
     )
     print(f"Feature store built at: {root}")
 
