@@ -1,0 +1,51 @@
+api_name,source_family,data_type,field_name,field_role,tradable_feature_allowed,lookahead_risk,required_for_panel_alignment,notes
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,日期,date,false,false,true,panel date key
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,股票代码,identifier,false,false,true,panel asset key
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,开盘,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,收盘,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,最高,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,最低,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,成交量,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,成交额,raw_value,true,false,false,raw market value
+stock_zh_a_hist,market_price_volume,stock_daily_ohlcv,换手率,raw_value,true,false,false,raw market value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,日期,date,false,false,true,index date key
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,指数代码,identifier,false,false,true,index key
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,开盘,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,收盘,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,最高,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,最低,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,成交量,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,成交金额,raw_value,true,false,false,raw index value
+stock_zh_index_hist_csindex,market_index_regime,csi_index_history,滚动市盈率,raw_value,true,false,false,raw index value
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,股票代码,identifier,false,false,true,availability identity
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,股票简称,metadata,false,false,false,descriptive only
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,首次预约时间,date,false,false,true,availability time
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,一次变更日期,date,false,false,false,availability time
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,二次变更日期,date,false,false,false,availability time
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,三次变更日期,date,false,false,false,availability time
+stock_yysj_em,fundamental_disclosure,financial_report_disclosure_calendar,实际披露时间,date,false,false,true,PIT-critical disclosure time
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,信用交易日期,date,false,false,true,margin trade date
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,标的证券代码,identifier,false,false,true,security identity
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,标的证券简称,metadata,false,false,false,descriptive only
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融资余额,raw_value,true,false,false,raw margin value
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融资买入额,raw_value,true,false,false,raw margin value
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融资偿还额,raw_value,true,false,false,raw margin value
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融券余量,raw_value,true,false,false,raw margin value
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融券卖出量,raw_value,true,false,false,raw margin value
+stock_margin_detail_sse,margin_leverage,stock_margin_trading_detail,融券偿还量,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,trade_date,date,false,false,true,normalized from input date when raw date absent
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,证券代码,identifier,false,false,true,security identity
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,证券简称,metadata,false,false,false,descriptive only
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融资买入额,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融资余额,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融券卖出量,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融券余量,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融券余额,raw_value,true,false,false,raw margin value
+stock_margin_detail_szse,margin_leverage,stock_margin_trading_detail,融资融券余额,raw_value,true,false,false,raw margin value
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,fwd_ret_5d,post_event_outcome,false,true,false,post-event return label forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,fwd_ret_20d,post_event_outcome,false,true,false,post-event return label forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,解禁后20日涨跌幅,post_event_outcome,false,true,false,post-event outcome forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,上榜后1日,post_event_outcome,false,true,false,post-event outcome forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,上榜后2日,post_event_outcome,false,true,false,post-event outcome forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,上榜后5日,post_event_outcome,false,true,false,post-event outcome forbidden as feature
+GLOBAL_BLACKLIST,safety_contract,field_blacklist,上榜后10日,post_event_outcome,false,true,false,post-event outcome forbidden as feature
