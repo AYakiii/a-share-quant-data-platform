@@ -17,6 +17,7 @@ from qsys.research.signal_quality.quantile import (
     compute_quantile_spread,
 )
 from qsys.signals.engine import load_feature_store_frame
+from qsys.universe.index_members import apply_pit_index_universe_mask
 
 CANDIDATES: dict[str, tuple[str, float]] = {
     "ret_1d_momentum": ("ret_1d", 1.0),
@@ -65,11 +66,18 @@ def run_baseline_candidate_suite(
     min_dates_warning: int = 20,
     min_assets_warning: int = 20,
     data_source_type: str | None = None,
+    universe_root: str | None = None,
+    index_name: str = "csi500",
+    use_pit_universe: bool = False,
 ) -> Path:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     features = load_feature_store_frame(feature_root=feature_root, start_date=start_date, end_date=end_date)
+    if use_pit_universe:
+        if not universe_root:
+            raise ValueError("universe_root is required when use_pit_universe=True")
+        features = apply_pit_index_universe_mask(features, universe_root=universe_root, index_name=index_name)
 
     prov_fp = Path(feature_root) / "_feature_store_provenance.json"
     metadata_source: str | None = None
@@ -196,6 +204,9 @@ def parse_args() -> argparse.Namespace:
         choices=["synthetic", "real", "sample", "unknown"],
         default=None,
     )
+    p.add_argument("--universe-root", default=None)
+    p.add_argument("--index-name", default="csi500")
+    p.add_argument("--use-pit-universe", action="store_true")
     return p.parse_args()
 
 
@@ -208,6 +219,9 @@ def main() -> None:
         end_date=args.end_date,
         quantiles=args.quantiles,
         data_source_type=args.data_source_type,
+        universe_root=args.universe_root,
+        index_name=args.index_name,
+        use_pit_universe=args.use_pit_universe,
     )
     print(fp)
 

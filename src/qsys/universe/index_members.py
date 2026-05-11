@@ -53,3 +53,42 @@ def load_index_members_asof(
     latest = eligible["snapshot_date"].max()
     out = eligible[eligible["snapshot_date"] == latest].copy()
     return out.sort_values("asset").reset_index(drop=True)
+
+
+def apply_pit_index_universe_mask(
+    features: pd.DataFrame,
+    *,
+    universe_root: str | Path,
+    index_name: str = "csi500",
+) -> pd.DataFrame:
+    """Filter feature rows to point-in-time index members per trade date.
+
+    Features must be indexed by MultiIndex ['date', 'asset'].
+    For each trade date, membership uses latest snapshot_date <= trade date.
+    """
+
+    if not isinstance(features.index, pd.MultiIndex) or list(features.index.names) != ["date", "asset"]:
+        raise ValueError("features index must be MultiIndex ['date', 'asset']")
+
+    snaps = load_index_member_snapshots(root=universe_root, index_name=index_name)
+    snaps = snaps[snaps["is_member"] == 1].copy()
+    if snaps.empty:
+        return features.iloc[0:0].copy()
+
+    dates = pd.to_datetime(features.index.get_level_values("date")).unique()
+    mapping_rows: list[dict[str, object]] = []
+    for d in pd.Series(dates).sort_values():
+        eligible = snaps[snaps["snapshot_date"] <= pd.Timestamp(d)]
+        if eligible.empty:
+            continue
+        latest = eligible["snapshot_date"].max()
+        assets = eligible.loc[eligible["snapshot_date"] == latest, "asset"].dropna().astype(str).unique()
+        for a in assets:
+            mapping_rows.append({"date": pd.Timestamp(d), "asset": a})
+
+    if not mapping_rows:
+        return features.iloc[0:0].copy()
+
+    allowed = pd.DataFrame(mapping_rows).drop_duplicates()
+    allowed_idx = pd.MultiIndex.from_frame(allowed[["date", "asset"]], names=["date", "asset"])
+    return features.loc[features.index.intersection(allowed_idx)].sort_index()
