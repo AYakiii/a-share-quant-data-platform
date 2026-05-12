@@ -38,6 +38,7 @@ def test_build_margin_panel_symbols_dedupe_and_outputs(tmp_path, monkeypatch) ->
         output_dir=tmp_path / "art",
         run_name="r1",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
     )
 
     assert out["panel_manifest"].exists()
@@ -72,16 +73,17 @@ def test_build_margin_panel_progress_output(tmp_path, monkeypatch, capsys) -> No
         output_dir=tmp_path / "art",
         run_name="r2",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
         show_progress=True,
         progress_every=1,
     )
     out = capsys.readouterr().out
-    assert "[SSE 1/1] START 20250101" in out
-    assert "[SSE 1/1] FAIL 20250101" in out
-    assert "[SZSE 1/1] START 20250101" in out
-    assert "[SZSE 1/1] OK 20250101" in out
+    assert "[SSE 1/1] FETCH 2025-01-01 START" in out
+    assert "[SSE 1/1] FAIL 2025-01-01" in out
+    assert "[SZSE 1/1] FETCH 2025-01-01 START" in out
+    assert "[SZSE 1/1] OK 2025-01-01" in out
     assert "rows_raw=" in out and "rows_selected=" in out and "total_elapsed=" in out
-    assert out.index("[SZSE 1/1] START 20250101") < out.index("[SZSE 1/1] OK 20250101")
+    assert out.index("[SZSE 1/1] FETCH 2025-01-01 START") < out.index("[SZSE 1/1] OK 2025-01-01")
     assert "Done: fetched=1 failed=1" in out
 
 
@@ -105,11 +107,12 @@ def test_build_margin_panel_progress_every_respected(tmp_path, monkeypatch, caps
         output_dir=tmp_path / "art",
         run_name="r4",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
         show_progress=True,
         progress_every=5,
     )
     out = capsys.readouterr().out
-    assert "[SZSE 1/1] START 20250101" in out
+    assert "[SZSE 1/1] FETCH 2025-01-01 START" in out
 
 
 def test_build_margin_panel_skips_weekends_by_default(tmp_path, monkeypatch) -> None:
@@ -137,6 +140,7 @@ def test_build_margin_panel_skips_weekends_by_default(tmp_path, monkeypatch) -> 
         output_dir=tmp_path / "art",
         run_name="wk1",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
     )
     assert called_dates == ["20250103", "20250106"]
 
@@ -166,6 +170,7 @@ def test_build_margin_panel_include_calendar_days(tmp_path, monkeypatch) -> None
         output_dir=tmp_path / "art",
         run_name="wk2",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
         include_calendar_days=True,
     )
     assert called_dates == ["20250103", "20250104", "20250105", "20250106"]
@@ -190,6 +195,7 @@ def test_build_margin_panel_aggregates_empty_warnings(tmp_path, monkeypatch) -> 
         output_dir=tmp_path / "art",
         run_name="wk3",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
     )
     warnings_text = out["warnings"].read_text(encoding="utf-8")
     assert "SSE empty responses skipped: 2 dates" in warnings_text
@@ -215,6 +221,7 @@ def test_build_margin_panel_no_progress_output_by_default(tmp_path, monkeypatch,
         output_dir=tmp_path / "art",
         run_name="r3",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
     )
     out = capsys.readouterr().out
     assert out == ""
@@ -248,6 +255,7 @@ def test_exchange_date_fetch_called_at_most_once_per_exchange_date(tmp_path, mon
         output_dir=tmp_path / "art",
         run_name="once",
         request_sleep=0,
+        raw_cache_root=tmp_path / "raw",
     )
     assert calls["SSE"] == 1
     assert calls["SZSE"] == 1
