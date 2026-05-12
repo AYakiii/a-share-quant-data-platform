@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import os
 import subprocess
 import sys
 
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from qsys.utils.run_technical_liquidity_real_runner import run_technical_liquidity_real_runner
 
@@ -108,6 +111,6 @@ def test_cli_real_runner_runs(tmp_path) -> None:
         "--run-name",
         "phase18a1",
     ]
-    env = {**os.environ, "PYTHONPATH": "src"}
-    cp = subprocess.run(cmd, cwd="/workspace/a-share-quant-data-platform", env=env, capture_output=True, text=True)
+    env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    cp = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     assert cp.returncode == 0, cp.stderr

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 import sys
 
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from qsys.utils.run_factor_research_smoke import (
     generate_synthetic_labels,
@@ -67,6 +70,6 @@ def test_cli_smoke_runs(tmp_path) -> None:
         "--seed",
         "11",
     ]
-    env = {**__import__("os").environ, "PYTHONPATH": "src"}
-    cp = subprocess.run(cmd, cwd="/workspace/a-share-quant-data-platform", env=env, capture_output=True, text=True)
+    env = {**__import__("os").environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+    cp = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     assert cp.returncode == 0, cp.stderr
