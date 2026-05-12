@@ -75,6 +75,10 @@ def test_real_runner_writes_expected_artifacts(tmp_path) -> None:
     assert manifest["factor_family"] == "technical_liquidity"
     assert "not alpha evidence" in manifest["warning"]
 
+    warnings_text = out["warnings"].read_text(encoding="utf-8")
+    assert "Factor columns with zero coverage:" in warnings_text
+    assert "downside_vol_20d" in warnings_text
+
 
 def test_real_runner_without_labels_skips_ic_and_warns(tmp_path) -> None:
     feature_root = tmp_path / "feature_store"

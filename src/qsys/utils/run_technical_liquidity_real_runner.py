@@ -84,7 +84,26 @@ def run_technical_liquidity_real_runner(
     factors_fp = out_root / "factors.csv"
     summary_fp = out_root / "summary.csv"
     factors.to_csv(factors_fp, encoding="utf-8")
-    summarize_factor_output(factors).to_csv(summary_fp, index=False, encoding="utf-8")
+    summary = summarize_factor_output(factors)
+    summary.to_csv(summary_fp, index=False, encoding="utf-8")
+
+    zero_coverage_cols = summary.loc[summary["coverage"] == 0.0, "factor_name"].astype(str).tolist()
+    if zero_coverage_cols:
+        warnings.append("Factor columns with zero coverage: " + ", ".join(sorted(zero_coverage_cols)))
+
+    low_coverage_threshold = 0.2
+    low_coverage_cols = summary.loc[
+        (summary["coverage"] > 0.0) & (summary["coverage"] < low_coverage_threshold), "factor_name"
+    ].astype(str).tolist()
+    if low_coverage_cols:
+        warnings.append(
+            f"Factor columns with low coverage below {low_coverage_threshold}: "
+            + ", ".join(sorted(low_coverage_cols))
+        )
+
+    inf_cols = summary.loc[summary["n_inf"] > 0, "factor_name"].astype(str).tolist()
+    if inf_cols:
+        warnings.append("Factor columns with inf/-inf values: " + ", ".join(sorted(inf_cols)))
 
     label_columns_used = [c for c in labels_requested if c in panel.columns]
     if labels_requested and not label_columns_used:
