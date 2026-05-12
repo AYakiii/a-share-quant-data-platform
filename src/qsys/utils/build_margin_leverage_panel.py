@@ -109,6 +109,8 @@ def build_margin_leverage_panel(
     retry_wait: float = 1.0,
     request_sleep: float = 0.5,
     skip_failed_symbols: bool = True,
+    show_progress: bool = False,
+    progress_every: int = 1,
 ) -> dict[str, Path]:
     selected_symbols = [_normalize_symbol(s) for s in _load_symbols(symbols, symbols_file)]
     run_id = run_name or f"margin_panel_{start_date}_{end_date}"
@@ -120,6 +122,7 @@ def build_margin_leverage_panel(
     warnings: list[str] = []
     dates = pd.date_range(start=start_date, end=end_date, freq="D")
     frames: list[pd.DataFrame] = []
+    started_at = time.perf_counter()
 
     for d in dates:
         ds = d.strftime("%Y%m%d")
@@ -157,6 +160,18 @@ def build_margin_leverage_panel(
 
     panel = pd.concat(frames, ignore_index=True)
     present_assets = set(panel["asset"].unique().tolist())
+    per_symbol_rows = panel.groupby("asset").size().to_dict()
+    total_symbols = len(selected_symbols)
+    if show_progress:
+        step = max(1, int(progress_every))
+        for idx, symbol in enumerate(selected_symbols, start=1):
+            if idx % step != 0 and idx != total_symbols:
+                continue
+            rows = int(per_symbol_rows.get(symbol, 0))
+            status = "OK" if rows > 0 else "FAIL"
+            reason = "" if rows > 0 else " reason=empty"
+            elapsed_s = time.perf_counter() - started_at
+            print(f"[{idx}/{total_symbols}] {symbol} {status}{reason} rows={rows} elapsed={elapsed_s:.1f}s", flush=True)
     missing = [s for s in selected_symbols if s not in present_assets]
     if missing:
         msg = "Symbols with no margin data in date range: " + ", ".join(missing)
@@ -189,6 +204,15 @@ def build_margin_leverage_panel(
     manifest_fp = art_dir / "panel_manifest.json"
     manifest_fp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     warnings_fp = write_warnings(art_dir, warnings)
+    if show_progress:
+        failed_count = sum(1 for s in selected_symbols if int(per_symbol_rows.get(s, 0)) == 0)
+        fetched_count = total_symbols - failed_count
+        elapsed_s = time.perf_counter() - started_at
+        mins, secs = divmod(int(elapsed_s), 60)
+        print(
+            f"Done: fetched={fetched_count} failed={failed_count} rows={int(len(panel))} elapsed={mins}m{secs:02d}s",
+            flush=True,
+        )
     return {"panel_root": root, "panel_manifest": manifest_fp, "warnings": warnings_fp, "symbols": symbols_fp, "data_quality": quality_fp}
 
 
@@ -205,6 +229,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retry-wait", type=float, default=1.0)
     p.add_argument("--request-sleep", type=float, default=0.5)
     p.add_argument("--skip-failed-symbols", type=lambda x: str(x).lower() != "false", default=True)
+    p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--progress-every", type=int, default=1)
     return p.parse_args()
 
 
@@ -222,6 +248,8 @@ def main() -> None:
         retry_wait=args.retry_wait,
         request_sleep=args.request_sleep,
         skip_failed_symbols=args.skip_failed_symbols,
+        show_progress=args.show_progress,
+        progress_every=args.progress_every,
     )
     print({k: str(v) for k, v in out.items()})
 

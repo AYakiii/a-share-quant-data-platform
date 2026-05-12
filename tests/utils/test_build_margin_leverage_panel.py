@@ -52,6 +52,60 @@ def test_build_margin_panel_symbols_dedupe_and_outputs(tmp_path, monkeypatch) ->
     assert symbols == ["sz000001", "sh600000"]
 
 
+def test_build_margin_panel_progress_output(tmp_path, monkeypatch, capsys) -> None:
+    raw = pd.DataFrame(
+        {
+            "证券代码": ["000001"],
+            "融资余额": [10.0],
+            "融资买入额": [1.0],
+            "融资融券余额": [11.0],
+        }
+    )
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_sse", lambda date: _res(raw))
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_szse", lambda date: _res(pd.DataFrame()))
+
+    mod.build_margin_leverage_panel(
+        symbols=["sz000001", "sh600000"],
+        start_date="2025-01-01",
+        end_date="2025-01-01",
+        output_root=tmp_path / "panel",
+        output_dir=tmp_path / "art",
+        run_name="r2",
+        request_sleep=0,
+        show_progress=True,
+        progress_every=1,
+    )
+    out = capsys.readouterr().out
+    assert "[1/2] sz000001 OK" in out
+    assert "[2/2] sh600000 FAIL" in out
+    assert "Done: fetched=1 failed=1" in out
+
+
+def test_build_margin_panel_no_progress_output_by_default(tmp_path, monkeypatch, capsys) -> None:
+    raw = pd.DataFrame(
+        {
+            "证券代码": ["000001"],
+            "融资余额": [10.0],
+            "融资买入额": [1.0],
+            "融资融券余额": [11.0],
+        }
+    )
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_sse", lambda date: _res(raw))
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_szse", lambda date: _res(pd.DataFrame()))
+
+    mod.build_margin_leverage_panel(
+        symbols=["sz000001"],
+        start_date="2025-01-01",
+        end_date="2025-01-01",
+        output_root=tmp_path / "panel",
+        output_dir=tmp_path / "art",
+        run_name="r3",
+        request_sleep=0,
+    )
+    out = capsys.readouterr().out
+    assert out == ""
+
+
 def test_build_margin_panel_no_symbols_fails() -> None:
     with pytest.raises(ValueError, match="No symbols provided"):
         mod.build_margin_leverage_panel(start_date="2025-01-01", end_date="2025-01-02")
