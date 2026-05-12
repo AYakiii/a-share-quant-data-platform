@@ -49,6 +49,15 @@ def _normalize_symbol(s: str) -> str:
     return f"bj{digits}"
 
 
+def _symbol_exchange(symbol: str) -> str:
+    s = _normalize_symbol(symbol)
+    if s.startswith("sh"):
+        return "SSE"
+    if s.startswith("sz"):
+        return "SZSE"
+    return "OTHER"
+
+
 def _pick_col(df: pd.DataFrame, choices: list[str]) -> str | None:
     for c in choices:
         if c in df.columns:
@@ -114,6 +123,10 @@ def build_margin_leverage_panel(
     include_calendar_days: bool = False,
 ) -> dict[str, Path]:
     selected_symbols = [_normalize_symbol(s) for s in _load_symbols(symbols, symbols_file)]
+    symbols_by_exchange: dict[str, list[str]] = {
+        "SSE": [s for s in selected_symbols if _symbol_exchange(s) == "SSE"],
+        "SZSE": [s for s in selected_symbols if _symbol_exchange(s) == "SZSE"],
+    }
     run_id = run_name or f"margin_panel_{start_date}_{end_date}"
     art_dir = Path(output_dir) / run_id
     art_dir.mkdir(parents=True, exist_ok=True)
@@ -125,42 +138,85 @@ def build_margin_leverage_panel(
     dates = pd.date_range(start=start_date, end=end_date, freq=date_freq)
     frames: list[pd.DataFrame] = []
     started_at = time.perf_counter()
-    empty_response_counts: dict[str, int] = {"fetch_stock_margin_detail_sse": 0, "fetch_stock_margin_detail_szse": 0}
+    empty_response_counts: dict[str, int] = {"SSE": 0, "SZSE": 0}
+    failed_counts: dict[str, int] = {"SSE": 0, "SZSE": 0}
+    cache: dict[tuple[str, str], pd.DataFrame] = {}
+    n_fetch_requests_attempted = 0
 
-    for d in dates:
-        ds = d.strftime("%Y%m%d")
-        daily_parts: list[pd.DataFrame] = []
-        for market_name, fetcher in [("SSE", fetch_stock_margin_detail_sse), ("SZSE", fetch_stock_margin_detail_szse)]:
-            got = None
-            last_err = None
-            for attempt in range(1, retries + 1):
-                try:
-                    got = fetcher(ds).raw
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    last_err = exc
-                    if attempt < retries:
-                        time.sleep(retry_wait * attempt)
-            if got is None:
-                warnings.append(f"{fetcher.__name__} failed for {ds}: {last_err}")
-                continue
-            if isinstance(got, pd.DataFrame) and got.empty:
-                key = "fetch_stock_margin_detail_sse" if market_name == "SSE" else "fetch_stock_margin_detail_szse"
-                empty_response_counts[key] = empty_response_counts.get(key, 0) + 1
-                continue
-            daily_parts.append(_normalize_raw_margin(got, d.strftime("%Y-%m-%d"), selected_symbols))
-            if request_sleep > 0:
-                time.sleep(request_sleep)
+    for market_name, fetcher in [("SSE", fetch_stock_margin_detail_sse), ("SZSE", fetch_stock_margin_detail_szse)]:
+        exchange_symbols = symbols_by_exchange.get(market_name, [])
+        if not exchange_symbols:
+            continue
+        total_dates = len(dates)
+        symbol_set = set(exchange_symbols)
+        for date_idx, d in enumerate(dates, start=1):
+            ds = d.strftime("%Y%m%d")
+            key = (market_name, ds)
+            if key not in cache:
+                if show_progress and ((date_idx == 1) or (date_idx == total_dates) or (date_idx % max(1, int(progress_every)) == 0)):
+                    print(f"[{market_name} {date_idx}/{total_dates}] START {ds}", flush=True)
+                n_fetch_requests_attempted += 1
+                fetch_started = time.perf_counter()
+                got = None
+                last_err = None
+                for attempt in range(1, retries + 1):
+                    try:
+                        got = fetcher(ds).raw
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_err = exc
+                        if attempt < retries:
+                            time.sleep(retry_wait * attempt)
+                if got is None:
+                    failed_counts[market_name] = failed_counts.get(market_name, 0) + 1
+                    cache[key] = pd.DataFrame()
+                    if show_progress and ((date_idx == 1) or (date_idx == total_dates) or (date_idx % max(1, int(progress_every)) == 0)):
+                        total_elapsed = time.perf_counter() - started_at
+                        elapsed = time.perf_counter() - fetch_started
+                        print(
+                            f"[{market_name} {date_idx}/{total_dates}] FAIL {ds} reason=fetch_error "
+                            f"rows_raw=0 rows_selected=0 elapsed={elapsed:.1f}s total_elapsed={total_elapsed:.1f}s",
+                            flush=True,
+                        )
+                    continue
+                cache[key] = got if isinstance(got, pd.DataFrame) else pd.DataFrame(got)
+                if request_sleep > 0:
+                    time.sleep(request_sleep)
 
-        if daily_parts:
-            day_df = pd.concat(daily_parts, ignore_index=True)
-            day_df = day_df.groupby(["date", "asset"], as_index=False).last()
-            if not day_df.empty:
-                part_dir = root / f"trade_date={d.strftime('%Y-%m-%d')}"
-                part_dir.mkdir(parents=True, exist_ok=True)
-                out_df = day_df.rename(columns={"date": "trade_date", "asset": "ts_code"})
-                out_df.to_parquet(part_dir / "data.parquet", index=False)
-                frames.append(day_df)
+            got = cache[key]
+            if got.empty:
+                empty_response_counts[market_name] = empty_response_counts.get(market_name, 0) + 1
+                if show_progress and ((date_idx == 1) or (date_idx == total_dates) or (date_idx % max(1, int(progress_every)) == 0)):
+                    total_elapsed = time.perf_counter() - started_at
+                    print(
+                        f"[{market_name} {date_idx}/{total_dates}] FAIL {ds} reason=empty "
+                        f"rows_raw=0 rows_selected=0 elapsed=0.0s total_elapsed={total_elapsed:.1f}s",
+                        flush=True,
+                    )
+                continue
+            normalized = _normalize_raw_margin(got, d.strftime("%Y-%m-%d"), exchange_symbols)
+            selected_rows = int(len(normalized))
+            if show_progress and ((date_idx == 1) or (date_idx == total_dates) or (date_idx % max(1, int(progress_every)) == 0)):
+                total_elapsed = time.perf_counter() - started_at
+                print(
+                    f"[{market_name} {date_idx}/{total_dates}] OK {ds} rows_raw={int(len(got))} "
+                    f"rows_selected={selected_rows} elapsed=0.0s total_elapsed={total_elapsed:.1f}s",
+                    flush=True,
+                )
+            if not normalized.empty:
+                normalized = normalized[normalized["asset"].isin(symbol_set)]
+                frames.append(normalized)
+
+    if frames:
+        all_days = pd.concat(frames, ignore_index=True)
+        for trade_date, day_df in all_days.groupby("date", sort=True):
+            per_day = day_df.groupby(["date", "asset"], as_index=False).last()
+            if per_day.empty:
+                continue
+            part_dir = root / f"trade_date={pd.Timestamp(trade_date).strftime('%Y-%m-%d')}"
+            part_dir.mkdir(parents=True, exist_ok=True)
+            out_df = per_day.rename(columns={"date": "trade_date", "asset": "ts_code"})
+            out_df.to_parquet(part_dir / "data.parquet", index=False)
 
     if not frames:
         raise ValueError("No margin panel rows loaded for requested symbols/date range")
@@ -169,24 +225,8 @@ def build_margin_leverage_panel(
     present_assets = set(panel["asset"].unique().tolist())
     per_symbol_rows = panel.groupby("asset").size().to_dict()
     total_symbols = len(selected_symbols)
-    if show_progress:
-        step = max(1, int(progress_every))
-        for idx, symbol in enumerate(selected_symbols, start=1):
-            should_log = (idx == 1) or (idx == total_symbols) or (idx % step == 0)
-            if not should_log:
-                continue
-            print(f"[{idx}/{total_symbols}] START {symbol}", flush=True)
-            symbol_started = time.perf_counter()
-            rows = int(per_symbol_rows.get(symbol, 0))
-            status = "OK" if rows > 0 else "FAIL"
-            reason = "" if rows > 0 else " reason=empty"
-            total_elapsed_s = time.perf_counter() - started_at
-            symbol_elapsed_s = time.perf_counter() - symbol_started
-            print(
-                f"[{idx}/{total_symbols}] {status} {symbol}{reason} rows={rows} "
-                f"symbol_elapsed={symbol_elapsed_s:.1f}s total_elapsed={total_elapsed_s:.1f}s",
-                flush=True,
-            )
+    symbols_with_data = sorted([s for s, n in per_symbol_rows.items() if int(n) > 0])
+    symbols_without_data = [s for s in selected_symbols if s not in set(symbols_with_data)]
     missing = [s for s in selected_symbols if s not in present_assets]
     if missing:
         msg = "Symbols with no margin data in date range: " + ", ".join(missing)
@@ -218,10 +258,20 @@ def build_margin_leverage_panel(
     }
     manifest_fp = art_dir / "panel_manifest.json"
     manifest_fp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    for fetcher_name, count in empty_response_counts.items():
+    for exchange, count in empty_response_counts.items():
         if count > 0:
-            short = "SSE" if "sse" in fetcher_name else "SZSE"
-            warnings.append(f"{short} empty responses skipped: {count} dates")
+            warnings.append(f"{exchange} empty responses skipped: {count} dates")
+    for exchange, count in failed_counts.items():
+        if count > 0:
+            warnings.append(f"{exchange} fetch failures: {count} dates")
+    n_fetch_requests_failed = int(sum(failed_counts.values()))
+    n_empty_exchange_dates = int(sum(empty_response_counts.values()))
+    manifest["fetch_strategy"] = "exchange_date_first"
+    manifest["n_fetch_requests_attempted"] = int(n_fetch_requests_attempted)
+    manifest["n_fetch_requests_failed"] = n_fetch_requests_failed
+    manifest["n_empty_exchange_dates"] = n_empty_exchange_dates
+    manifest["symbols_with_data"] = symbols_with_data
+    manifest["symbols_without_data"] = symbols_without_data
     warnings_fp = write_warnings(art_dir, warnings)
     if show_progress:
         failed_count = sum(1 for s in selected_symbols if int(per_symbol_rows.get(s, 0)) == 0)
