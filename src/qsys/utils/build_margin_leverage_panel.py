@@ -165,13 +165,15 @@ def build_margin_leverage_panel(
     if show_progress:
         step = max(1, int(progress_every))
         for idx, symbol in enumerate(selected_symbols, start=1):
-            if idx % step != 0 and idx != total_symbols:
+            should_log = (idx == 1) or (idx == total_symbols) or (idx % step == 0)
+            if not should_log:
                 continue
+            print(f"[{idx}/{total_symbols}] START {symbol}", flush=True)
             rows = int(per_symbol_rows.get(symbol, 0))
             status = "OK" if rows > 0 else "FAIL"
             reason = "" if rows > 0 else " reason=empty"
             elapsed_s = time.perf_counter() - started_at
-            print(f"[{idx}/{total_symbols}] {symbol} {status}{reason} rows={rows} elapsed={elapsed_s:.1f}s", flush=True)
+            print(f"[{idx}/{total_symbols}] {status} {symbol}{reason} rows={rows} elapsed={elapsed_s:.1f}s", flush=True)
     missing = [s for s in selected_symbols if s not in present_assets]
     if missing:
         msg = "Symbols with no margin data in date range: " + ", ".join(missing)
