@@ -12,7 +12,13 @@ def fetch_stock_margin_detail_sse(date: str) -> SourceFetchResult:
 
     import akshare as ak
 
-    raw = ak.stock_margin_detail_sse(date=date)
+    try:
+        raw = ak.stock_margin_detail_sse(date=date)
+    except Exception as exc:  # noqa: BLE001
+        if "Length mismatch" in str(exc):
+            raw = pd.DataFrame()
+        else:
+            raise
     if not isinstance(raw, pd.DataFrame):
         raw = pd.DataFrame(raw)
 
@@ -31,7 +37,13 @@ def fetch_stock_margin_detail_szse(date: str) -> SourceFetchResult:
 
     import akshare as ak
 
-    raw = ak.stock_margin_detail_szse(date=date)
+    try:
+        raw = ak.stock_margin_detail_szse(date=date)
+    except Exception as exc:  # noqa: BLE001
+        if "Length mismatch" in str(exc):
+            raw = pd.DataFrame()
+        else:
+            raise
     if not isinstance(raw, pd.DataFrame):
         raw = pd.DataFrame(raw)
 
