@@ -111,6 +111,7 @@ def build_margin_leverage_panel(
     skip_failed_symbols: bool = True,
     show_progress: bool = False,
     progress_every: int = 1,
+    include_calendar_days: bool = False,
 ) -> dict[str, Path]:
     selected_symbols = [_normalize_symbol(s) for s in _load_symbols(symbols, symbols_file)]
     run_id = run_name or f"margin_panel_{start_date}_{end_date}"
@@ -120,14 +121,16 @@ def build_margin_leverage_panel(
     root.mkdir(parents=True, exist_ok=True)
 
     warnings: list[str] = []
-    dates = pd.date_range(start=start_date, end=end_date, freq="D")
+    date_freq = "D" if include_calendar_days else "B"
+    dates = pd.date_range(start=start_date, end=end_date, freq=date_freq)
     frames: list[pd.DataFrame] = []
     started_at = time.perf_counter()
+    empty_response_counts: dict[str, int] = {"fetch_stock_margin_detail_sse": 0, "fetch_stock_margin_detail_szse": 0}
 
     for d in dates:
         ds = d.strftime("%Y%m%d")
         daily_parts: list[pd.DataFrame] = []
-        for fetcher in [fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse]:
+        for market_name, fetcher in [("SSE", fetch_stock_margin_detail_sse), ("SZSE", fetch_stock_margin_detail_szse)]:
             got = None
             last_err = None
             for attempt in range(1, retries + 1):
@@ -140,6 +143,10 @@ def build_margin_leverage_panel(
                         time.sleep(retry_wait * attempt)
             if got is None:
                 warnings.append(f"{fetcher.__name__} failed for {ds}: {last_err}")
+                continue
+            if isinstance(got, pd.DataFrame) and got.empty:
+                key = "fetch_stock_margin_detail_sse" if market_name == "SSE" else "fetch_stock_margin_detail_szse"
+                empty_response_counts[key] = empty_response_counts.get(key, 0) + 1
                 continue
             daily_parts.append(_normalize_raw_margin(got, d.strftime("%Y-%m-%d"), selected_symbols))
             if request_sleep > 0:
@@ -169,11 +176,17 @@ def build_margin_leverage_panel(
             if not should_log:
                 continue
             print(f"[{idx}/{total_symbols}] START {symbol}", flush=True)
+            symbol_started = time.perf_counter()
             rows = int(per_symbol_rows.get(symbol, 0))
             status = "OK" if rows > 0 else "FAIL"
             reason = "" if rows > 0 else " reason=empty"
-            elapsed_s = time.perf_counter() - started_at
-            print(f"[{idx}/{total_symbols}] {status} {symbol}{reason} rows={rows} elapsed={elapsed_s:.1f}s", flush=True)
+            total_elapsed_s = time.perf_counter() - started_at
+            symbol_elapsed_s = time.perf_counter() - symbol_started
+            print(
+                f"[{idx}/{total_symbols}] {status} {symbol}{reason} rows={rows} "
+                f"symbol_elapsed={symbol_elapsed_s:.1f}s total_elapsed={total_elapsed_s:.1f}s",
+                flush=True,
+            )
     missing = [s for s in selected_symbols if s not in present_assets]
     if missing:
         msg = "Symbols with no margin data in date range: " + ", ".join(missing)
@@ -205,6 +218,10 @@ def build_margin_leverage_panel(
     }
     manifest_fp = art_dir / "panel_manifest.json"
     manifest_fp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for fetcher_name, count in empty_response_counts.items():
+        if count > 0:
+            short = "SSE" if "sse" in fetcher_name else "SZSE"
+            warnings.append(f"{short} empty responses skipped: {count} dates")
     warnings_fp = write_warnings(art_dir, warnings)
     if show_progress:
         failed_count = sum(1 for s in selected_symbols if int(per_symbol_rows.get(s, 0)) == 0)
@@ -233,6 +250,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-failed-symbols", type=lambda x: str(x).lower() != "false", default=True)
     p.add_argument("--show-progress", action="store_true")
     p.add_argument("--progress-every", type=int, default=1)
+    p.add_argument("--include-calendar-days", action="store_true")
     return p.parse_args()
 
 
@@ -252,6 +270,7 @@ def main() -> None:
         skip_failed_symbols=args.skip_failed_symbols,
         show_progress=args.show_progress,
         progress_every=args.progress_every,
+        include_calendar_days=args.include_calendar_days,
     )
     print({k: str(v) for k, v in out.items()})
 

@@ -78,6 +78,7 @@ def test_build_margin_panel_progress_output(tmp_path, monkeypatch, capsys) -> No
     out = capsys.readouterr().out
     assert "[1/2] START sz000001" in out
     assert "[1/2] OK sz000001" in out
+    assert "symbol_elapsed=" in out and "total_elapsed=" in out
     assert out.index("[1/2] START sz000001") < out.index("[1/2] OK sz000001")
     assert "[2/2] START sh600000" in out
     assert "[2/2] FAIL sh600000" in out
@@ -111,6 +112,89 @@ def test_build_margin_panel_progress_every_respected(tmp_path, monkeypatch, caps
     assert "[1/5] START sz000001" in out
     assert "[5/5] START sz000005" in out
     assert "[2/5] START" not in out
+
+
+def test_build_margin_panel_skips_weekends_by_default(tmp_path, monkeypatch) -> None:
+    called_dates: list[str] = []
+    raw = pd.DataFrame(
+        {
+            "证券代码": ["000001"],
+            "融资余额": [10],
+            "融资买入额": [1],
+            "融资融券余额": [11],
+        }
+    )
+
+    def fake_sse(date: str):
+        called_dates.append(date)
+        return _res(raw)
+
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_sse", fake_sse)
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_szse", lambda date: _res(pd.DataFrame()))
+    mod.build_margin_leverage_panel(
+        symbols=["sz000001"],
+        start_date="2025-01-03",
+        end_date="2025-01-06",
+        output_root=tmp_path / "panel",
+        output_dir=tmp_path / "art",
+        run_name="wk1",
+        request_sleep=0,
+    )
+    assert called_dates == ["20250103", "20250106"]
+
+
+def test_build_margin_panel_include_calendar_days(tmp_path, monkeypatch) -> None:
+    called_dates: list[str] = []
+    raw = pd.DataFrame(
+        {
+            "证券代码": ["000001"],
+            "融资余额": [10],
+            "融资买入额": [1],
+            "融资融券余额": [11],
+        }
+    )
+
+    def fake_sse(date: str):
+        called_dates.append(date)
+        return _res(raw)
+
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_sse", fake_sse)
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_szse", lambda date: _res(pd.DataFrame()))
+    mod.build_margin_leverage_panel(
+        symbols=["sz000001"],
+        start_date="2025-01-03",
+        end_date="2025-01-06",
+        output_root=tmp_path / "panel",
+        output_dir=tmp_path / "art",
+        run_name="wk2",
+        request_sleep=0,
+        include_calendar_days=True,
+    )
+    assert called_dates == ["20250103", "20250104", "20250105", "20250106"]
+
+
+def test_build_margin_panel_aggregates_empty_warnings(tmp_path, monkeypatch) -> None:
+    raw = pd.DataFrame(
+        {
+            "证券代码": ["000001"],
+            "融资余额": [10],
+            "融资买入额": [1],
+            "融资融券余额": [11],
+        }
+    )
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_sse", lambda date: _res(pd.DataFrame()))
+    monkeypatch.setattr(mod, "fetch_stock_margin_detail_szse", lambda date: _res(raw))
+    out = mod.build_margin_leverage_panel(
+        symbols=["sz000001"],
+        start_date="2025-01-01",
+        end_date="2025-01-02",
+        output_root=tmp_path / "panel",
+        output_dir=tmp_path / "art",
+        run_name="wk3",
+        request_sleep=0,
+    )
+    warnings_text = out["warnings"].read_text(encoding="utf-8")
+    assert "SSE empty responses skipped: 2 dates" in warnings_text
 
 
 def test_build_margin_panel_no_progress_output_by_default(tmp_path, monkeypatch, capsys) -> None:
