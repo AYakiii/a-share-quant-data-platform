@@ -6,6 +6,34 @@ from typing import Any
 
 import pandas as pd
 
+from qsys.data.factor_lake.schemas import SourceCase, SourceRunResult
+
+def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str]) -> Path:
+    path = Path(root) / "data" / "raw" / "akshare" / source_family / api_name
+    for k, v in partition.items():
+        path = path / f"{k}={v}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+
+def write_inventory(cases: list[SourceCase], path: Path) -> None:
+    pd.DataFrame([asdict(c) for c in cases]).to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def write_manifest(manifest: dict, path: Path) -> None:
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_catalog(results: list[SourceRunResult], path: Path) -> pd.DataFrame:
+    columns = list(SourceRunResult.__dataclass_fields__.keys())
+    if results:
+        df = pd.DataFrame([asdict(r) for r in results])
+    else:
+        df = pd.DataFrame(columns=columns)
+    df.to_csv(path, index=False, encoding="utf-8-sig")
+    return df
+
 
 def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str]) -> Path:
     path = Path(root) / "data" / "raw" / "akshare" / source_family / api_name
