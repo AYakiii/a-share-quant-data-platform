@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from qsys.data.factor_lake.schemas import SourceCase
+
 
 @dataclass(frozen=True)
 class DatasetSpec:
@@ -50,7 +52,8 @@ DATASET_REGISTRY: dict[str, DatasetSpec] = {
 
 # Data-shape orientation: daily panel / index panel / event table / report-period snapshot / ownership-governance
 SOURCE_CAPABILITY_REGISTRY: list[SourceCapabilitySpec] = [
-    SourceCapabilitySpec("daily_bar_raw", "akshare", "market_price", "stock_zh_a_hist", "fetch_stock_zh_a_hist", "daily", "symbol+date_range", ("symbol", "year"), "日期", "股票代码", "", "", "daily_equity_panel", "technical_liquidity", "", 1, "Core daily panel source."),
+    SourceCapabilitySpec("daily_bar_raw", "akshare", "market_price", "stock_zh_a_hist", "fetch_stock_zh_a_hist", "daily", "symbol+date_range", ("symbol", "year"), "日期", "股票代码", "", "", "daily_equity_panel", "technical_liquidity", "", 1, "Primary candidate. In Colab this endpoint may fail with RemoteDisconnected."),
+    SourceCapabilitySpec("daily_bar_raw", "akshare", "market_price", "stock_zh_a_daily", "fetch_stock_zh_a_daily", "daily", "symbol+date_range", ("symbol", "year"), "date", "symbol(input->sz/sh code)", "", "", "daily_equity_panel", "technical_liquidity", "", 1, "Fallback candidate when stock_zh_a_hist is unstable; returns OHLCV+amount+outstanding_share+turnover."),
     SourceCapabilitySpec("index_bar_raw", "akshare", "index_market", "stock_zh_index_hist_csindex", "fetch_stock_zh_index_hist_csindex", "daily", "index_symbol+date_range", ("index_symbol", "year"), "日期", "指数代码", "", "", "daily_index_panel", "market_regime", "", 1, "Core benchmark/index panel source."),
     SourceCapabilitySpec("margin_detail_raw", "akshare", "margin_leverage", "stock_margin_detail_sse", "fetch_stock_margin_detail_sse", "daily", "trade_date", ("exchange", "trade_date"), "信用交易日期", "证券代码", "", "", "margin_trading_detail", "margin_leverage", "", 1, "Event-like daily leverage table (SSE)."),
     SourceCapabilitySpec("margin_detail_raw", "akshare", "margin_leverage", "stock_margin_detail_szse", "fetch_stock_margin_detail_szse", "daily", "trade_date", ("exchange", "trade_date"), "信用交易日期/input_date", "证券代码", "", "", "margin_trading_detail", "margin_leverage", "", 1, "Event-like daily leverage table (SZSE)."),
@@ -135,3 +138,27 @@ def plan_partitions(dataset: str, **kwargs: Any) -> list[dict[str, str]]:
             trade_dates = [(sdt + timedelta(days=i)).isoformat() for i in range((edt - sdt).days + 1)]
         return [{"exchange": ex.lower(), "trade_date": d.replace("-", "")} for ex in exchanges for d in trade_dates]
     raise KeyError(f"Unknown dataset: {dataset}")
+
+
+FACTOR_SOURCE_REGISTRY: list[SourceCase] = [
+    SourceCase("daily_bar_raw__hist__000001__2024q1", "market_price", "stock_zh_a_hist", {"symbol": "000001", "period": "daily", "start_date": "20240101", "end_date": "20240331", "adjust": ""}, "daily_bar_raw primary candidate"),
+    SourceCase("daily_bar_raw__daily__000001__2024q1", "market_price", "stock_zh_a_daily", {"symbol": "sz000001", "start_date": "20240101", "end_date": "20240331", "adjust": ""}, "daily_bar_raw fallback candidate"),
+    SourceCase("index_bar_raw__000300__2024q1", "index_market", "stock_zh_index_hist_csindex", {"symbol": "000300", "start_date": "20240101", "end_date": "20240331"}, "index bar probe"),
+    SourceCase("margin_detail_raw__sse__20240329", "margin_leverage", "stock_margin_detail_sse", {"date": "20240329"}, "margin sse probe"),
+    SourceCase("margin_detail_raw__szse__20240329", "margin_leverage", "stock_margin_detail_szse", {"date": "20240329"}, "margin szse probe"),
+]
+
+
+def filter_source_cases(cases: list[SourceCase], family: str | None = None, api_name: str | None = None, case_id: str | None = None, enabled_only: bool = False, max_cases: int | None = None) -> list[SourceCase]:
+    selected: list[SourceCase] = []
+    for c in cases:
+        if family and c.source_family != family:
+            continue
+        if api_name and c.api_name != api_name:
+            continue
+        if case_id and c.case_id != case_id:
+            continue
+        if enabled_only and not c.enabled:
+            continue
+        selected.append(c)
+    return selected[:max_cases] if max_cases else selected
