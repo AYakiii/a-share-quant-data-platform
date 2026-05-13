@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -9,19 +8,13 @@ import pandas as pd
 
 from qsys.data.factor_lake.schemas import SourceCase, SourceRunResult
 
+def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str]) -> Path:
+    path = Path(root) / "data" / "raw" / "akshare" / source_family / api_name
+    for k, v in partition.items():
+        path = path / f"{k}={v}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
-def ensure_layout(output_root: str | Path) -> dict[str, Path]:
-    root = Path(output_root)
-    paths = {
-        "root": root,
-        "catalogs": root / "catalogs",
-        "manifests": root / "manifests",
-        "samples": root / "samples",
-        "metadata": root / "metadata",
-    }
-    for p in paths.values():
-        p.mkdir(parents=True, exist_ok=True)
-    return paths
 
 
 def write_inventory(cases: list[SourceCase], path: Path) -> None:
