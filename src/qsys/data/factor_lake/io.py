@@ -15,6 +15,18 @@ def raw_partition_path(root: str | Path, source_family: str, api_name: str, part
     path.mkdir(parents=True, exist_ok=True)
     return path
 
+def ensure_layout(output_root: str | Path, run_name: str | None = None) -> dict[str, Path]:
+    root = Path(output_root)
+    paths = {
+        "root": root,
+        "catalogs": root / "catalogs",
+        "manifests": root / "manifests",
+        "samples": root / "samples",
+        "metadata": root / "metadata",
+    }
+    for p in paths.values():
+        p.mkdir(parents=True, exist_ok=True)
+    return paths
 
 
 def write_inventory(cases: list[SourceCase], path: Path) -> None:
