@@ -14,20 +14,61 @@ API_BY_FAMILY = {
     "disclosure_ir": ["stock_zh_a_disclosure_relation_cninfo", "stock_jgdy_tj_em", "stock_jgdy_detail_em"],
 }
 
-COMMON_KWARGS = {"symbol": "000001", "start_date": "20240101", "end_date": "20240331", "adjust": "qfq", "period": "daily", "date": "20240331", "market": "全部", "indicator": "按报告期"}
+KWARGS_BY_API: dict[str, dict] = {
+    "stock_zh_a_hist": {"symbol": "000001", "period": "daily", "start_date": "20240101", "end_date": "20240331", "adjust": "qfq"},
+    "stock_individual_info_em": {"symbol": "000001"},
+    "index_zh_a_hist": {"symbol": "000300", "period": "daily", "start_date": "20240101", "end_date": "20240331"},
+    "stock_zh_index_hist_csindex": {"symbol": "000905", "start_date": "20240101", "end_date": "20240331"},
+    "stock_zh_index_daily": {"symbol": "sh000001"},
+    "stock_zh_index_daily_em": {"symbol": "000852"},
+    "index_hist_cni": {"symbol": "000300", "start_date": "20240101", "end_date": "20240331"},
+    "index_detail_hist_cni": {"symbol": "000905", "start_date": "20240101", "end_date": "20240331"},
+    "index_component_sw": {"symbol": "801010"},
+    "index_hist_sw": {"symbol": "801030", "period": "day"},
+    "index_realtime_sw": {"symbol": "801080"},
+    "index_stock_cons_csindex": {"symbol": "000300"},
+    "index_stock_cons_weight_csindex": {"symbol": "000300"},
+    "stock_financial_analysis_indicator": {"symbol": "000001"},
+    "stock_yjyg_em": {"date": "20240331"},
+    "stock_yysj_em": {"date": "20240331"},
+    "stock_zh_a_disclosure_relation_cninfo": {"symbol": "000001", "start_date": "20240101", "end_date": "20240331"},
+    "stock_jgdy_tj_em": {"date": "20240331"},
+    "stock_jgdy_detail_em": {"date": "20240331"},
+    "stock_margin_sse": {"start_date": "20240101", "end_date": "20240331"},
+    "stock_margin_detail_sse": {"date": "20240329"},
+    "stock_margin_szse": {"date": "20240329"},
+    "stock_margin_detail_szse": {"date": "20240329"},
+    "stock_margin_underlying_info_szse": {"date": "20240329"},
+    "macro_china_market_margin_sz": {},
+    "stock_industry_clf_hist_sw": {"symbol": "801120", "start_date": "20240101", "end_date": "20240331"},
+    "sw_index_third_cons": {"symbol": "801780"},
+    "stock_board_industry_cons_ths": {"symbol": "半导体"},
+    "stock_board_industry_index_ths": {"symbol": "半导体", "start_date": "20240101", "end_date": "20240331"},
+    "stock_board_industry_summary_ths": {"symbol": "半导体"},
+    "stock_board_concept_cons_ths": {"symbol": "AI PC"},
+    "stock_board_concept_index_ths": {"symbol": "AI PC", "start_date": "20240101", "end_date": "20240331"},
+    "stock_board_concept_summary_ths": {"symbol": "AI PC"},
+    "stock_board_industry_cons_em": {"symbol": "半导体"},
+    "stock_board_industry_hist_em": {"symbol": "半导体", "start_date": "20240101", "end_date": "20240331", "period": "日k", "adjust": ""},
+    "stock_board_concept_cons_em": {"symbol": "AI PC"},
+    "stock_board_concept_hist_em": {"symbol": "AI PC", "start_date": "20240101", "end_date": "20240331", "period": "日k", "adjust": ""},
+    "stock_zh_a_gdhs": {"symbol": "000001"},
+    "stock_zh_a_gdhs_detail_em": {"symbol": "000001"},
+    "stock_gdfx_free_holding_analyse_em": {"date": "20240331"},
+    "stock_gdfx_holding_analyse_em": {"date": "20240331"},
+    "stock_gpzy_pledge_ratio_detail_em": {"date": "20240331"},
+    "stock_fhps_em": {"date": "20240331"},
+    "stock_history_dividend": {"symbol": "000001"},
+    "stock_history_dividend_detail": {"symbol": "000001", "date": "20240331"},
+    "stock_restricted_release_detail_em": {"date": "20240331"},
+    "stock_dzjy_mrmx": {"date": "20240329"},
+    "stock_dzjy_mrtj": {"date": "20240329"},
+    "stock_lhb_detail_em": {"date": "20240329"},
+}
 
 
 def _kwargs_for_api(api_name: str) -> dict:
-    kw = dict(COMMON_KWARGS)
-    if api_name == "stock_board_industry_index_ths":
-        kw.update({"symbol": "半导体"})
-    elif api_name == "stock_board_concept_summary_ths":
-        kw.update({"symbol": "AI PC"})
-    elif api_name == "index_component_sw":
-        kw.update({"symbol": "801010"})
-    elif api_name == "stock_zh_a_hist":
-        kw.update({"symbol": "000001"})
-    return kw
+    return dict(KWARGS_BY_API.get(api_name, {}))
 
 
 def build_registry() -> list[SourceCase]:
@@ -35,8 +76,9 @@ def build_registry() -> list[SourceCase]:
     for fam, apis in API_BY_FAMILY.items():
         for api in apis:
             kwargs = _kwargs_for_api(api)
-            cid = f"{api}__{kwargs.get('symbol','default')}__2024q1".replace(" ", "_")
-            cases.append(SourceCase(case_id=cid, source_family=fam, api_name=api, kwargs=kwargs, description="Migrated from Factor_test verified probe recipe", enabled=True))
+            identity = kwargs.get("symbol") or kwargs.get("date") or "default"
+            case_id = f"{api}__{identity}__2024q1".replace(" ", "_")
+            cases.append(SourceCase(case_id=case_id, source_family=fam, api_name=api, kwargs=kwargs, description="Migrated from Factor_test verified probe recipe", enabled=True))
     return cases
 
 

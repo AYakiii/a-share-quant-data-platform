@@ -18,6 +18,17 @@ from .registry import FACTOR_SOURCE_REGISTRY, filter_source_cases
 from .schemas import SourceRunResult
 
 
+def _write_dataframe_output(df: pd.DataFrame, base_path: Path) -> tuple[str, str, str]:
+    parquet_path = base_path.with_suffix(".parquet")
+    try:
+        df.to_parquet(parquet_path, index=False)
+        return str(parquet_path), "parquet", ""
+    except Exception as exc:  # noqa: BLE001
+        csv_path = base_path.with_suffix(".csv")
+        df.astype(str).to_csv(csv_path, index=False, encoding="utf-8-sig")
+        return str(csv_path), "csv", f"parquet_write_failed:{type(exc).__name__}:{exc}"
+
+
 def _filter_kwargs(func: Any, kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     sig = inspect.signature(func)
     accepted = set(sig.parameters.keys())
@@ -40,6 +51,8 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
         ignored_kwargs: dict[str, Any] = {}
         out_path = ""
         meta_path = ""
+        output_format = ""
+        write_warning = ""
         err_t = ""
         err_m = ""
         skipped_reason = "disabled" if not source_case.enabled else ""
@@ -68,11 +81,9 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
                         has_symbol_like = summary["has_symbol_like_column"]
                         has_announcement_like = summary["has_announcement_like_column"]
                         status = "success" if rows > 0 else "empty"
-                        fname = safe_filename(f"{source_case.case_id}.parquet")
-                        p = Path(paths["samples"]) / fname
-                        result.to_parquet(p, index=False)
-                        out_path = str(p)
-                        meta = {"source_case": asdict(source_case), "summary": summary}
+                        base = Path(paths["samples"]) / safe_filename(source_case.case_id)
+                        out_path, output_format, write_warning = _write_dataframe_output(result, base)
+                        meta = {"source_case": asdict(source_case), "summary": summary, "output_format": output_format, "write_warning": write_warning}
                         mp = Path(paths["metadata"]) / safe_filename(f"{source_case.case_id}.json")
                         mp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
                         meta_path = str(mp)
@@ -87,15 +98,35 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
 
         ended = datetime.now(UTC)
         results.append(SourceRunResult(
-            run_id=run_id, case_id=source_case.case_id, source_family=source_case.source_family,
-            api_name=source_case.api_name, enabled=source_case.enabled, status=status,
-            rows=rows, n_cols=n_cols, columns=columns, date_like_columns=date_like_columns,
-            symbol_like_columns=symbol_like_columns, announcement_like_columns=announcement_like_columns,
-            has_date_like_column=has_date_like, has_symbol_like_column=has_symbol_like,
-            has_announcement_like_column=has_announcement_like, kwargs_json=json.dumps(source_case.kwargs, ensure_ascii=False),
-            filtered_kwargs_json=json.dumps(filtered_kwargs, ensure_ascii=False), ignored_kwargs_json=json.dumps(ignored_kwargs, ensure_ascii=False),
-            output_path=out_path, metadata_path=meta_path, error_type=err_t, error_message=err_m, skipped_reason=skipped_reason,
-            timeout_seconds=timeout_seconds, elapsed_seconds=(ended-started).total_seconds(), started_at=started.isoformat(), ended_at=ended.isoformat(),
+            run_id=run_id,
+            case_id=source_case.case_id,
+            source_family=source_case.source_family,
+            api_name=source_case.api_name,
+            enabled=source_case.enabled,
+            status=status,
+            rows=rows,
+            n_cols=n_cols,
+            columns=columns,
+            date_like_columns=date_like_columns,
+            symbol_like_columns=symbol_like_columns,
+            announcement_like_columns=announcement_like_columns,
+            has_date_like_column=has_date_like,
+            has_symbol_like_column=has_symbol_like,
+            has_announcement_like_column=has_announcement_like,
+            kwargs_json=json.dumps(source_case.kwargs, ensure_ascii=False),
+            filtered_kwargs_json=json.dumps(filtered_kwargs, ensure_ascii=False),
+            ignored_kwargs_json=json.dumps(ignored_kwargs, ensure_ascii=False),
+            output_path=out_path,
+            output_format=output_format,
+            metadata_path=meta_path,
+            write_warning=write_warning,
+            error_type=err_t,
+            error_message=err_m,
+            skipped_reason=skipped_reason,
+            timeout_seconds=timeout_seconds,
+            elapsed_seconds=(ended - started).total_seconds(),
+            started_at=started.isoformat(),
+            ended_at=ended.isoformat(),
         ))
         if request_sleep > 0:
             time.sleep(request_sleep)
@@ -107,6 +138,12 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
     if len(selected) != len(catalog_df):
         raise RuntimeError("selected SourceCase count must equal api_call_catalog row count")
 
-    manifest = {"run_id": run_id, "selected_cases": len(selected), "catalog_rows": int(len(catalog_df)), "generated_at_utc": datetime.now(UTC).isoformat(), "output_root": str(paths["root"])}
+    manifest = {
+        "run_id": run_id,
+        "selected_cases": len(selected),
+        "catalog_rows": int(len(catalog_df)),
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "output_root": str(paths["root"]),
+    }
     write_manifest(manifest, paths["manifests"] / "run_manifest.json")
     return manifest

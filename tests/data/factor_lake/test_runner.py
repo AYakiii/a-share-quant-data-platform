@@ -41,6 +41,25 @@ def test_runner_statuses_and_catalog_count(monkeypatch, tmp_path):
     assert "extra" in ok["ignored_kwargs_json"]
 
 
+def test_fallback_csv_when_parquet_write_fails(monkeypatch, tmp_path):
+    class AkMixed:
+        def mixed(self, symbol: str) -> pd.DataFrame:
+            return pd.DataFrame({"item": ["证券代码", "证券简称"], "value": ["000001", 1.23]})
+
+    def raise_arrow(*args, **kwargs):
+        raise ValueError("ArrowInvalid")
+
+    cases = [SourceCase("mixed_case", "market_price", "mixed", {"symbol": "000001"}, "mixed")]
+    monkeypatch.setattr("qsys.data.factor_lake.runner.FACTOR_SOURCE_REGISTRY", cases)
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", raise_arrow)
+    run_probe(AkMixed(), output_root=tmp_path)
+    cat = pd.read_csv(tmp_path / "catalogs" / "api_call_catalog.csv")
+    row = cat.iloc[0]
+    assert row["status"] == "success"
+    assert row["output_format"] == "csv"
+    assert "parquet_write_failed" in row["write_warning"]
+
+
 def test_non_dataframe_and_filters(monkeypatch, tmp_path):
     class Ak2:
         def not_df(self, symbol: str):
