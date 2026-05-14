@@ -100,6 +100,29 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+PHASE_COVERAGE_FAMILIES: tuple[str, ...] = (
+    "market_price",
+    "index_market",
+    "financial_fundamental",
+    "margin_leverage",
+    "industry_concept",
+    "event_ownership",
+    "corporate_action",
+    "trading_attention",
+)
+
+TEMP_DISABLED_APIS: set[tuple[str, str]] = {
+    ("market_price", "stock_zh_a_hist"),
+    ("market_price", "stock_individual_info_em"),
+    ("financial_fundamental", "stock_financial_analysis_indicator"),
+    ("margin_leverage", "stock_margin_detail_szse"),
+    ("event_ownership", "stock_gpzy_pledge_ratio_detail_em"),
+    ("industry_concept", "stock_industry_clf_hist_sw"),
+    ("trading_attention", "stock_jgdy_tj_em"),
+}
+
+EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
+
 
 @dataclass
 class IngestRecord:
@@ -324,7 +347,7 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     return False
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False) -> dict:
     adapters = adapter_map or {}
     rows: list[dict] = []
     for family in families:
@@ -332,10 +355,28 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             api_name = spec["api_name"]
             params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
+                started_at = datetime.now(UTC)
                 status = "pending_adapter"
                 err = ""
                 n_rows = 0
                 out_path = meta_path = ""
+                if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+                    finished_at = datetime.now(UTC)
+                    rows.append(
+                        {
+                            "source_family": family,
+                            "api_name": api_name,
+                            "status": "skipped",
+                            "rows": 0,
+                            "error_message": "disabled_reason: temporarily disabled for acquisition control",
+                            "output_path": "",
+                            "metadata_path": "",
+                            "started_at": started_at.isoformat(),
+                            "finished_at": finished_at.isoformat(),
+                            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+                        }
+                    )
+                    continue
                 try:
                     fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
                     if fn is None:
@@ -377,9 +418,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     else:
                         status = "failed"
                     if not continue_on_error:
-                        rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
+                        finished_at = datetime.now(UTC)
+                        rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path, "started_at": started_at.isoformat(), "finished_at": finished_at.isoformat(), "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0)})
                         break
-                rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
+                finished_at = datetime.now(UTC)
+                rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path, "started_at": started_at.isoformat(), "finished_at": finished_at.isoformat(), "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0)})
                 if request_sleep > 0:
                     time.sleep(request_sleep)
 
@@ -391,4 +434,41 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
     s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
     s.to_csv(summary_path, index=False, encoding="utf-8-sig")
-    return {"catalog_path": str(catalog_path), "summary_path": str(summary_path), "rows": rows}
+    checklist_df, checklist_summary_df = build_acquisition_checklist(df)
+    checklist_path = out / "raw_source_acquisition_checklist.csv"
+    checklist_summary_path = out / "raw_source_acquisition_summary.csv"
+    checklist_df.to_csv(checklist_path, index=False, encoding="utf-8-sig")
+    checklist_summary_df.to_csv(checklist_summary_path, index=False, encoding="utf-8-sig")
+    return {
+        "catalog_path": str(catalog_path),
+        "summary_path": str(summary_path),
+        "checklist_path": str(checklist_path),
+        "checklist_summary_path": str(checklist_summary_path),
+        "rows": rows,
+    }
+
+
+def build_acquisition_checklist(catalog_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    phase_pairs = {
+        (family, row["api_name"])
+        for family in PHASE_COVERAGE_FAMILIES
+        for row in COVERAGE_API_SPECS.get(family, [])
+    }
+    all_pairs = set(phase_pairs) | EXCLUDED_APIS
+    status_map = {
+        (str(r.get("source_family", "")), str(r.get("api_name", ""))): str(r.get("status", ""))
+        for _, r in catalog_df.iterrows()
+    }
+    rows: list[dict[str, str]] = []
+    for family, api_name in sorted(all_pairs):
+        if (family, api_name) in EXCLUDED_APIS:
+            acq = "排除"
+        elif (family, api_name) in TEMP_DISABLED_APIS:
+            acq = "暂停获取"
+        else:
+            st = status_map.get((family, api_name), "").lower()
+            acq = "获取" if st == "success" else "暂停获取"
+        rows.append({"api_name": api_name, "source_family": family, "acquisition_status": acq})
+    checklist_df = pd.DataFrame(rows, columns=["api_name", "source_family", "acquisition_status"])
+    summary_df = checklist_df.groupby("acquisition_status", as_index=False).size().rename(columns={"size": "count"})
+    return checklist_df, summary_df

@@ -29,6 +29,7 @@ def test_broad_coverage_ingest_statuses_and_paths(tmp_path):
         end_date="20240331",
         adapter_map=adapters,
         continue_on_error=True,
+        include_disabled=True,
     )
     df = pd.read_csv(out["catalog_path"])
     assert {"success", "empty", "failed", "pending_adapter"}.issubset(set(df["status"]))
@@ -51,6 +52,7 @@ def test_continue_on_error_false_does_not_crash(tmp_path):
         end_date="20240331",
         adapter_map=adapters,
         continue_on_error=False,
+        include_disabled=True,
     )
     assert len(out["rows"]) >= 1
 
@@ -94,6 +96,7 @@ def test_parameter_filtering_avoids_unexpected_kwargs(tmp_path):
         end_date="20240331",
         adapter_map=adapters,
         continue_on_error=True,
+        include_disabled=True,
     )
 
     assert all(seen.values())
@@ -185,6 +188,7 @@ def test_stock_individual_info_em_csv_fallback_on_write_error(tmp_path):
         end_date="20240331",
         adapter_map={"stock_individual_info_em": ok_adapter},
         continue_on_error=True,
+        include_disabled=True,
     )
     df = pd.read_csv(out["catalog_path"])
     row = df.loc[df["api_name"] == "stock_individual_info_em"].iloc[0]
@@ -215,9 +219,101 @@ def test_phase18a13b_wave3_defensive_downgrade_to_empty(tmp_path):
         end_date="20240331",
         adapter_map=adapters,
         continue_on_error=True,
+        include_disabled=True,
     )
 
     df = pd.read_csv(out["catalog_path"])
     for api in ["stock_individual_info_em", "stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo"]:
         row = df.loc[df["api_name"] == api].iloc[0]
         assert row["status"] == "empty"
+
+
+def test_acquisition_checklist_outputs_and_rules(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import build_acquisition_checklist
+
+    catalog_df = pd.DataFrame(
+        [
+            {"source_family": "index_market", "api_name": "stock_zh_index_hist_csindex", "status": "success"},
+            {"source_family": "industry_concept", "api_name": "index_hist_sw", "status": "failed"},
+            {"source_family": "market_price", "api_name": "stock_zh_a_hist", "status": "success"},
+        ]
+    )
+    checklist_df, summary_df = build_acquisition_checklist(catalog_df)
+    assert list(checklist_df.columns) == ["api_name", "source_family", "acquisition_status"]
+    assert list(summary_df.columns) == ["acquisition_status", "count"]
+
+    # temp disabled must stay paused even if success
+    row_hist = checklist_df.loc[
+        (checklist_df["source_family"] == "market_price")
+        & (checklist_df["api_name"] == "stock_zh_a_hist")
+    ].iloc[0]
+    assert row_hist["acquisition_status"] == "暂停获取"
+
+    # explicit excluded api
+    row_daily = checklist_df.loc[
+        (checklist_df["source_family"] == "market_price")
+        & (checklist_df["api_name"] == "stock_zh_a_daily")
+    ].iloc[0]
+    assert row_daily["acquisition_status"] == "排除"
+
+    # success non-disabled api
+    row_index = checklist_df.loc[
+        (checklist_df["source_family"] == "index_market")
+        & (checklist_df["api_name"] == "stock_zh_index_hist_csindex")
+    ].iloc[0]
+    assert row_index["acquisition_status"] == "获取"
+
+
+def test_disabled_sources_skipped_by_default_and_timing_fields(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={},
+        continue_on_error=True,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_zh_a_hist"].iloc[0]
+    assert row["status"] == "skipped"
+    assert int(row["rows"]) == 0
+    assert "disabled_reason" in str(row["error_message"])
+    assert "started_at" in df.columns and "finished_at" in df.columns and "elapsed_sec" in df.columns
+
+
+def test_include_disabled_runs_disabled_sources(tmp_path):
+    seen = {"called": False}
+
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def adapter(**kwargs):
+        seen["called"] = True
+        return _Result(pd.DataFrame({"x": [1]}))
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_zh_a_hist": adapter},
+        continue_on_error=True,
+        include_disabled=True,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_zh_a_hist"].iloc[0]
+    assert row["status"] in {"success", "empty", "failed"}
+    assert seen["called"]
