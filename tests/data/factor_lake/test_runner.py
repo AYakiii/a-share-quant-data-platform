@@ -1,76 +1,58 @@
 from __future__ import annotations
 
-import time
+import sqlite3
 
 import pandas as pd
 
-from qsys.data.factor_lake.runner import run_probe
-from qsys.data.factor_lake.schemas import SourceCase
+from qsys.data.factor_lake.local_api import read_partition_metadata, read_raw_partition
+from qsys.data.factor_lake.metastore import FactorLakeMetastore
+from qsys.data.factor_lake.raw_ingest import run_raw_ingest
 
 
-class FakeAk:
-    def ok(self, symbol: str) -> pd.DataFrame:
-        return pd.DataFrame({"日期": ["2024-01-01"], "代码": [symbol]})
-
-    def empty(self, symbol: str) -> pd.DataFrame:
-        return pd.DataFrame(columns=["日期", "代码"])
-
-    def boom(self, symbol: str) -> pd.DataFrame:
-        raise ValueError("boom")
-
-    def slow(self, symbol: str) -> pd.DataFrame:
-        time.sleep(0.2)
-        return pd.DataFrame({"x": [1]})
+class _Result:
+    def __init__(self, raw: pd.DataFrame):
+        self.raw = raw
 
 
-def test_runner_statuses_and_catalog_count(monkeypatch, tmp_path):
-    cases = [
-        SourceCase("ok_case", "market_price", "ok", {"symbol": "000001", "extra": 1}, "ok"),
-        SourceCase("empty_case", "market_price", "empty", {"symbol": "000001"}, "empty"),
-        SourceCase("missing_case", "market_price", "missing_fn", {"symbol": "000001"}, "missing"),
-        SourceCase("failed_case", "market_price", "boom", {"symbol": "000001"}, "failed"),
-        SourceCase("timeout_case", "market_price", "slow", {"symbol": "000001"}, "timeout"),
-    ]
-    monkeypatch.setattr("qsys.data.factor_lake.runner.FACTOR_SOURCE_REGISTRY", cases)
-
-    manifest = run_probe(FakeAk(), output_root=tmp_path, timeout_seconds=0.05)
-    cat = pd.read_csv(tmp_path / "catalogs" / "api_call_catalog.csv")
-    assert manifest["selected_cases"] == len(cat) == len(cases)
-    assert set(cat["status"]) == {"success", "empty", "missing", "failed", "timeout"}
-    ok = cat.loc[cat["case_id"] == "ok_case"].iloc[0]
-    assert "extra" in ok["ignored_kwargs_json"]
+def _ok_stock(symbol: str, start_date: str, end_date: str):
+    return _Result(pd.DataFrame({"symbol": [symbol], "start_date": [start_date], "end_date": [end_date], "close": [10.0]}))
 
 
-def test_fallback_csv_when_parquet_write_fails(monkeypatch, tmp_path):
-    class AkMixed:
-        def mixed(self, symbol: str) -> pd.DataFrame:
-            return pd.DataFrame({"item": ["证券代码", "证券简称"], "value": ["000001", 1.23]})
-
-    def raise_arrow(*args, **kwargs):
-        raise ValueError("ArrowInvalid")
-
-    cases = [SourceCase("mixed_case", "market_price", "mixed", {"symbol": "000001"}, "mixed")]
-    monkeypatch.setattr("qsys.data.factor_lake.runner.FACTOR_SOURCE_REGISTRY", cases)
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", raise_arrow)
-    run_probe(AkMixed(), output_root=tmp_path)
-    cat = pd.read_csv(tmp_path / "catalogs" / "api_call_catalog.csv")
-    row = cat.iloc[0]
-    assert row["status"] == "success"
-    assert row["output_format"] == "csv"
-    assert "parquet_write_failed" in row["write_warning"]
+def _ok_index(symbol: str, start_date: str, end_date: str):
+    return _Result(pd.DataFrame({"index": [symbol], "trade_date": [start_date], "close": [3000.0]}))
 
 
-def test_non_dataframe_and_filters(monkeypatch, tmp_path):
-    class Ak2:
-        def not_df(self, symbol: str):
-            return {"x": 1}
+def _margin_sse(date: str):
+    return _Result(pd.DataFrame({"trade_date": [date], "exchange": ["sse"], "value": [1]}))
 
-    cases = [
-        SourceCase("ndf", "industry_concept", "not_df", {"symbol": "x"}, "ndf"),
-        SourceCase("other", "market_price", "not_df", {"symbol": "x"}, "ndf"),
-    ]
-    monkeypatch.setattr("qsys.data.factor_lake.runner.FACTOR_SOURCE_REGISTRY", cases)
-    run_probe(Ak2(), output_root=tmp_path, family="industry_concept", max_cases=1)
-    cat = pd.read_csv(tmp_path / "catalogs" / "api_call_catalog.csv")
-    assert len(cat) == 1
-    assert cat.iloc[0]["status"] == "non_dataframe"
+
+def _margin_szse(date: str):
+    return _Result(pd.DataFrame({"trade_date": [date], "exchange": ["szse"], "value": [2]}))
+
+
+def test_raw_ingest_and_local_api_with_synthetic_adapters(tmp_path):
+    ms = FactorLakeMetastore(tmp_path / "meta.sqlite")
+    adapters = {
+        "stock_zh_a_hist": _ok_stock,
+        "stock_zh_index_hist_csindex": _ok_index,
+        "stock_margin_detail_sse": _margin_sse,
+        "stock_margin_detail_szse": _margin_szse,
+    }
+
+    r1 = run_raw_ingest("daily_bar_raw", str(tmp_path), ms, adapter_map=adapters, symbol="000001", year="2024")
+    assert r1["status"] == "success"
+
+    run_raw_ingest("index_bar_raw", str(tmp_path), ms, adapter_map=adapters, index_symbol="000300", year="2024")
+    run_raw_ingest("margin_detail_raw", str(tmp_path), ms, adapter_map=adapters, exchanges=["sse", "szse"], trade_date="2024-03-29")
+
+    ddf = read_raw_partition(tmp_path, "daily_bar_raw", "stock_zh_a_hist", {"symbol": "000001", "year": "2024"})
+    assert list(ddf.columns) == ["symbol", "start_date", "end_date", "close"]
+
+    meta = read_partition_metadata(tmp_path, "daily_bar_raw", "stock_zh_a_hist", {"symbol": "000001", "year": "2024"})
+    assert meta["dataset"] == "daily_bar_raw"
+
+    with sqlite3.connect(tmp_path / "meta.sqlite") as conn:
+        inv = conn.execute("select count(*) from raw_dataset_inventory").fetchone()[0]
+        logs = conn.execute("select count(*) from ingest_run_log").fetchone()[0]
+    assert inv >= 4
+    assert logs >= 4

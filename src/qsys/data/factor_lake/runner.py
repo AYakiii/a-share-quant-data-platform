@@ -132,6 +132,8 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
             time.sleep(request_sleep)
 
     catalog_df = write_catalog(results, paths["catalogs"] / "api_call_catalog.csv")
+    if "status" not in catalog_df.columns:
+        catalog_df["status"] = pd.Series(dtype="object")
     for s, fname in [("failed", "failed_cases.csv"), ("empty", "empty_cases.csv"), ("missing", "missing_cases.csv"), ("timeout", "timeout_cases.csv")]:
         catalog_df[catalog_df["status"] == s].to_csv(paths["catalogs"] / fname, index=False, encoding="utf-8-sig")
 
@@ -142,6 +144,7 @@ def run_probe(ak_module: Any, output_root: str = "outputs/factor_lake_probe", fa
         "run_id": run_id,
         "selected_cases": len(selected),
         "catalog_rows": int(len(catalog_df)),
+        "no_matching_cases": len(selected) == 0,
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "output_root": str(paths["root"]),
     }
