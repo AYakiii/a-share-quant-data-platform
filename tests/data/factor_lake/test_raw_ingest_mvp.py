@@ -33,13 +33,14 @@ def test_dataset_centered_raw_ingest_mvp_writes_outputs(tmp_path):
         continue_on_error=True,
     )
 
-    assert (tmp_path / "outputs" / "factor_lake_raw_ingest_mvp" / "raw_ingest_catalog.csv").exists()
-    assert (tmp_path / "outputs" / "factor_lake_raw_ingest_mvp" / "raw_ingest_summary.csv").exists()
+    assert (tmp_path / "raw_ingest_catalog.csv").exists()
+    assert (tmp_path / "raw_ingest_summary.csv").exists()
 
     df = read_raw_partition(tmp_path, "daily_bar_raw", "stock_zh_a_daily", {"symbol": "000001", "start_date": "20240101", "end_date": "20240331"})
     assert "close" in df.columns
     meta = read_partition_metadata(tmp_path, "daily_bar_raw", "stock_zh_a_daily", {"symbol": "000001", "start_date": "20240101", "end_date": "20240331"})
     assert meta["dataset"] == "daily_bar_raw"
+    assert not (tmp_path / "outputs" / "factor_lake_raw_ingest_mvp").exists()
 
 
 def test_continue_on_error_false_stops_early(tmp_path):

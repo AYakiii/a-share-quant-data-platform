@@ -161,9 +161,11 @@ def run_raw_ingest_mvp(datasets: list[str], root: str, metastore_path: str, symb
             rec2["run_id"] = r["run_id"]
             catalog_rows.append(rec2)
     catalog_df = pd.DataFrame(catalog_rows)
-    out = f"{root}/outputs/factor_lake_raw_ingest_mvp"
-    Path(out).mkdir(parents=True, exist_ok=True)
-    catalog_df.to_csv(f"{out}/raw_ingest_catalog.csv", index=False, encoding="utf-8-sig")
+    out = Path(root)
+    out.mkdir(parents=True, exist_ok=True)
+    catalog_path = out / "raw_ingest_catalog.csv"
+    summary_path = out / "raw_ingest_summary.csv"
+    catalog_df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
     summary = catalog_df.groupby(["dataset", "status"], as_index=False).size() if not catalog_df.empty else pd.DataFrame(columns=["dataset", "status", "size"])
-    summary.to_csv(f"{out}/raw_ingest_summary.csv", index=False, encoding="utf-8-sig")
-    return {"results": results, "catalog_path": f"{out}/raw_ingest_catalog.csv", "summary_path": f"{out}/raw_ingest_summary.csv"}
+    summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    return {"results": results, "catalog_path": str(catalog_path), "summary_path": str(summary_path)}
