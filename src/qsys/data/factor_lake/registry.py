@@ -12,6 +12,8 @@ API_BY_FAMILY = {
     "industry_concept": ["stock_industry_category_cninfo", "stock_industry_change_cninfo", "stock_industry_clf_hist_sw", "sw_index_first_info", "sw_index_second_info", "sw_index_third_info", "sw_index_third_cons", "stock_board_industry_name_ths", "stock_board_industry_cons_ths", "stock_board_industry_index_ths", "stock_board_industry_info_ths", "stock_board_industry_summary_ths", "stock_board_concept_name_ths", "stock_board_concept_cons_ths", "stock_board_concept_index_ths", "stock_board_concept_info_ths", "stock_board_concept_summary_ths", "stock_board_industry_name_em", "stock_board_industry_cons_em", "stock_board_industry_hist_em", "stock_board_concept_name_em", "stock_board_concept_cons_em", "stock_board_concept_hist_em"],
     "event_ownership": ["stock_zh_a_gdhs", "stock_zh_a_gdhs_detail_em", "stock_gdfx_free_holding_analyse_em", "stock_gdfx_holding_analyse_em", "stock_gpzy_pledge_ratio_em", "stock_gpzy_pledge_ratio_detail_em", "stock_gpzy_industry_data_em", "stock_gpzy_profile_em", "stock_fhps_em", "stock_history_dividend", "stock_history_dividend_detail", "stock_restricted_release_queue_em", "stock_restricted_release_summary_em", "stock_restricted_release_detail_em", "stock_dzjy_sctj", "stock_dzjy_mrmx", "stock_dzjy_mrtj", "stock_dzjy_hyyybtj", "stock_lhb_detail_em", "stock_lhb_stock_statistic_em", "stock_lhb_jgmmtj_em", "stock_lhb_hyyyb_em", "stock_lhb_yybph_em"],
     "disclosure_ir": ["stock_zh_a_disclosure_relation_cninfo", "stock_jgdy_tj_em", "stock_jgdy_detail_em"],
+    "trading_attention": ["stock_hot_rank_em", "stock_hot_up_em", "stock_hot_follow_xq", "stock_changes_em"],
+    "corporate_action": ["stock_register_kcb", "stock_register_cyb"],
 }
 
 KWARGS_BY_API: dict[str, dict] = {
@@ -64,6 +66,12 @@ KWARGS_BY_API: dict[str, dict] = {
     "stock_dzjy_mrmx": {"date": "20240329"},
     "stock_dzjy_mrtj": {"date": "20240329"},
     "stock_lhb_detail_em": {"date": "20240329"},
+    "stock_hot_rank_em": {},
+    "stock_hot_up_em": {},
+    "stock_hot_follow_xq": {"symbol": "SZ000001"},
+    "stock_changes_em": {"symbol": "火箭发射"},
+    "stock_register_kcb": {},
+    "stock_register_cyb": {},
 }
 
 
