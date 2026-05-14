@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
 import uuid
 from dataclasses import dataclass
@@ -269,14 +270,26 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     if fn is None:
                         status = "pending_adapter"
                     else:
-                        ret = fn(**params)
+                        filtered = params
+                        try:
+                            sig = inspect.signature(fn)
+                            accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                            if not accepts_kwargs:
+                                allowed = set(sig.parameters.keys())
+                                filtered = {k: v for k, v in params.items() if k in allowed}
+                        except (TypeError, ValueError):
+                            filtered = params
+
+                        ret = fn(**filtered)
+                        if ret is None:
+                            raise ValueError("none_result_from_api")
                         raw = ret.raw if hasattr(ret, "raw") else ret
                         if not isinstance(raw, pd.DataFrame):
                             raw = pd.DataFrame(raw)
                         n_rows = len(raw)
                         status = "empty" if raw.empty else "success"
                         partition = {"scope": "coverage", "key": api_name}
-                        dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": params, "status": status, "row_count": n_rows})
+                        dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
                         out_path, meta_path = str(dp), str(mp)
                 except Exception as exc:  # noqa: BLE001
                     status = "failed"
