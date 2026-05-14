@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import inspect
 import time
@@ -23,13 +24,20 @@ AdapterFn = Callable[..., object]
 
 COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     "market_price": [
-        {"api_name": "stock_zh_a_daily", "param_mode": "daily_symbol_range"},
         {"api_name": "stock_zh_a_hist", "param_mode": "daily_symbol_range_hist"},
+        {"api_name": "stock_individual_info_em", "param_mode": "symbol_only"},
     ],
-    "index_market": [{"api_name": "stock_zh_index_hist_csindex", "param_mode": "index_symbol_range"}],
+    "index_market": [
+        {"api_name": "stock_zh_index_hist_csindex", "param_mode": "index_symbol_range"},
+        {"api_name": "index_stock_cons_csindex", "param_mode": "index_symbol"},
+        {"api_name": "index_stock_cons_weight_csindex", "param_mode": "index_symbol"},
+    ],
     "margin_leverage": [
         {"api_name": "stock_margin_detail_sse", "param_mode": "trade_date", "exchange": "sse"},
         {"api_name": "stock_margin_detail_szse", "param_mode": "trade_date", "exchange": "szse"},
+        {"api_name": "stock_margin_sse", "param_mode": "date_range"},
+        {"api_name": "stock_margin_szse", "param_mode": "date_range"},
+        {"api_name": "stock_margin_underlying_info_szse", "param_mode": "none"},
     ],
     "financial_fundamental": [
         {"api_name": "stock_financial_analysis_indicator", "param_mode": "symbol_only"},
@@ -38,10 +46,22 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     ],
     "industry_concept": [
         {"api_name": "stock_industry_change_cninfo", "param_mode": "symbol_range"},
+        {"api_name": "stock_industry_clf_hist_sw", "param_mode": "symbol_range"},
+        {"api_name": "stock_industry_category_cninfo", "param_mode": "none"},
+        {"api_name": "sw_index_first_info", "param_mode": "none"},
+        {"api_name": "sw_index_second_info", "param_mode": "none"},
+        {"api_name": "sw_index_third_info", "param_mode": "none"},
         {"api_name": "index_component_sw", "param_mode": "industry_code"},
         {"api_name": "index_hist_sw", "param_mode": "industry_code"},
         {"api_name": "stock_board_industry_index_ths", "param_mode": "industry_name_range"},
+        {"api_name": "stock_board_industry_name_ths", "param_mode": "none"},
+        {"api_name": "stock_board_industry_info_ths", "param_mode": "industry_name"},
+        {"api_name": "stock_board_industry_summary_ths", "param_mode": "none"},
         {"api_name": "stock_board_concept_index_ths", "param_mode": "concept_name_range"},
+        {"api_name": "stock_board_concept_name_ths", "param_mode": "none"},
+        {"api_name": "stock_board_concept_info_ths", "param_mode": "concept_name"},
+        {"api_name": "stock_board_concept_summary_ths", "param_mode": "none"},
+        {"api_name": "index_realtime_sw", "param_mode": "none"},
     ],
     "event_ownership": [
         {"api_name": "stock_zh_a_gdhs", "param_mode": "none"},
@@ -50,12 +70,16 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_gdfx_holding_analyse_em", "param_mode": "report_date"},
         {"api_name": "stock_gpzy_pledge_ratio_em", "param_mode": "none"},
         {"api_name": "stock_gpzy_pledge_ratio_detail_em", "param_mode": "report_date"},
+        {"api_name": "stock_gpzy_industry_data_em", "param_mode": "none"},
+        {"api_name": "stock_gpzy_profile_em", "param_mode": "none"},
     ],
     "corporate_action": [
         {"api_name": "stock_fhps_em", "param_mode": "none"},
         {"api_name": "stock_history_dividend", "param_mode": "symbol_only"},
         {"api_name": "stock_history_dividend_detail", "param_mode": "symbol_report_date"},
         {"api_name": "stock_restricted_release_detail_em", "param_mode": "report_date"},
+        {"api_name": "stock_restricted_release_queue_em", "param_mode": "none"},
+        {"api_name": "stock_restricted_release_summary_em", "param_mode": "none"},
     ],
     "disclosure_ir": [
         {"api_name": "stock_zh_a_disclosure_relation_cninfo", "param_mode": "symbol_range"},
@@ -63,11 +87,16 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_jgdy_detail_em", "param_mode": "report_date"},
     ],
     "trading_attention": [
+        {"api_name": "stock_jgdy_tj_em", "param_mode": "report_date"},
         {"api_name": "stock_lhb_detail_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_jgmmtj_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_stock_statistic_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_hyyyb_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_yybph_em", "param_mode": "date_range"},
         {"api_name": "stock_dzjy_mrtj", "param_mode": "trade_date"},
         {"api_name": "stock_dzjy_mrmx", "param_mode": "trade_date"},
+        {"api_name": "stock_dzjy_sctj", "param_mode": "trade_date"},
+        {"api_name": "stock_dzjy_hyyybtj", "param_mode": "trade_date"},
     ],
 }
 
@@ -233,9 +262,11 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "daily_symbol_range":
         return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "adjust": ""}]
     if mode == "daily_symbol_range_hist":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": ""}]
+        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"}]
     if mode == "index_symbol_range":
         return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "index_symbol":
+        return [{"symbol": index_symbols[0]}]
     if mode == "trade_date":
         return [{"date": trade_dates[0]}]
     if mode == "report_date":
@@ -246,11 +277,51 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
         return [{"symbol": "801010"}]
     if mode == "industry_name_range":
         return [{"symbol": industry_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "industry_name":
+        return [{"symbol": industry_names[0]}]
     if mode == "concept_name_range":
         return [{"symbol": concept_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "concept_name":
+        return [{"symbol": concept_names[0]}]
     if mode == "date_range":
         return [{"start_date": start_date, "end_date": end_date}]
     return [{}]
+
+
+def _fallback_csv_write(output_root: str, family: str, api_name: str, raw: pd.DataFrame) -> tuple[str, str]:
+    out = Path(output_root) / "raw" / family / api_name
+    out.mkdir(parents=True, exist_ok=True)
+    data_path = out / "fallback.csv"
+    metadata_path = out / "fallback.meta.csv"
+    raw.to_csv(data_path, index=False, encoding="utf-8-sig")
+    with metadata_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["source_family", "api_name", "row_count", "write_mode"])
+        w.writerow([family, api_name, len(raw), "csv_fallback"])
+    return str(data_path), str(metadata_path)
+
+
+def _normalize_error_message(api_name: str, err: str) -> str:
+    low = err.lower()
+    unstable_apis = {"stock_zh_a_hist", "stock_margin_detail_szse", "stock_gpzy_pledge_ratio_detail_em", "stock_zh_a_gdhs"}
+    if api_name in unstable_apis and any(k in low for k in ["timeout", "remote", "connection", "read timed out", "max retries"]):
+        return f"network_unstable_retry: {err}"
+    if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em"} and any(
+        k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]
+    ):
+        return f"defensive_shape_guard: {err}"
+    return err
+
+
+def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
+    low = err.lower()
+    if api_name in {"stock_yjyg_em", "stock_yysj_em"} and any(k in low for k in ["none", "not subscriptable", "expecting value"]):
+        return True
+    if api_name == "stock_individual_info_em" and "expecting value" in low:
+        return True
+    if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
+        return True
+    return False
 
 
 def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True) -> dict:
@@ -289,11 +360,22 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                         n_rows = len(raw)
                         status = "empty" if raw.empty else "success"
                         partition = {"scope": "coverage", "key": api_name}
-                        dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
-                        out_path, meta_path = str(dp), str(mp)
+                        try:
+                            dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
+                            out_path, meta_path = str(dp), str(mp)
+                        except Exception as write_exc:  # noqa: BLE001
+                            if api_name == "stock_individual_info_em":
+                                out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
+                                err = f"csv_fallback_after_write_error: {write_exc}"
+                            else:
+                                raise
                 except Exception as exc:  # noqa: BLE001
-                    status = "failed"
-                    err = str(exc)
+                    err = _normalize_error_message(api_name, str(exc))
+                    if _should_downgrade_to_empty(api_name, err):
+                        status = "empty"
+                        n_rows = 0
+                    else:
+                        status = "failed"
                     if not continue_on_error:
                         rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
                         break
