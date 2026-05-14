@@ -147,3 +147,46 @@ def test_phase18a12_viable_whitelist_coverage_exactness():
     extra = phase_set - whitelist
     assert not extra, f"unexpected non-whitelist APIs in phase set: {sorted(extra)}"
     assert "stock_zh_a_daily" not in phase_set
+
+
+def test_recovery_seed_params_and_error_normalization(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import _params_for_mode, _normalize_error_message
+
+    hist = _params_for_mode(
+        "daily_symbol_range_hist", ["000001"], ["000300"], ["20240331"], ["20240329"], ["半导体"], ["AI PC"], "20240101", "20240331"
+    )[0]
+    assert hist["period"] == "daily"
+    assert hist["adjust"] == "qfq"
+
+    assert "network_unstable_retry" in _normalize_error_message("stock_zh_a_hist", "Read timed out")
+    assert "defensive_shape_guard" in _normalize_error_message("stock_yjyg_em", "NoneType object")
+
+
+def test_stock_individual_info_em_csv_fallback_on_write_error(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
+
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def ok_adapter(**kwargs):
+        return _Result(pd.DataFrame({"symbol": [kwargs.get("symbol", "000001")], "mixed": [{"k": 1}]}))
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_individual_info_em": ok_adapter},
+        continue_on_error=True,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_individual_info_em"].iloc[0]
+    assert row["status"] == "success"
+    assert str(row["output_path"]).endswith(".csv") or str(row["output_path"]).endswith(".parquet")

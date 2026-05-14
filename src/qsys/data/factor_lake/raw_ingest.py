@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import inspect
 import time
@@ -261,7 +262,7 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "daily_symbol_range":
         return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "adjust": ""}]
     if mode == "daily_symbol_range_hist":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": ""}]
+        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"}]
     if mode == "index_symbol_range":
         return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
     if mode == "index_symbol":
@@ -285,6 +286,31 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "date_range":
         return [{"start_date": start_date, "end_date": end_date}]
     return [{}]
+
+
+def _fallback_csv_write(output_root: str, family: str, api_name: str, raw: pd.DataFrame) -> tuple[str, str]:
+    out = Path(output_root) / "raw" / family / api_name
+    out.mkdir(parents=True, exist_ok=True)
+    data_path = out / "fallback.csv"
+    metadata_path = out / "fallback.meta.csv"
+    raw.to_csv(data_path, index=False, encoding="utf-8-sig")
+    with metadata_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["source_family", "api_name", "row_count", "write_mode"])
+        w.writerow([family, api_name, len(raw), "csv_fallback"])
+    return str(data_path), str(metadata_path)
+
+
+def _normalize_error_message(api_name: str, err: str) -> str:
+    low = err.lower()
+    unstable_apis = {"stock_zh_a_hist", "stock_margin_detail_szse", "stock_gpzy_pledge_ratio_detail_em", "stock_zh_a_gdhs"}
+    if api_name in unstable_apis and any(k in low for k in ["timeout", "remote", "connection", "read timed out", "max retries"]):
+        return f"network_unstable_retry: {err}"
+    if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em"} and any(
+        k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]
+    ):
+        return f"defensive_shape_guard: {err}"
+    return err
 
 
 def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True) -> dict:
@@ -323,11 +349,18 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                         n_rows = len(raw)
                         status = "empty" if raw.empty else "success"
                         partition = {"scope": "coverage", "key": api_name}
-                        dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
-                        out_path, meta_path = str(dp), str(mp)
+                        try:
+                            dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
+                            out_path, meta_path = str(dp), str(mp)
+                        except Exception as write_exc:  # noqa: BLE001
+                            if api_name == "stock_individual_info_em":
+                                out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
+                                err = f"csv_fallback_after_write_error: {write_exc}"
+                            else:
+                                raise
                 except Exception as exc:  # noqa: BLE001
                     status = "failed"
-                    err = str(exc)
+                    err = _normalize_error_message(api_name, str(exc))
                     if not continue_on_error:
                         rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
                         break
