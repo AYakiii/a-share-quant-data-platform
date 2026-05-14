@@ -12,7 +12,7 @@ class _Result:
 
 def test_broad_coverage_ingest_statuses_and_paths(tmp_path):
     adapters = {
-        "stock_zh_a_daily": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})),
+        "stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})),
         "stock_zh_index_hist_csindex": lambda **kwargs: _Result(pd.DataFrame()),
         "stock_margin_detail_sse": lambda **kwargs: (_ for _ in ()).throw(ValueError("fail")),
     }
@@ -99,3 +99,94 @@ def test_parameter_filtering_avoids_unexpected_kwargs(tmp_path):
     assert all(seen.values())
     df = pd.read_csv(out["catalog_path"])
     assert set(df.loc[df["api_name"].isin(["stock_gpzy_pledge_ratio_detail_em", "stock_lhb_stock_statistic_em", "stock_dzjy_mrtj", "stock_dzjy_mrmx"]), "status"]) == {"success"}
+
+
+
+
+def test_phase18a12_viable_whitelist_coverage_exactness():
+    from qsys.data.factor_lake.raw_ingest import COVERAGE_API_SPECS
+
+    whitelist = {
+        "stock_zh_a_hist","stock_individual_info_em","stock_zh_index_hist_csindex","index_stock_cons_csindex","index_stock_cons_weight_csindex",
+        "stock_financial_analysis_indicator","stock_yjyg_em","stock_yysj_em","stock_margin_sse","stock_margin_detail_sse","stock_margin_szse",
+        "stock_margin_detail_szse","stock_margin_underlying_info_szse","stock_industry_category_cninfo","stock_industry_change_cninfo",
+        "stock_industry_clf_hist_sw","sw_index_first_info","sw_index_second_info","sw_index_third_info","index_component_sw","index_hist_sw",
+        "index_realtime_sw","stock_board_industry_name_ths","stock_board_industry_index_ths","stock_board_industry_info_ths",
+        "stock_board_industry_summary_ths","stock_board_concept_name_ths","stock_board_concept_index_ths","stock_board_concept_info_ths",
+        "stock_board_concept_summary_ths","stock_zh_a_gdhs","stock_zh_a_gdhs_detail_em","stock_gdfx_free_holding_analyse_em",
+        "stock_gdfx_holding_analyse_em","stock_gpzy_pledge_ratio_em","stock_gpzy_pledge_ratio_detail_em","stock_gpzy_industry_data_em",
+        "stock_gpzy_profile_em","stock_fhps_em","stock_history_dividend","stock_history_dividend_detail","stock_restricted_release_queue_em",
+        "stock_restricted_release_summary_em","stock_restricted_release_detail_em","stock_dzjy_sctj","stock_dzjy_mrmx","stock_dzjy_mrtj",
+        "stock_dzjy_hyyybtj","stock_lhb_detail_em","stock_lhb_stock_statistic_em","stock_lhb_jgmmtj_em","stock_lhb_hyyyb_em",
+        "stock_lhb_yybph_em","stock_jgdy_tj_em",
+    }
+    assert len(whitelist) == 54
+
+    phase_families = [
+        "market_price",
+        "index_market",
+        "financial_fundamental",
+        "margin_leverage",
+        "industry_concept",
+        "event_ownership",
+        "corporate_action",
+        "trading_attention",
+    ]
+    phase_set = {
+        row["api_name"]
+        for family in phase_families
+        for row in COVERAGE_API_SPECS.get(family, [])
+    }
+
+    missing = whitelist - phase_set
+    assert not missing, f"missing viable APIs: {sorted(missing)}"
+
+    assert "stock_industry_clf_hist_sw" in phase_set
+    assert "stock_jgdy_tj_em" in phase_set
+
+    extra = phase_set - whitelist
+    assert not extra, f"unexpected non-whitelist APIs in phase set: {sorted(extra)}"
+    assert "stock_zh_a_daily" not in phase_set
+
+
+def test_recovery_seed_params_and_error_normalization(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import _params_for_mode, _normalize_error_message
+
+    hist = _params_for_mode(
+        "daily_symbol_range_hist", ["000001"], ["000300"], ["20240331"], ["20240329"], ["半导体"], ["AI PC"], "20240101", "20240331"
+    )[0]
+    assert hist["period"] == "daily"
+    assert hist["adjust"] == "qfq"
+
+    assert "network_unstable_retry" in _normalize_error_message("stock_zh_a_hist", "Read timed out")
+    assert "defensive_shape_guard" in _normalize_error_message("stock_yjyg_em", "NoneType object")
+
+
+def test_stock_individual_info_em_csv_fallback_on_write_error(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
+
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def ok_adapter(**kwargs):
+        return _Result(pd.DataFrame({"symbol": [kwargs.get("symbol", "000001")], "mixed": [{"k": 1}]}))
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_individual_info_em": ok_adapter},
+        continue_on_error=True,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_individual_info_em"].iloc[0]
+    assert row["status"] == "success"
+    assert str(row["output_path"]).endswith(".csv") or str(row["output_path"]).endswith(".parquet")
