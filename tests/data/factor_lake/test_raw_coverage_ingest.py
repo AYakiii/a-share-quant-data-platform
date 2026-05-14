@@ -12,7 +12,7 @@ class _Result:
 
 def test_broad_coverage_ingest_statuses_and_paths(tmp_path):
     adapters = {
-        "stock_zh_a_daily": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})),
+        "stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})),
         "stock_zh_index_hist_csindex": lambda **kwargs: _Result(pd.DataFrame()),
         "stock_margin_detail_sse": lambda **kwargs: (_ for _ in ()).throw(ValueError("fail")),
     }
@@ -101,24 +101,49 @@ def test_parameter_filtering_avoids_unexpected_kwargs(tmp_path):
     assert set(df.loc[df["api_name"].isin(["stock_gpzy_pledge_ratio_detail_em", "stock_lhb_stock_statistic_em", "stock_dzjy_mrtj", "stock_dzjy_mrmx"]), "status"]) == {"success"}
 
 
-def test_phase18a12_expansion_apis_included_in_coverage_specs():
+
+
+def test_phase18a12_viable_whitelist_coverage_exactness():
     from qsys.data.factor_lake.raw_ingest import COVERAGE_API_SPECS
 
-    expected = {
-        "corporate_action": {"stock_history_dividend_detail", "stock_restricted_release_queue_em", "stock_restricted_release_summary_em"},
-        "event_ownership": {"stock_gpzy_industry_data_em", "stock_gpzy_profile_em"},
-        "index_market": {"index_stock_cons_csindex", "index_stock_cons_weight_csindex"},
-        "industry_concept": {
-            "index_realtime_sw", "stock_board_concept_info_ths", "stock_board_concept_name_ths",
-            "stock_board_concept_summary_ths", "stock_board_industry_info_ths", "stock_board_industry_name_ths",
-            "stock_board_industry_summary_ths", "stock_industry_category_cninfo", "sw_index_first_info",
-            "sw_index_second_info", "sw_index_third_info",
-        },
-        "margin_leverage": {"stock_margin_sse", "stock_margin_szse", "stock_margin_underlying_info_szse"},
-        "market_price": {"stock_individual_info_em"},
-        "trading_attention": {"stock_dzjy_hyyybtj", "stock_dzjy_sctj", "stock_lhb_hyyyb_em", "stock_lhb_yybph_em"},
+    whitelist = {
+        "stock_zh_a_hist","stock_individual_info_em","stock_zh_index_hist_csindex","index_stock_cons_csindex","index_stock_cons_weight_csindex",
+        "stock_financial_analysis_indicator","stock_yjyg_em","stock_yysj_em","stock_margin_sse","stock_margin_detail_sse","stock_margin_szse",
+        "stock_margin_detail_szse","stock_margin_underlying_info_szse","stock_industry_category_cninfo","stock_industry_change_cninfo",
+        "stock_industry_clf_hist_sw","sw_index_first_info","sw_index_second_info","sw_index_third_info","index_component_sw","index_hist_sw",
+        "index_realtime_sw","stock_board_industry_name_ths","stock_board_industry_index_ths","stock_board_industry_info_ths",
+        "stock_board_industry_summary_ths","stock_board_concept_name_ths","stock_board_concept_index_ths","stock_board_concept_info_ths",
+        "stock_board_concept_summary_ths","stock_zh_a_gdhs","stock_zh_a_gdhs_detail_em","stock_gdfx_free_holding_analyse_em",
+        "stock_gdfx_holding_analyse_em","stock_gpzy_pledge_ratio_em","stock_gpzy_pledge_ratio_detail_em","stock_gpzy_industry_data_em",
+        "stock_gpzy_profile_em","stock_fhps_em","stock_history_dividend","stock_history_dividend_detail","stock_restricted_release_queue_em",
+        "stock_restricted_release_summary_em","stock_restricted_release_detail_em","stock_dzjy_sctj","stock_dzjy_mrmx","stock_dzjy_mrtj",
+        "stock_dzjy_hyyybtj","stock_lhb_detail_em","stock_lhb_stock_statistic_em","stock_lhb_jgmmtj_em","stock_lhb_hyyyb_em",
+        "stock_lhb_yybph_em","stock_jgdy_tj_em",
+    }
+    assert len(whitelist) == 54
+
+    phase_families = [
+        "market_price",
+        "index_market",
+        "financial_fundamental",
+        "margin_leverage",
+        "industry_concept",
+        "event_ownership",
+        "corporate_action",
+        "trading_attention",
+    ]
+    phase_set = {
+        row["api_name"]
+        for family in phase_families
+        for row in COVERAGE_API_SPECS.get(family, [])
     }
 
-    for family, apis in expected.items():
-        configured = {row["api_name"] for row in COVERAGE_API_SPECS[family]}
-        assert apis.issubset(configured)
+    missing = whitelist - phase_set
+    assert not missing, f"missing viable APIs: {sorted(missing)}"
+
+    assert "stock_industry_clf_hist_sw" in phase_set
+    assert "stock_jgdy_tj_em" in phase_set
+
+    extra = phase_set - whitelist
+    assert not extra, f"unexpected non-whitelist APIs in phase set: {sorted(extra)}"
+    assert "stock_zh_a_daily" not in phase_set

@@ -23,7 +23,6 @@ AdapterFn = Callable[..., object]
 
 COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     "market_price": [
-        {"api_name": "stock_zh_a_daily", "param_mode": "daily_symbol_range"},
         {"api_name": "stock_zh_a_hist", "param_mode": "daily_symbol_range_hist"},
         {"api_name": "stock_individual_info_em", "param_mode": "symbol_only"},
     ],
@@ -46,6 +45,7 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     ],
     "industry_concept": [
         {"api_name": "stock_industry_change_cninfo", "param_mode": "symbol_range"},
+        {"api_name": "stock_industry_clf_hist_sw", "param_mode": "symbol_range"},
         {"api_name": "stock_industry_category_cninfo", "param_mode": "none"},
         {"api_name": "sw_index_first_info", "param_mode": "none"},
         {"api_name": "sw_index_second_info", "param_mode": "none"},
@@ -86,6 +86,7 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_jgdy_detail_em", "param_mode": "report_date"},
     ],
     "trading_attention": [
+        {"api_name": "stock_jgdy_tj_em", "param_mode": "report_date"},
         {"api_name": "stock_lhb_detail_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_jgmmtj_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_stock_statistic_em", "param_mode": "date_range"},
