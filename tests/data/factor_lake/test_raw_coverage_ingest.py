@@ -190,3 +190,34 @@ def test_stock_individual_info_em_csv_fallback_on_write_error(tmp_path):
     row = df.loc[df["api_name"] == "stock_individual_info_em"].iloc[0]
     assert row["status"] == "success"
     assert str(row["output_path"]).endswith(".csv") or str(row["output_path"]).endswith(".parquet")
+
+
+def test_phase18a13b_wave3_defensive_downgrade_to_empty(tmp_path):
+    from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
+
+    adapters = {
+        "stock_individual_info_em": lambda **kwargs: (_ for _ in ()).throw(ValueError("Expecting value: line 1")),
+        "stock_yjyg_em": lambda **kwargs: (_ for _ in ()).throw(TypeError("'NoneType' object is not subscriptable")),
+        "stock_yysj_em": lambda **kwargs: (_ for _ in ()).throw(TypeError("'NoneType' object is not subscriptable")),
+        "stock_industry_change_cninfo": lambda **kwargs: (_ for _ in ()).throw(KeyError("变更日期")),
+    }
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price", "financial_fundamental", "industry_concept"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map=adapters,
+        continue_on_error=True,
+    )
+
+    df = pd.read_csv(out["catalog_path"])
+    for api in ["stock_individual_info_em", "stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo"]:
+        row = df.loc[df["api_name"] == api].iloc[0]
+        assert row["status"] == "empty"

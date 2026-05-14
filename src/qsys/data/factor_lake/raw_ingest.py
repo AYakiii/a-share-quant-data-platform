@@ -313,6 +313,17 @@ def _normalize_error_message(api_name: str, err: str) -> str:
     return err
 
 
+def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
+    low = err.lower()
+    if api_name in {"stock_yjyg_em", "stock_yysj_em"} and any(k in low for k in ["none", "not subscriptable", "expecting value"]):
+        return True
+    if api_name == "stock_individual_info_em" and "expecting value" in low:
+        return True
+    if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
+        return True
+    return False
+
+
 def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True) -> dict:
     adapters = adapter_map or {}
     rows: list[dict] = []
@@ -359,8 +370,12 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                             else:
                                 raise
                 except Exception as exc:  # noqa: BLE001
-                    status = "failed"
                     err = _normalize_error_message(api_name, str(exc))
+                    if _should_downgrade_to_empty(api_name, err):
+                        status = "empty"
+                        n_rows = 0
+                    else:
+                        status = "failed"
                     if not continue_on_error:
                         rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
                         break
