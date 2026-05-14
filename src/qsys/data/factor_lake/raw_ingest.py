@@ -20,6 +20,57 @@ from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock
 AdapterFn = Callable[..., object]
 
 
+COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
+    "market_price": [
+        {"api_name": "stock_zh_a_daily", "param_mode": "daily_symbol_range"},
+        {"api_name": "stock_zh_a_hist", "param_mode": "daily_symbol_range_hist"},
+    ],
+    "index_market": [{"api_name": "stock_zh_index_hist_csindex", "param_mode": "index_symbol_range"}],
+    "margin_leverage": [
+        {"api_name": "stock_margin_detail_sse", "param_mode": "trade_date", "exchange": "sse"},
+        {"api_name": "stock_margin_detail_szse", "param_mode": "trade_date", "exchange": "szse"},
+    ],
+    "financial_fundamental": [
+        {"api_name": "stock_financial_analysis_indicator", "param_mode": "symbol_only"},
+        {"api_name": "stock_yjyg_em", "param_mode": "report_date"},
+        {"api_name": "stock_yysj_em", "param_mode": "report_date"},
+    ],
+    "industry_concept": [
+        {"api_name": "stock_industry_change_cninfo", "param_mode": "symbol_range"},
+        {"api_name": "index_component_sw", "param_mode": "industry_code"},
+        {"api_name": "index_hist_sw", "param_mode": "industry_code"},
+        {"api_name": "stock_board_industry_index_ths", "param_mode": "industry_name_range"},
+        {"api_name": "stock_board_concept_index_ths", "param_mode": "concept_name_range"},
+    ],
+    "event_ownership": [
+        {"api_name": "stock_zh_a_gdhs", "param_mode": "none"},
+        {"api_name": "stock_zh_a_gdhs_detail_em", "param_mode": "symbol_only"},
+        {"api_name": "stock_gdfx_free_holding_analyse_em", "param_mode": "report_date"},
+        {"api_name": "stock_gdfx_holding_analyse_em", "param_mode": "report_date"},
+        {"api_name": "stock_gpzy_pledge_ratio_em", "param_mode": "none"},
+        {"api_name": "stock_gpzy_pledge_ratio_detail_em", "param_mode": "report_date"},
+    ],
+    "corporate_action": [
+        {"api_name": "stock_fhps_em", "param_mode": "none"},
+        {"api_name": "stock_history_dividend", "param_mode": "symbol_only"},
+        {"api_name": "stock_history_dividend_detail", "param_mode": "symbol_report_date"},
+        {"api_name": "stock_restricted_release_detail_em", "param_mode": "report_date"},
+    ],
+    "disclosure_ir": [
+        {"api_name": "stock_zh_a_disclosure_relation_cninfo", "param_mode": "symbol_range"},
+        {"api_name": "stock_jgdy_tj_em", "param_mode": "report_date"},
+        {"api_name": "stock_jgdy_detail_em", "param_mode": "report_date"},
+    ],
+    "trading_attention": [
+        {"api_name": "stock_lhb_detail_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_jgmmtj_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_stock_statistic_em", "param_mode": "date_range"},
+        {"api_name": "stock_dzjy_mrtj", "param_mode": "trade_date"},
+        {"api_name": "stock_dzjy_mrmx", "param_mode": "trade_date"},
+    ],
+}
+
+
 @dataclass
 class IngestRecord:
     dataset: str
@@ -169,3 +220,80 @@ def run_raw_ingest_mvp(datasets: list[str], root: str, metastore_path: str, symb
     summary = catalog_df.groupby(["dataset", "status"], as_index=False).size() if not catalog_df.empty else pd.DataFrame(columns=["dataset", "status", "size"])
     summary.to_csv(summary_path, index=False, encoding="utf-8-sig")
     return {"results": results, "catalog_path": str(catalog_path), "summary_path": str(summary_path)}
+
+
+def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str) -> list[dict[str, str]]:
+    if mode == "none":
+        return [{}]
+    if mode == "symbol_only":
+        return [{"symbol": symbols[0]}]
+    if mode == "symbol_range":
+        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "daily_symbol_range":
+        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "adjust": ""}]
+    if mode == "daily_symbol_range_hist":
+        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": ""}]
+    if mode == "index_symbol_range":
+        return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "trade_date":
+        return [{"date": trade_dates[0]}]
+    if mode == "report_date":
+        return [{"date": report_dates[0]}]
+    if mode == "symbol_report_date":
+        return [{"symbol": symbols[0], "date": report_dates[0]}]
+    if mode == "industry_code":
+        return [{"symbol": "801010"}]
+    if mode == "industry_name_range":
+        return [{"symbol": industry_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "concept_name_range":
+        return [{"symbol": concept_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "date_range":
+        return [{"start_date": start_date, "end_date": end_date}]
+    return [{}]
+
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True) -> dict:
+    adapters = adapter_map or {}
+    rows: list[dict] = []
+    for family in families:
+        for spec in COVERAGE_API_SPECS.get(family, []):
+            api_name = spec["api_name"]
+            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            for params in params_list:
+                status = "pending_adapter"
+                err = ""
+                n_rows = 0
+                out_path = meta_path = ""
+                try:
+                    fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+                    if fn is None:
+                        status = "pending_adapter"
+                    else:
+                        ret = fn(**params)
+                        raw = ret.raw if hasattr(ret, "raw") else ret
+                        if not isinstance(raw, pd.DataFrame):
+                            raw = pd.DataFrame(raw)
+                        n_rows = len(raw)
+                        status = "empty" if raw.empty else "success"
+                        partition = {"scope": "coverage", "key": api_name}
+                        dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": params, "status": status, "row_count": n_rows})
+                        out_path, meta_path = str(dp), str(mp)
+                except Exception as exc:  # noqa: BLE001
+                    status = "failed"
+                    err = str(exc)
+                    if not continue_on_error:
+                        rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
+                        break
+                rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path})
+                if request_sleep > 0:
+                    time.sleep(request_sleep)
+
+    out = Path(output_root)
+    out.mkdir(parents=True, exist_ok=True)
+    catalog_path = out / "raw_ingest_catalog.csv"
+    summary_path = out / "raw_ingest_summary.csv"
+    df = pd.DataFrame(rows)
+    df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
+    s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
+    s.to_csv(summary_path, index=False, encoding="utf-8-sig")
+    return {"catalog_path": str(catalog_path), "summary_path": str(summary_path), "rows": rows}
