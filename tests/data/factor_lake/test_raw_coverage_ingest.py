@@ -99,3 +99,26 @@ def test_parameter_filtering_avoids_unexpected_kwargs(tmp_path):
     assert all(seen.values())
     df = pd.read_csv(out["catalog_path"])
     assert set(df.loc[df["api_name"].isin(["stock_gpzy_pledge_ratio_detail_em", "stock_lhb_stock_statistic_em", "stock_dzjy_mrtj", "stock_dzjy_mrmx"]), "status"]) == {"success"}
+
+
+def test_phase18a12_expansion_apis_included_in_coverage_specs():
+    from qsys.data.factor_lake.raw_ingest import COVERAGE_API_SPECS
+
+    expected = {
+        "corporate_action": {"stock_history_dividend_detail", "stock_restricted_release_queue_em", "stock_restricted_release_summary_em"},
+        "event_ownership": {"stock_gpzy_industry_data_em", "stock_gpzy_profile_em"},
+        "index_market": {"index_stock_cons_csindex", "index_stock_cons_weight_csindex"},
+        "industry_concept": {
+            "index_realtime_sw", "stock_board_concept_info_ths", "stock_board_concept_name_ths",
+            "stock_board_concept_summary_ths", "stock_board_industry_info_ths", "stock_board_industry_name_ths",
+            "stock_board_industry_summary_ths", "stock_industry_category_cninfo", "sw_index_first_info",
+            "sw_index_second_info", "sw_index_third_info",
+        },
+        "margin_leverage": {"stock_margin_sse", "stock_margin_szse", "stock_margin_underlying_info_szse"},
+        "market_price": {"stock_individual_info_em"},
+        "trading_attention": {"stock_dzjy_hyyybtj", "stock_dzjy_sctj", "stock_lhb_hyyyb_em", "stock_lhb_yybph_em"},
+    }
+
+    for family, apis in expected.items():
+        configured = {row["api_name"] for row in COVERAGE_API_SPECS[family]}
+        assert apis.issubset(configured)
