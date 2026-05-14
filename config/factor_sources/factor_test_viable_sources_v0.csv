@@ -1,55 +1,55 @@
-source_family,api_name,factor_test_status,factor_test_rows,data_type,fetch_granularity,required_params,date_field_candidates,symbol_field_candidates,expected_output_shape,pit_risk_level,contains_ex_post_fields,recommended_raw_partition_strategy,include_in_expanded_coverage,reason
-market_price,stock_zh_a_hist,viable,1000,panel,symbol+date_range,"symbol,start_date,end_date,period,adjust","日期,date","股票代码,symbol",daily_panel,low,false,"symbol,year",true,Factor_test returned valid data
-stock_basic,stock_individual_info_em,viable,1,snapshot,symbol,"symbol","上市时间,成立日期","股票代码,symbol",snapshot,low,false,symbol,true,Factor_test returned valid data
-index_market,stock_zh_index_hist_csindex,viable,1000,panel,index_symbol+date_range,"symbol,start_date,end_date","日期,date","指数代码,symbol",daily_panel,low,false,"index_symbol,year",true,Factor_test returned valid data
-index_membership,index_stock_cons_csindex,viable,300,event,index_symbol,"symbol","更新日期,日期","成分券代码,股票代码",membership_table,low,false,"index_symbol,asof_date",true,Structurally valid output
-index_membership,index_stock_cons_weight_csindex,viable,300,event,index_symbol,"symbol","日期,更新日期","成分券代码,股票代码",membership_weight_table,low,false,"index_symbol,asof_date",true,Structurally valid output
-financial_fundamental,stock_financial_analysis_indicator,viable,500,report,symbol,"symbol","报告期,日期","股票代码",report_table,medium,false,"symbol,report_period",true,Factor_test returned valid data
-financial_fundamental,stock_yjyg_em,viable,500,event,date,"date","公告日期","股票代码",event_table,medium,false,"announcement_date",true,Factor_test returned valid data
-financial_fundamental,stock_yysj_em,viable,500,event,date,"date","实际披露时间,公告日期","股票代码",event_table,low,false,"announcement_date",true,Factor_test returned valid data
-margin_leverage,stock_margin_sse,viable,500,event,date,"start_date,end_date","信用交易日期,日期","证券代码",event_table,low,false,"exchange,trade_date",true,Factor_test returned valid data
-margin_leverage,stock_margin_detail_sse,viable,500,event,date,"date","信用交易日期","证券代码",event_table,low,false,"exchange,trade_date",true,Factor_test returned valid data
-margin_leverage,stock_margin_szse,viable,500,event,date,"start_date,end_date","信用交易日期,日期","证券代码",event_table,low,false,"exchange,trade_date",true,Factor_test returned valid data
-margin_leverage,stock_margin_detail_szse,viable,500,event,date,"date","信用交易日期,input_date","证券代码",event_table,low,false,"exchange,trade_date",true,Factor_test returned valid data
-margin_leverage,stock_margin_underlying_info_szse,viable,300,snapshot,snapshot,,"更新日期","证券代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_metadata,stock_industry_category_cninfo,viable,300,snapshot,snapshot,,"日期,更新时间","证券代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_metadata,stock_industry_change_cninfo,viable,300,event,symbol+date_range,"symbol,start_date,end_date","变更日期","证券代码",event_table,low,false,"symbol,date",true,Factor_test returned valid data
-industry_concept,stock_industry_clf_hist_sw,viable,300,asof_event,symbol+date_range,"symbol,start_date,end_date","start_date,end_date","symbol",history_table,low,false,symbol,true,Factor_test returned valid data
-industry_metadata,sw_index_first_info,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_metadata,sw_index_second_info,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_metadata,sw_index_third_info,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_concept,index_component_sw,viable,1000,event,index_symbol,"symbol","日期,纳入日期","股票代码",event_table,low,false,"index_symbol,asof_date",true,Factor_test returned valid data
-industry_concept,index_hist_sw,viable,1000,panel,industry_index_symbol,"symbol","日期","代码",daily_panel,low,false,"symbol,year",true,Factor_test returned valid data
-industry_concept,index_realtime_sw,viable,100,snapshot,snapshot,,"更新时间,日期","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-industry_concept,stock_board_industry_name_ths,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Factor_test returned valid data
-industry_concept,stock_board_industry_index_ths,viable,1000,panel,board_symbol+date_range,"symbol,start_date,end_date","日期","代码",daily_panel,low,false,"board_symbol,year",true,Factor_test returned valid data
-industry_metadata,stock_board_industry_info_ths,viable,300,event,board_symbol,"symbol","日期,发布时间","股票代码",event_table,low,false,"board_symbol,asof_date",true,Structurally valid output
-industry_metadata,stock_board_industry_summary_ths,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-concept_metadata,stock_board_concept_name_ths,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Factor_test returned valid data
-industry_concept,stock_board_concept_index_ths,viable,1000,panel,board_symbol+date_range,"symbol,start_date,end_date","日期","代码",daily_panel,low,false,"board_symbol,year",true,Factor_test returned valid data
-concept_metadata,stock_board_concept_info_ths,viable,300,event,board_symbol,"symbol","日期,发布时间","股票代码",event_table,low,false,"board_symbol,asof_date",true,Structurally valid output
-concept_metadata,stock_board_concept_summary_ths,viable,100,snapshot,snapshot,,"日期,更新时间","代码",snapshot,low,false,"snapshot_date",true,Structurally valid output
-event_ownership,stock_zh_a_gdhs,viable,1000,event,market_snapshot,,"公告日期","股票代码",event_table,low,false,asof_date,true,Factor_test returned valid data
-shareholder,stock_zh_a_gdhs_detail_em,viable,500,event,symbol,"symbol","公告日期","股票代码",event_table,low,false,symbol,true,Factor_test returned valid data
-shareholder,stock_gdfx_free_holding_analyse_em,viable,500,event,date,"date","报告期,公告日期","股票代码",event_table,medium,false,"date,report_period",true,Structurally valid output
-shareholder,stock_gdfx_holding_analyse_em,viable,500,event,date,"date","报告期,公告日期","股票代码",event_table,medium,false,"date,report_period",true,Factor_test returned valid data
-pledge,stock_gpzy_pledge_ratio_em,viable,500,event,snapshot,,"公告日期,统计日期","股票代码",event_table,medium,false,asof_date,true,Factor_test returned valid data
-pledge,stock_gpzy_pledge_ratio_detail_em,viable,500,event,date,"date","质押起始日,公告日期","股票代码",event_table,medium,false,"date,symbol",true,Factor_test returned valid data
-pledge,stock_gpzy_industry_data_em,viable,300,event,snapshot,,"日期,统计日期","行业",event_table,low,false,asof_date,true,Structurally valid output
-pledge,stock_gpzy_profile_em,viable,300,snapshot,snapshot,,"日期,更新时间","股票代码",snapshot,low,false,snapshot_date,true,Structurally valid output
-corporate_action,stock_fhps_em,viable,500,event,snapshot,,"预案公告日,最新公告日期","代码",event_table,medium,false,"snapshot_date,report_period",true,Factor_test returned valid data
-dividend,stock_history_dividend,viable,500,event,snapshot,,"公告日期","代码",event_table,medium,false,"snapshot_date,report_period",true,Factor_test returned valid data
-dividend,stock_history_dividend_detail,viable,500,event,symbol,"symbol","公告日期","代码",event_table,medium,false,"symbol,announcement_date",true,Factor_test returned valid data
-restricted_release,stock_restricted_release_queue_em,viable,500,event,snapshot,,"解禁时间,公告日期","股票代码",event_table,medium,false,"snapshot_date",true,Factor_test returned valid data
-restricted_release,stock_restricted_release_summary_em,viable,500,event,snapshot,,"解禁时间,公告日期","股票代码",event_table,medium,false,"snapshot_date",true,Factor_test returned valid data
-restricted_release,stock_restricted_release_detail_em,viable,500,event,snapshot,,"解禁时间,公告日期","股票代码",event_table,high,true,"snapshot_date,symbol",true,Factor_test returned valid data
-block_trade,stock_dzjy_sctj,viable,500,event,date,"start_date,end_date","交易日期","证券代码",event_table,low,false,trade_date,true,Factor_test returned valid data
-block_trade,stock_dzjy_mrmx,viable,500,event,date,"start_date,end_date","交易日期","证券代码",event_table,low,false,trade_date,true,Factor_test returned valid data
-block_trade,stock_dzjy_mrtj,viable,500,event,date,"start_date,end_date","交易日期","证券代码",event_table,low,false,trade_date,true,Factor_test returned valid data
-block_trade,stock_dzjy_hyyybtj,viable,500,event,date,"start_date,end_date","交易日期","营业部名称",event_table,low,false,trade_date,true,Factor_test returned valid data
-lhb,stock_lhb_detail_em,viable,500,event,date_range,"start_date,end_date","上榜日","代码",event_table,high,true,trade_date,true,Factor_test returned valid data
-lhb,stock_lhb_stock_statistic_em,viable,300,event,snapshot,,"统计周期,日期","代码",event_table,medium,false,snapshot_date,true,Structurally valid output
-lhb,stock_lhb_jgmmtj_em,viable,300,event,snapshot,,"统计周期,日期","代码",event_table,medium,false,snapshot_date,true,Structurally valid output
-lhb,stock_lhb_hyyyb_em,viable,300,event,snapshot,,"统计周期,日期","营业部名称",event_table,medium,false,snapshot_date,true,Structurally valid output
-lhb,stock_lhb_yybph_em,viable,300,event,snapshot,,"统计周期,日期","营业部名称",event_table,medium,false,snapshot_date,true,Structurally valid output
-institution_research,stock_jgdy_tj_em,viable,300,event,snapshot,,"接待日期,公告日期","代码",event_table,medium,false,snapshot_date,true,Factor_test returned valid data
+source_family,source_subtype,api_name,factor_test_status,factor_test_rows,data_type,fetch_granularity,required_params,date_field_candidates,symbol_field_candidates,expected_output_shape,pit_risk_level,contains_ex_post_fields,recommended_raw_partition_strategy,include_in_expanded_coverage,reason
+market_price,market_price,stock_zh_a_hist,viable,1000,panel,symbol+date_range,"symbol,start_date,end_date,period,adjust","日期,date","股票代码,symbol",daily_panel,low,False,"symbol,year",True,Factor_test returned valid data
+market_price,stock_basic,stock_individual_info_em,viable,1,snapshot,symbol,symbol,"上市时间,成立日期","股票代码,symbol",snapshot,low,False,symbol,True,Factor_test returned valid data
+index_market,index_market,stock_zh_index_hist_csindex,viable,1000,panel,index_symbol+date_range,"symbol,start_date,end_date","日期,date","指数代码,symbol",daily_panel,low,False,"index_symbol,year",True,Factor_test returned valid data
+index_market,index_membership,index_stock_cons_csindex,viable,300,event,index_symbol,symbol,"更新日期,日期","成分券代码,股票代码",membership_table,low,False,"index_symbol,asof_date",True,Structurally valid output
+index_market,index_membership,index_stock_cons_weight_csindex,viable,300,event,index_symbol,symbol,"日期,更新日期","成分券代码,股票代码",membership_weight_table,low,False,"index_symbol,asof_date",True,Structurally valid output
+financial_fundamental,financial_fundamental,stock_financial_analysis_indicator,viable,500,report,symbol,symbol,"报告期,日期",股票代码,report_table,medium,False,"symbol,report_period",True,Factor_test returned valid data
+financial_fundamental,financial_fundamental,stock_yjyg_em,viable,500,event,date,date,公告日期,股票代码,event_table,medium,False,announcement_date,True,Factor_test returned valid data
+financial_fundamental,financial_fundamental,stock_yysj_em,viable,500,event,date,date,"实际披露时间,公告日期",股票代码,event_table,low,False,announcement_date,True,Factor_test returned valid data
+margin_leverage,margin_leverage,stock_margin_sse,viable,500,event,date,"start_date,end_date","信用交易日期,日期",证券代码,event_table,low,False,"exchange,trade_date",True,Factor_test returned valid data
+margin_leverage,margin_leverage,stock_margin_detail_sse,viable,500,event,date,date,信用交易日期,证券代码,event_table,low,False,"exchange,trade_date",True,Factor_test returned valid data
+margin_leverage,margin_leverage,stock_margin_szse,viable,500,event,date,"start_date,end_date","信用交易日期,日期",证券代码,event_table,low,False,"exchange,trade_date",True,Factor_test returned valid data
+margin_leverage,margin_leverage,stock_margin_detail_szse,viable,500,event,date,date,"信用交易日期,input_date",证券代码,event_table,low,False,"exchange,trade_date",True,Factor_test returned valid data
+margin_leverage,margin_leverage,stock_margin_underlying_info_szse,viable,300,snapshot,snapshot,,更新日期,证券代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_metadata,stock_industry_category_cninfo,viable,300,snapshot,snapshot,,"日期,更新时间",证券代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_metadata,stock_industry_change_cninfo,viable,300,event,symbol+date_range,"symbol,start_date,end_date",变更日期,证券代码,event_table,low,False,"symbol,date",True,Factor_test returned valid data
+industry_concept,industry_concept,stock_industry_clf_hist_sw,viable,300,asof_event,symbol+date_range,"symbol,start_date,end_date","start_date,end_date",symbol,history_table,low,False,symbol,True,Factor_test returned valid data
+industry_concept,industry_metadata,sw_index_first_info,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_metadata,sw_index_second_info,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_metadata,sw_index_third_info,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_concept,index_component_sw,viable,1000,event,index_symbol,symbol,"日期,纳入日期",股票代码,event_table,low,False,"index_symbol,asof_date",True,Factor_test returned valid data
+industry_concept,industry_concept,index_hist_sw,viable,1000,panel,industry_index_symbol,symbol,日期,代码,daily_panel,low,False,"symbol,year",True,Factor_test returned valid data
+industry_concept,industry_concept,index_realtime_sw,viable,100,snapshot,snapshot,,"更新时间,日期",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,industry_concept,stock_board_industry_name_ths,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Factor_test returned valid data
+industry_concept,industry_concept,stock_board_industry_index_ths,viable,1000,panel,board_symbol+date_range,"symbol,start_date,end_date",日期,代码,daily_panel,low,False,"board_symbol,year",True,Factor_test returned valid data
+industry_concept,industry_metadata,stock_board_industry_info_ths,viable,300,event,board_symbol,symbol,"日期,发布时间",股票代码,event_table,low,False,"board_symbol,asof_date",True,Structurally valid output
+industry_concept,industry_metadata,stock_board_industry_summary_ths,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+industry_concept,concept_metadata,stock_board_concept_name_ths,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Factor_test returned valid data
+industry_concept,industry_concept,stock_board_concept_index_ths,viable,1000,panel,board_symbol+date_range,"symbol,start_date,end_date",日期,代码,daily_panel,low,False,"board_symbol,year",True,Factor_test returned valid data
+industry_concept,concept_metadata,stock_board_concept_info_ths,viable,300,event,board_symbol,symbol,"日期,发布时间",股票代码,event_table,low,False,"board_symbol,asof_date",True,Structurally valid output
+industry_concept,concept_metadata,stock_board_concept_summary_ths,viable,100,snapshot,snapshot,,"日期,更新时间",代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+event_ownership,event_ownership,stock_zh_a_gdhs,viable,1000,event,market_snapshot,,公告日期,股票代码,event_table,low,False,asof_date,True,Factor_test returned valid data
+event_ownership,shareholder,stock_zh_a_gdhs_detail_em,viable,500,event,symbol,symbol,公告日期,股票代码,event_table,low,False,symbol,True,Factor_test returned valid data
+event_ownership,shareholder,stock_gdfx_free_holding_analyse_em,viable,500,event,date,date,"报告期,公告日期",股票代码,event_table,medium,False,"date,report_period",True,Structurally valid output
+event_ownership,shareholder,stock_gdfx_holding_analyse_em,viable,500,event,date,date,"报告期,公告日期",股票代码,event_table,medium,False,"date,report_period",True,Factor_test returned valid data
+event_ownership,pledge,stock_gpzy_pledge_ratio_em,viable,500,event,snapshot,,"公告日期,统计日期",股票代码,event_table,medium,False,asof_date,True,Factor_test returned valid data
+event_ownership,pledge,stock_gpzy_pledge_ratio_detail_em,viable,500,event,date,date,"质押起始日,公告日期",股票代码,event_table,medium,False,"date,symbol",True,Factor_test returned valid data
+event_ownership,pledge,stock_gpzy_industry_data_em,viable,300,event,snapshot,,"日期,统计日期",行业,event_table,low,False,asof_date,True,Structurally valid output
+event_ownership,pledge,stock_gpzy_profile_em,viable,300,snapshot,snapshot,,"日期,更新时间",股票代码,snapshot,low,False,snapshot_date,True,Structurally valid output
+corporate_action,corporate_action,stock_fhps_em,viable,500,event,snapshot,,"预案公告日,最新公告日期",代码,event_table,medium,False,"snapshot_date,report_period",True,Factor_test returned valid data
+corporate_action,dividend,stock_history_dividend,viable,500,event,snapshot,,公告日期,代码,event_table,medium,False,"snapshot_date,report_period",True,Factor_test returned valid data
+corporate_action,dividend,stock_history_dividend_detail,viable,500,event,symbol,symbol,公告日期,代码,event_table,medium,False,"symbol,announcement_date",True,Factor_test returned valid data
+corporate_action,restricted_release,stock_restricted_release_queue_em,viable,500,event,snapshot,,"解禁时间,公告日期",股票代码,event_table,medium,False,snapshot_date,True,Factor_test returned valid data
+corporate_action,restricted_release,stock_restricted_release_summary_em,viable,500,event,snapshot,,"解禁时间,公告日期",股票代码,event_table,medium,False,snapshot_date,True,Factor_test returned valid data
+corporate_action,restricted_release,stock_restricted_release_detail_em,viable,500,event,snapshot,,"解禁时间,公告日期",股票代码,event_table,high,True,"snapshot_date,symbol",True,Factor_test returned valid data
+trading_attention,block_trade,stock_dzjy_sctj,viable,500,event,date,"start_date,end_date",交易日期,证券代码,event_table,low,False,trade_date,True,Factor_test returned valid data
+trading_attention,block_trade,stock_dzjy_mrmx,viable,500,event,date,"start_date,end_date",交易日期,证券代码,event_table,low,False,trade_date,True,Factor_test returned valid data
+trading_attention,block_trade,stock_dzjy_mrtj,viable,500,event,date,"start_date,end_date",交易日期,证券代码,event_table,low,False,trade_date,True,Factor_test returned valid data
+trading_attention,block_trade,stock_dzjy_hyyybtj,viable,500,event,date,"start_date,end_date",交易日期,营业部名称,event_table,low,False,trade_date,True,Factor_test returned valid data
+trading_attention,lhb,stock_lhb_detail_em,viable,500,event,date_range,"start_date,end_date",上榜日,代码,event_table,high,True,trade_date,True,Factor_test returned valid data
+trading_attention,lhb,stock_lhb_stock_statistic_em,viable,300,event,snapshot,,"统计周期,日期",代码,event_table,medium,False,snapshot_date,True,Structurally valid output
+trading_attention,lhb,stock_lhb_jgmmtj_em,viable,300,event,snapshot,,"统计周期,日期",代码,event_table,medium,False,snapshot_date,True,Structurally valid output
+trading_attention,lhb,stock_lhb_hyyyb_em,viable,300,event,snapshot,,"统计周期,日期",营业部名称,event_table,medium,False,snapshot_date,True,Structurally valid output
+trading_attention,lhb,stock_lhb_yybph_em,viable,300,event,snapshot,,"统计周期,日期",营业部名称,event_table,medium,False,snapshot_date,True,Structurally valid output
+trading_attention,institution_research,stock_jgdy_tj_em,viable,300,event,snapshot,,"接待日期,公告日期",代码,event_table,medium,False,snapshot_date,True,Factor_test returned valid data

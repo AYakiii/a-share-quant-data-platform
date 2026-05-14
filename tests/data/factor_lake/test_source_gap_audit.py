@@ -12,6 +12,32 @@ from qsys.data.factor_lake.source_gap_audit import (
     build_source_gap_audit,
 )
 
+
+CANONICAL_FAMILIES = {
+    "market_price",
+    "index_market",
+    "financial_fundamental",
+    "margin_leverage",
+    "industry_concept",
+    "event_ownership",
+    "corporate_action",
+    "trading_attention",
+}
+
+GRANULAR_ONLY_SUBTYPES = {
+    "block_trade",
+    "lhb",
+    "pledge",
+    "dividend",
+    "shareholder",
+    "stock_basic",
+    "industry_metadata",
+    "concept_metadata",
+    "index_membership",
+    "restricted_release",
+    "institution_research",
+}
+
 REQUIRED_APIS = {
     "stock_zh_a_hist","stock_individual_info_em","stock_zh_index_hist_csindex","index_stock_cons_csindex","index_stock_cons_weight_csindex",
     "stock_financial_analysis_indicator","stock_yjyg_em","stock_yysj_em","stock_margin_sse","stock_margin_detail_sse","stock_margin_szse",
@@ -31,9 +57,15 @@ REQUIRED_APIS = {
 def test_viable_csv_has_exact_54_required_apis() -> None:
     df = pd.read_csv("config/factor_sources/factor_test_viable_sources_v0.csv")
     assert set(REQUIRED_COLUMNS).issubset(df.columns)
+    assert "source_subtype" in df.columns
     apis = set(df["api_name"])
     assert len(df) == 54
     assert apis == REQUIRED_APIS
+
+    families = set(df["source_family"])
+    assert families == CANONICAL_FAMILIES
+    assert not (set(df["source_family"]) & GRANULAR_ONLY_SUBTYPES)
+    assert GRANULAR_ONLY_SUBTYPES.issubset(set(df["source_subtype"]))
 
 
 def test_gap_flags_and_schema_and_preserve_ex_post(tmp_path: Path) -> None:
