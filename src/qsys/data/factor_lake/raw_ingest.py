@@ -23,13 +23,20 @@ AdapterFn = Callable[..., object]
 
 COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     "market_price": [
-        {"api_name": "stock_zh_a_daily", "param_mode": "daily_symbol_range"},
         {"api_name": "stock_zh_a_hist", "param_mode": "daily_symbol_range_hist"},
+        {"api_name": "stock_individual_info_em", "param_mode": "symbol_only"},
     ],
-    "index_market": [{"api_name": "stock_zh_index_hist_csindex", "param_mode": "index_symbol_range"}],
+    "index_market": [
+        {"api_name": "stock_zh_index_hist_csindex", "param_mode": "index_symbol_range"},
+        {"api_name": "index_stock_cons_csindex", "param_mode": "index_symbol"},
+        {"api_name": "index_stock_cons_weight_csindex", "param_mode": "index_symbol"},
+    ],
     "margin_leverage": [
         {"api_name": "stock_margin_detail_sse", "param_mode": "trade_date", "exchange": "sse"},
         {"api_name": "stock_margin_detail_szse", "param_mode": "trade_date", "exchange": "szse"},
+        {"api_name": "stock_margin_sse", "param_mode": "date_range"},
+        {"api_name": "stock_margin_szse", "param_mode": "date_range"},
+        {"api_name": "stock_margin_underlying_info_szse", "param_mode": "none"},
     ],
     "financial_fundamental": [
         {"api_name": "stock_financial_analysis_indicator", "param_mode": "symbol_only"},
@@ -38,10 +45,22 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     ],
     "industry_concept": [
         {"api_name": "stock_industry_change_cninfo", "param_mode": "symbol_range"},
+        {"api_name": "stock_industry_clf_hist_sw", "param_mode": "symbol_range"},
+        {"api_name": "stock_industry_category_cninfo", "param_mode": "none"},
+        {"api_name": "sw_index_first_info", "param_mode": "none"},
+        {"api_name": "sw_index_second_info", "param_mode": "none"},
+        {"api_name": "sw_index_third_info", "param_mode": "none"},
         {"api_name": "index_component_sw", "param_mode": "industry_code"},
         {"api_name": "index_hist_sw", "param_mode": "industry_code"},
         {"api_name": "stock_board_industry_index_ths", "param_mode": "industry_name_range"},
+        {"api_name": "stock_board_industry_name_ths", "param_mode": "none"},
+        {"api_name": "stock_board_industry_info_ths", "param_mode": "industry_name"},
+        {"api_name": "stock_board_industry_summary_ths", "param_mode": "none"},
         {"api_name": "stock_board_concept_index_ths", "param_mode": "concept_name_range"},
+        {"api_name": "stock_board_concept_name_ths", "param_mode": "none"},
+        {"api_name": "stock_board_concept_info_ths", "param_mode": "concept_name"},
+        {"api_name": "stock_board_concept_summary_ths", "param_mode": "none"},
+        {"api_name": "index_realtime_sw", "param_mode": "none"},
     ],
     "event_ownership": [
         {"api_name": "stock_zh_a_gdhs", "param_mode": "none"},
@@ -50,12 +69,16 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_gdfx_holding_analyse_em", "param_mode": "report_date"},
         {"api_name": "stock_gpzy_pledge_ratio_em", "param_mode": "none"},
         {"api_name": "stock_gpzy_pledge_ratio_detail_em", "param_mode": "report_date"},
+        {"api_name": "stock_gpzy_industry_data_em", "param_mode": "none"},
+        {"api_name": "stock_gpzy_profile_em", "param_mode": "none"},
     ],
     "corporate_action": [
         {"api_name": "stock_fhps_em", "param_mode": "none"},
         {"api_name": "stock_history_dividend", "param_mode": "symbol_only"},
         {"api_name": "stock_history_dividend_detail", "param_mode": "symbol_report_date"},
         {"api_name": "stock_restricted_release_detail_em", "param_mode": "report_date"},
+        {"api_name": "stock_restricted_release_queue_em", "param_mode": "none"},
+        {"api_name": "stock_restricted_release_summary_em", "param_mode": "none"},
     ],
     "disclosure_ir": [
         {"api_name": "stock_zh_a_disclosure_relation_cninfo", "param_mode": "symbol_range"},
@@ -63,11 +86,16 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_jgdy_detail_em", "param_mode": "report_date"},
     ],
     "trading_attention": [
+        {"api_name": "stock_jgdy_tj_em", "param_mode": "report_date"},
         {"api_name": "stock_lhb_detail_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_jgmmtj_em", "param_mode": "date_range"},
         {"api_name": "stock_lhb_stock_statistic_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_hyyyb_em", "param_mode": "date_range"},
+        {"api_name": "stock_lhb_yybph_em", "param_mode": "date_range"},
         {"api_name": "stock_dzjy_mrtj", "param_mode": "trade_date"},
         {"api_name": "stock_dzjy_mrmx", "param_mode": "trade_date"},
+        {"api_name": "stock_dzjy_sctj", "param_mode": "trade_date"},
+        {"api_name": "stock_dzjy_hyyybtj", "param_mode": "trade_date"},
     ],
 }
 
@@ -236,6 +264,8 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
         return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": ""}]
     if mode == "index_symbol_range":
         return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "index_symbol":
+        return [{"symbol": index_symbols[0]}]
     if mode == "trade_date":
         return [{"date": trade_dates[0]}]
     if mode == "report_date":
@@ -246,8 +276,12 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
         return [{"symbol": "801010"}]
     if mode == "industry_name_range":
         return [{"symbol": industry_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "industry_name":
+        return [{"symbol": industry_names[0]}]
     if mode == "concept_name_range":
         return [{"symbol": concept_names[0], "start_date": start_date, "end_date": end_date}]
+    if mode == "concept_name":
+        return [{"symbol": concept_names[0]}]
     if mode == "date_range":
         return [{"start_date": start_date, "end_date": end_date}]
     return [{}]
