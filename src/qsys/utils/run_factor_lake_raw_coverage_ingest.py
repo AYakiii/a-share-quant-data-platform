@@ -27,6 +27,7 @@ def main() -> None:
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--include-disabled", action="store_true")
+    p.add_argument("--max-workers", type=int, default=1)
     args = p.parse_args()
 
     out = run_raw_coverage_ingest(
@@ -44,6 +45,7 @@ def main() -> None:
         request_sleep=args.request_sleep,
         continue_on_error=args.continue_on_error,
         include_disabled=args.include_disabled,
+        max_workers=args.max_workers,
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

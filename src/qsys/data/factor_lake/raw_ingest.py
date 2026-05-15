@@ -5,6 +5,7 @@ import json
 import inspect
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -368,87 +369,121 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     return False
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False) -> dict:
+def _run_single_coverage_task(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+) -> dict[str, object]:
+    started_at = datetime.now(UTC)
+    status = "pending_adapter"
+    err = ""
+    n_rows = 0
+    out_path = meta_path = ""
+
+    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+        disabled_reason = str(
+            DISABLED_API_METADATA.get((family, api_name), {}).get(
+                "disabled_reason", "temporarily disabled for acquisition control"
+            )
+        )
+        finished_at = datetime.now(UTC)
+        return {
+            "source_family": family,
+            "api_name": api_name,
+            "status": "skipped",
+            "rows": 0,
+            "error_message": f"disabled_reason: {disabled_reason}",
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }
+
+    try:
+        fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+        if fn is None:
+            status = "pending_adapter"
+        else:
+            filtered = params
+            try:
+                sig = inspect.signature(fn)
+                accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                if not accepts_kwargs:
+                    allowed = set(sig.parameters.keys())
+                    filtered = {k: v for k, v in params.items() if k in allowed}
+            except (TypeError, ValueError):
+                filtered = params
+            ret = fn(**filtered)
+            if ret is None:
+                raise ValueError("none_result_from_api")
+            raw = ret.raw if hasattr(ret, "raw") else ret
+            if not isinstance(raw, pd.DataFrame):
+                raw = pd.DataFrame(raw)
+            n_rows = len(raw)
+            status = "empty" if raw.empty else "success"
+            partition = {"scope": "coverage", "key": api_name}
+            try:
+                dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
+                out_path, meta_path = str(dp), str(mp)
+            except Exception as write_exc:  # noqa: BLE001
+                if api_name == "stock_individual_info_em":
+                    out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
+                    err = f"csv_fallback_after_write_error: {write_exc}"
+                else:
+                    raise
+    except Exception as exc:  # noqa: BLE001
+        err = _normalize_error_message(api_name, str(exc))
+        if _should_downgrade_to_empty(api_name, err):
+            status = "empty"
+            n_rows = 0
+        else:
+            status = "failed"
+
+    finished_at = datetime.now(UTC)
+    return {
+        "source_family": family,
+        "api_name": api_name,
+        "status": status,
+        "rows": n_rows,
+        "error_message": err,
+        "output_path": out_path,
+        "metadata_path": meta_path,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+    }
+
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 1) -> dict:
     adapters = adapter_map or {}
     rows: list[dict] = []
+    tasks: list[tuple[str, str, dict[str, str]]] = []
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
             params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
-                started_at = datetime.now(UTC)
-                status = "pending_adapter"
-                err = ""
-                n_rows = 0
-                out_path = meta_path = ""
-                if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
-                    disabled_reason = str(
-                        DISABLED_API_METADATA.get((family, api_name), {}).get(
-                            "disabled_reason", "temporarily disabled for acquisition control"
-                        )
-                    )
-                    finished_at = datetime.now(UTC)
-                    rows.append(
-                        {
-                            "source_family": family,
-                            "api_name": api_name,
-                            "status": "skipped",
-                            "rows": 0,
-                            "error_message": f"disabled_reason: {disabled_reason}",
-                            "output_path": "",
-                            "metadata_path": "",
-                            "started_at": started_at.isoformat(),
-                            "finished_at": finished_at.isoformat(),
-                            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-                        }
-                    )
-                    continue
-                try:
-                    fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
-                    if fn is None:
-                        status = "pending_adapter"
-                    else:
-                        filtered = params
-                        try:
-                            sig = inspect.signature(fn)
-                            accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
-                            if not accepts_kwargs:
-                                allowed = set(sig.parameters.keys())
-                                filtered = {k: v for k, v in params.items() if k in allowed}
-                        except (TypeError, ValueError):
-                            filtered = params
+                tasks.append((family, api_name, params))
 
-                        ret = fn(**filtered)
-                        if ret is None:
-                            raise ValueError("none_result_from_api")
-                        raw = ret.raw if hasattr(ret, "raw") else ret
-                        if not isinstance(raw, pd.DataFrame):
-                            raw = pd.DataFrame(raw)
-                        n_rows = len(raw)
-                        status = "empty" if raw.empty else "success"
-                        partition = {"scope": "coverage", "key": api_name}
-                        try:
-                            dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
-                            out_path, meta_path = str(dp), str(mp)
-                        except Exception as write_exc:  # noqa: BLE001
-                            if api_name == "stock_individual_info_em":
-                                out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
-                                err = f"csv_fallback_after_write_error: {write_exc}"
-                            else:
-                                raise
-                except Exception as exc:  # noqa: BLE001
-                    err = _normalize_error_message(api_name, str(exc))
-                    if _should_downgrade_to_empty(api_name, err):
-                        status = "empty"
-                        n_rows = 0
-                    else:
-                        status = "failed"
-                    if not continue_on_error:
-                        finished_at = datetime.now(UTC)
-                        rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path, "started_at": started_at.isoformat(), "finished_at": finished_at.isoformat(), "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0)})
-                        break
-                finished_at = datetime.now(UTC)
-                rows.append({"source_family": family, "api_name": api_name, "status": status, "rows": n_rows, "error_message": err, "output_path": out_path, "metadata_path": meta_path, "started_at": started_at.isoformat(), "finished_at": finished_at.isoformat(), "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0)})
+    if max_workers <= 1:
+        for family, api_name, params in tasks:
+            row = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            rows.append(row)
+            if row["status"] == "failed" and not continue_on_error:
+                break
+            if request_sleep > 0:
+                time.sleep(request_sleep)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
+            for fut in futures:
+                row = fut.result()
+                rows.append(row)
                 if request_sleep > 0:
                     time.sleep(request_sleep)
 

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import time
 import pandas as pd
 
 from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
 
 
 class _Result:
-    def __init__(self, raw: pd.DataFrame):
+    def __init__(self, raw: pd.DataFrame):https://github.com/AYakiii/a-share-quant-data-platform/pull/76/conflict?name=src%252Fqsys%252Futils%252Frun_factor_lake_raw_coverage_ingest.py&ancestor_oid=fc313a6c503bec834330b3327c312c2a62d8bee1&base_oid=c65687ca2ea04780cd8ebbd7948d8a0a253a9a19&head_oid=cc7edafd16e7e797c10271e0e95791873d3bea2a
         self.raw = raw
 
 
@@ -323,6 +324,85 @@ def test_include_disabled_runs_disabled_sources(tmp_path):
     row = df.loc[df["api_name"] == "stock_zh_a_hist"].iloc[0]
     assert row["status"] in {"success", "empty", "failed"}
     assert seen["called"]
+
+
+def test_max_workers_preserves_row_count_and_skipped_rows(tmp_path):
+    out1 = run_raw_coverage_ingest(
+        output_root=str(tmp_path / "mw1"),
+        families=["market_price", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={},
+        continue_on_error=True,
+        max_workers=1,
+    )
+    out2 = run_raw_coverage_ingest(
+        output_root=str(tmp_path / "mw2"),
+        families=["market_price", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={},
+        continue_on_error=True,
+        max_workers=2,
+    )
+    df1 = pd.read_csv(out1["catalog_path"])
+    df2 = pd.read_csv(out2["catalog_path"])
+    assert len(df1) == len(df2)
+    assert "skipped" in set(df1["status"])
+    assert "skipped" in set(df2["status"])
+    for col in ["started_at", "finished_at", "elapsed_sec"]:
+        assert col in df1.columns and col in df2.columns
+    assert (tmp_path / "mw1" / "raw_source_acquisition_checklist.csv").exists()
+    assert (tmp_path / "mw2" / "raw_source_acquisition_summary.csv").exists()
+
+
+def test_parallel_max_workers_2_faster_than_1_for_slow_adapters(tmp_path):
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def slow_hist(**kwargs):
+        time.sleep(0.2)
+        return _Result(pd.DataFrame({"x": [1]}))
+
+    def slow_info(**kwargs):
+        time.sleep(0.2)
+        return _Result(pd.DataFrame({"x": [1]}))
+
+    kwargs = dict(
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_zh_a_hist": slow_hist, "stock_individual_info_em": slow_info},
+        continue_on_error=True,
+        include_disabled=True,
+    )
+
+    t1 = time.perf_counter()
+    run_raw_coverage_ingest(output_root=str(tmp_path / "seq"), max_workers=1, **kwargs)
+    d1 = time.perf_counter() - t1
+    t2 = time.perf_counter()
+    run_raw_coverage_ingest(output_root=str(tmp_path / "par"), max_workers=2, **kwargs)
+    d2 = time.perf_counter() - t2
+    assert d2 < d1
 
 
 def test_checklist_marks_new_disabled_event_ownership_as_paused():
