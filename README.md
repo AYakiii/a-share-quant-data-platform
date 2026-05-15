@@ -410,3 +410,9 @@ Use the raw coverage runner with explicit selected APIs for controlled recovery:
       --max-workers 2
 
 Default policy keeps disabled sources skipped unless `--include-disabled` is set.
+
+Notes for Phase 18A-18 recovery:
+- `raw_ingest_catalog.csv` records the **actual run result** (e.g., success/empty/failed/skipped).
+- `raw_source_acquisition_checklist.csv` records the **default acquisition policy view** (`获取` / `暂停获取` / `排除`) and keeps base schema:
+  `api_name,source_family,acquisition_status`.
+- For disabled heavy/detail sources (for example `stock_gpzy_pledge_ratio_detail_em`, `stock_jgdy_detail_em`), checklist may remain `暂停获取` even if an include-disabled probe was run.
