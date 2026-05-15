@@ -421,3 +421,148 @@ def test_checklist_marks_new_disabled_event_ownership_as_paused():
             & (checklist_df["api_name"] == api)
         ].iloc[0]
         assert row["acquisition_status"] == "暂停获取"
+
+def test_selected_api_names_limits_recovery_scope(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price", "margin_leverage", "financial_fundamental", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={},
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=[
+            "stock_zh_a_hist",
+            "stock_individual_info_em",
+            "stock_margin_detail_szse",
+            "stock_financial_analysis_indicator",
+            "stock_gpzy_pledge_ratio_detail_em",
+        ],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["api_name"]) == {
+        "stock_zh_a_hist",
+        "stock_individual_info_em",
+        "stock_margin_detail_szse",
+        "stock_financial_analysis_indicator",
+        "stock_gpzy_pledge_ratio_detail_em",
+    }
+    assert set(df["status"]) == {"skipped"}
+
+
+def test_selected_api_names_with_include_disabled_runs_controlled_recovery(tmp_path):
+    seen = set()
+
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def ok(api_name):
+        def _fn(**kwargs):
+            seen.add(api_name)
+            return _Result(pd.DataFrame({"x": [1]}))
+
+        return _fn
+
+    adapters = {
+        "stock_zh_a_hist": ok("stock_zh_a_hist"),
+        "stock_individual_info_em": ok("stock_individual_info_em"),
+        "stock_margin_detail_szse": ok("stock_margin_detail_szse"),
+        "stock_financial_analysis_indicator": ok("stock_financial_analysis_indicator"),
+        "stock_gpzy_pledge_ratio_detail_em": ok("stock_gpzy_pledge_ratio_detail_em"),
+    }
+    targets = list(adapters.keys())
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price", "margin_leverage", "financial_fundamental", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map=adapters,
+        continue_on_error=True,
+        include_disabled=True,
+        selected_api_names=targets,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["api_name"]) == set(targets)
+    assert set(df["status"]) == {"success"}
+    assert seen == set(targets)
+
+
+def test_disclosure_relation_schema_mismatch_downgrades_to_empty(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["disclosure_ir"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={
+            "stock_zh_a_disclosure_relation_cninfo": lambda **kwargs: (_ for _ in ()).throw(
+                KeyError("None of [Index(['代码', '简称', '公告标题', '公告时间', 'announcementId', 'orgId'], dtype='object')] are in the [columns]")
+            )
+        },
+        continue_on_error=True,
+        include_disabled=True,
+        selected_api_names=["stock_zh_a_disclosure_relation_cninfo"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_zh_a_disclosure_relation_cninfo"].iloc[0]
+    assert row["status"] == "empty"
+    assert "defensive_shape_guard" in str(row["error_message"])
+
+
+def test_individual_info_csv_fallback_has_explicit_file_format(tmp_path):
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def mixed_adapter(**kwargs):
+        return _Result(pd.DataFrame({"symbol": ["000001"], "mixed": [{"v": 1}], "value": ["000001"]}))
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_individual_info_em": mixed_adapter},
+        continue_on_error=True,
+        include_disabled=True,
+        selected_api_names=["stock_individual_info_em"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_individual_info_em"].iloc[0]
+    if str(row["metadata_path"]).endswith("fallback.meta.csv"):
+        meta = pd.read_csv(row["metadata_path"])
+        assert list(meta.columns) == ["source_family", "api_name", "row_count", "write_mode", "file_format"]
+        assert meta.iloc[0]["file_format"] == "csv"
+
+
+def test_jgdy_tj_disabled_pair_matches_all_coverage_families():
+    from qsys.data.factor_lake.raw_ingest import COVERAGE_API_SPECS, TEMP_DISABLED_APIS
+
+    families = [f for f, specs in COVERAGE_API_SPECS.items() if any(s["api_name"] == "stock_jgdy_tj_em" for s in specs)]
+    assert families
+    for family in families:
+        assert (family, "stock_jgdy_tj_em") in TEMP_DISABLED_APIS

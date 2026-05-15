@@ -28,6 +28,7 @@ def main() -> None:
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--include-disabled", action="store_true")
     p.add_argument("--max-workers", type=int, default=2)
+    p.add_argument("--api-names", default="", help="Optional comma-separated API names for selected source recovery")
     args = p.parse_args()
 
     out = run_raw_coverage_ingest(
@@ -46,6 +47,7 @@ def main() -> None:
         continue_on_error=args.continue_on_error,
         include_disabled=args.include_disabled,
         max_workers=args.max_workers,
+        selected_api_names=_split_csv(args.api_names),
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

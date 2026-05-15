@@ -120,6 +120,8 @@ TEMP_DISABLED_APIS: set[tuple[str, str]] = {
     ("event_ownership", "stock_gpzy_pledge_ratio_detail_em"),
     ("industry_concept", "stock_industry_clf_hist_sw"),
     ("trading_attention", "stock_jgdy_tj_em"),
+    ("disclosure_ir", "stock_jgdy_tj_em"),
+    ("disclosure_ir", "stock_jgdy_detail_em"),
     ("event_ownership", "stock_gdfx_free_holding_analyse_em"),
     ("event_ownership", "stock_gdfx_holding_analyse_em"),
 }
@@ -141,6 +143,41 @@ DISABLED_API_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")] = {
     "enabled": False,
     "manual_review_required": True,
     "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
+}
+DISABLED_API_METADATA[("market_price", "stock_zh_a_hist")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "usable in tiny-window probe; keep default paused, enable via include_disabled controlled recovery",
+}
+DISABLED_API_METADATA[("market_price", "stock_individual_info_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "usable but mixed-type raw metadata table may need csv fallback; enable via include_disabled controlled recovery",
+}
+DISABLED_API_METADATA[("margin_leverage", "stock_margin_detail_szse")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "usable in tiny-window probe; keep default paused, enable selected trade_dates via include_disabled",
+}
+DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indicator")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "executes but currently returns empty for tested symbols; deferred manual review",
+}
+DISABLED_API_METADATA[("event_ownership", "stock_gpzy_pledge_ratio_detail_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "heavy_crawl detail_source; keep deferred by default to avoid blocking recovery run",
+}
+DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_tj_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "lightweight institutional attention substitute, but paused by default for controlled recovery only",
+}
+DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "heavy_crawl detail_source; deferred by default",
 }
 
 EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
@@ -341,8 +378,8 @@ def _fallback_csv_write(output_root: str, family: str, api_name: str, raw: pd.Da
     raw.to_csv(data_path, index=False, encoding="utf-8-sig")
     with metadata_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["source_family", "api_name", "row_count", "write_mode"])
-        w.writerow([family, api_name, len(raw), "csv_fallback"])
+        w.writerow(["source_family", "api_name", "row_count", "write_mode", "file_format"])
+        w.writerow([family, api_name, len(raw), "csv_fallback", "csv"])
     return str(data_path), str(metadata_path)
 
 
@@ -351,8 +388,8 @@ def _normalize_error_message(api_name: str, err: str) -> str:
     unstable_apis = {"stock_zh_a_hist", "stock_margin_detail_szse", "stock_gpzy_pledge_ratio_detail_em", "stock_zh_a_gdhs"}
     if api_name in unstable_apis and any(k in low for k in ["timeout", "remote", "connection", "read timed out", "max retries"]):
         return f"network_unstable_retry: {err}"
-    if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em"} and any(
-        k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]
+    if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
+        k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
         return f"defensive_shape_guard: {err}"
     return err
@@ -365,6 +402,8 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     if api_name == "stock_individual_info_em" and "expecting value" in low:
         return True
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
+        return True
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and ("are in the [columns]" in low or "keyerror" in low):
         return True
     return False
 
@@ -459,13 +498,16 @@ def _run_single_coverage_task(
     }
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None) -> dict:
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
+    selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
+            if selected and api_name not in selected:
+                continue
             params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
                 tasks.append((family, api_name, params))
