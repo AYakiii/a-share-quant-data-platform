@@ -397,3 +397,23 @@ Output files:
 ### Interpretation
 
 Buffered policy is not automatically better than strict Top-N. Evaluate with after-cost return, turnover reduction, total cost reduction, holding-period stability, buy/sell forward-return diagnostics, and robustness across parameter settings.
+
+
+## Phase 18A-18 Colab controlled recovery (P0/P1 selected sources)
+
+Use the raw coverage runner with explicit selected APIs for controlled recovery:
+
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_coverage_ingest \
+      --families market_price,margin_leverage,financial_fundamental,event_ownership \
+      --include-disabled \
+      --api-names stock_zh_a_hist,stock_individual_info_em,stock_margin_detail_szse,stock_financial_analysis_indicator,stock_gpzy_pledge_ratio_detail_em \
+      --max-workers 2
+
+Default policy keeps disabled sources skipped unless `--include-disabled` is set.
+
+Notes for Phase 18A-18 recovery:
+- `raw_ingest_catalog.csv` records the **actual run result** (e.g., success/empty/failed/skipped).
+- `raw_source_acquisition_checklist.csv` records the **default acquisition policy view** (`获取` / `暂停获取` / `排除`) and keeps base schema:
+  `api_name,source_family,acquisition_status`.
+- For disabled heavy/detail sources (for example `stock_gpzy_pledge_ratio_detail_em`, `stock_jgdy_detail_em`), checklist may remain `暂停获取` even if an include-disabled probe was run.
+- Default queue restored for Colab-verified sources: `stock_margin_detail_szse`, `stock_industry_clf_hist_sw`, and canonical `trading_attention/stock_jgdy_tj_em` (while duplicate `disclosure_ir/stock_jgdy_tj_em` remains paused to avoid duplicate default ingestion).
