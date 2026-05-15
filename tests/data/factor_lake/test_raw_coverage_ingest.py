@@ -7,7 +7,7 @@ from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
 
 
 class _Result:
-    def __init__(self, raw: pd.DataFrame):https://github.com/AYakiii/a-share-quant-data-platform/pull/76/conflict?name=src%252Fqsys%252Futils%252Frun_factor_lake_raw_coverage_ingest.py&ancestor_oid=fc313a6c503bec834330b3327c312c2a62d8bee1&base_oid=c65687ca2ea04780cd8ebbd7948d8a0a253a9a19&head_oid=cc7edafd16e7e797c10271e0e95791873d3bea2a
+    def __init__(self, raw: pd.DataFrame):
         self.raw = raw
 
 

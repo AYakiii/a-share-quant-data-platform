@@ -459,7 +459,7 @@ def _run_single_coverage_task(
     }
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 1) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2) -> dict:
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
