@@ -26,6 +26,7 @@ def main() -> None:
     p.add_argument("--end-date", default="20240331")
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--continue-on-error", action="store_true")
+    p.add_argument("--include-disabled", action="store_true")
     args = p.parse_args()
 
     out = run_raw_coverage_ingest(
@@ -42,6 +43,7 @@ def main() -> None:
         ak_module=ak,
         request_sleep=args.request_sleep,
         continue_on_error=args.continue_on_error,
+        include_disabled=args.include_disabled,
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))
 
