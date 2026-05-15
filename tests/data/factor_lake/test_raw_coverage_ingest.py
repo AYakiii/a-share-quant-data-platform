@@ -41,7 +41,7 @@ def test_continue_on_error_false_does_not_crash(tmp_path):
     adapters = {"stock_zh_a_daily": lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))}
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
-        families=["market_price"],
+        families=["market_price", "event_ownership"],
         symbols=["000001"],
         index_symbols=["000300"],
         report_dates=["20240331"],
@@ -177,7 +177,7 @@ def test_stock_individual_info_em_csv_fallback_on_write_error(tmp_path):
 
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
-        families=["market_price"],
+        families=["market_price", "event_ownership"],
         symbols=["000001"],
         index_symbols=["000300"],
         report_dates=["20240331"],
@@ -267,7 +267,7 @@ def test_acquisition_checklist_outputs_and_rules(tmp_path):
 def test_disabled_sources_skipped_by_default_and_timing_fields(tmp_path):
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
-        families=["market_price"],
+        families=["market_price", "event_ownership"],
         symbols=["000001"],
         index_symbols=["000300"],
         report_dates=["20240331"],
@@ -285,6 +285,12 @@ def test_disabled_sources_skipped_by_default_and_timing_fields(tmp_path):
     assert int(row["rows"]) == 0
     assert "disabled_reason" in str(row["error_message"])
     assert "started_at" in df.columns and "finished_at" in df.columns and "elapsed_sec" in df.columns
+    row_free = df.loc[df["api_name"] == "stock_gdfx_free_holding_analyse_em"].iloc[0]
+    row_hold = df.loc[df["api_name"] == "stock_gdfx_holding_analyse_em"].iloc[0]
+    assert row_free["status"] == "skipped"
+    assert row_hold["status"] == "skipped"
+    assert "expensive and unstable in 10d recovery run" in str(row_free["error_message"])
+    assert "expensive and unstable in 10d recovery run" in str(row_hold["error_message"])
 
 
 def test_include_disabled_runs_disabled_sources(tmp_path):
@@ -317,3 +323,21 @@ def test_include_disabled_runs_disabled_sources(tmp_path):
     row = df.loc[df["api_name"] == "stock_zh_a_hist"].iloc[0]
     assert row["status"] in {"success", "empty", "failed"}
     assert seen["called"]
+
+
+def test_checklist_marks_new_disabled_event_ownership_as_paused():
+    from qsys.data.factor_lake.raw_ingest import build_acquisition_checklist
+
+    df = pd.DataFrame(
+        [
+            {"source_family": "event_ownership", "api_name": "stock_gdfx_free_holding_analyse_em", "status": "success"},
+            {"source_family": "event_ownership", "api_name": "stock_gdfx_holding_analyse_em", "status": "success"},
+        ]
+    )
+    checklist_df, _ = build_acquisition_checklist(df)
+    for api in ["stock_gdfx_free_holding_analyse_em", "stock_gdfx_holding_analyse_em"]:
+        row = checklist_df.loc[
+            (checklist_df["source_family"] == "event_ownership")
+            & (checklist_df["api_name"] == api)
+        ].iloc[0]
+        assert row["acquisition_status"] == "暂停获取"

@@ -119,6 +119,27 @@ TEMP_DISABLED_APIS: set[tuple[str, str]] = {
     ("event_ownership", "stock_gpzy_pledge_ratio_detail_em"),
     ("industry_concept", "stock_industry_clf_hist_sw"),
     ("trading_attention", "stock_jgdy_tj_em"),
+    ("event_ownership", "stock_gdfx_free_holding_analyse_em"),
+    ("event_ownership", "stock_gdfx_holding_analyse_em"),
+}
+
+DISABLED_API_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
+    pair: {
+        "enabled": False,
+        "manual_review_required": True,
+        "disabled_reason": "temporarily disabled for acquisition control",
+    }
+    for pair in TEMP_DISABLED_APIS
+}
+DISABLED_API_METADATA[("event_ownership", "stock_gdfx_free_holding_analyse_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
+}
+DISABLED_API_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")] = {
+    "enabled": False,
+    "manual_review_required": True,
+    "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
 }
 
 EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
@@ -361,6 +382,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 n_rows = 0
                 out_path = meta_path = ""
                 if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+                    disabled_reason = str(
+                        DISABLED_API_METADATA.get((family, api_name), {}).get(
+                            "disabled_reason", "temporarily disabled for acquisition control"
+                        )
+                    )
                     finished_at = datetime.now(UTC)
                     rows.append(
                         {
@@ -368,7 +394,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                             "api_name": api_name,
                             "status": "skipped",
                             "rows": 0,
-                            "error_message": "disabled_reason: temporarily disabled for acquisition control",
+                            "error_message": f"disabled_reason: {disabled_reason}",
                             "output_path": "",
                             "metadata_path": "",
                             "started_at": started_at.isoformat(),
