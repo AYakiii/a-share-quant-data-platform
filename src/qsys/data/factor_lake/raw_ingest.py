@@ -382,9 +382,20 @@ def _fallback_csv_write(output_root: str, family: str, api_name: str, raw: pd.Da
 
 def _normalize_error_message(api_name: str, err: str) -> str:
     low = err.lower()
-    unstable_apis = {"stock_zh_a_hist", "stock_margin_detail_szse", "stock_gpzy_pledge_ratio_detail_em", "stock_zh_a_gdhs"}
+    unstable_apis = {
+        "stock_zh_a_hist",
+        "stock_margin_detail_szse",
+        "stock_gpzy_pledge_ratio_detail_em",
+        "stock_zh_a_gdhs",
+        "stock_board_industry_index_ths",
+        "stock_restricted_release_summary_em",
+    }
     if api_name in unstable_apis and any(k in low for k in ["timeout", "remote", "connection", "read timed out", "max retries"]):
         return f"network_unstable_retry: {err}"
+    if api_name == "stock_restricted_release_summary_em" and "response ended prematurely" in low:
+        return f"network_unstable_retry: {err}"
+    if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
     if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
         k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
@@ -401,6 +412,10 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
         return True
     if api_name == "stock_zh_a_disclosure_relation_cninfo" and ("are in the [columns]" in low or "keyerror" in low):
+        return True
+    if api_name == "sw_index_third_info" and any(k in low for k in ["parser_empty_response", "find_all", "nonetype"]):
+        return True
+    if api_name in {"stock_board_industry_index_ths", "stock_restricted_release_summary_em"} and "network_unstable_retry" in low:
         return True
     return False
 

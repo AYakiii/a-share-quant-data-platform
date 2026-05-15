@@ -615,3 +615,72 @@ def test_restored_default_sources_not_skipped_without_include_disabled(tmp_path)
     assert rows[("trading_attention", "stock_jgdy_tj_em")] == "success"
     assert rows[("disclosure_ir", "stock_jgdy_tj_em")] == "skipped"
     assert seen == {"stock_margin_detail_szse", "stock_industry_clf_hist_sw", "stock_jgdy_tj_em"}
+
+
+def test_sw_index_third_info_parser_drift_downgrades_to_empty(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["industry_concept"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"sw_index_third_info": lambda **kwargs: (_ for _ in ()).throw(AttributeError("'NoneType' object has no attribute 'find_all'"))},
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=["sw_index_third_info"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "sw_index_third_info"].iloc[0]
+    assert row["status"] == "empty"
+    assert "defensive_shape_guard" in str(row["error_message"])
+
+
+def test_industry_index_ths_network_instability_downgrades_to_empty(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["industry_concept"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_board_industry_index_ths": lambda **kwargs: (_ for _ in ()).throw(ConnectionError("HTTPSConnectionPool(host='d.10jqka.com.cn')"))},
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=["stock_board_industry_index_ths"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_board_industry_index_ths"].iloc[0]
+    assert row["status"] == "empty"
+    assert "network_unstable_retry" in str(row["error_message"])
+
+
+def test_restricted_release_summary_premature_response_downgrades_to_empty(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["corporate_action"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={"stock_restricted_release_summary_em": lambda **kwargs: (_ for _ in ()).throw(RuntimeError("Response ended prematurely"))},
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=["stock_restricted_release_summary_em"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    row = df.loc[df["api_name"] == "stock_restricted_release_summary_em"].iloc[0]
+    assert row["status"] == "empty"
+    assert "network_unstable_retry" in str(row["error_message"])
