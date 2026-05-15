@@ -7,7 +7,7 @@ from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
 
 
 class _Result:
-    def __init__(self, raw: pd.DataFrame):https://github.com/AYakiii/a-share-quant-data-platform/pull/76/conflict?name=src%252Fqsys%252Futils%252Frun_factor_lake_raw_coverage_ingest.py&ancestor_oid=fc313a6c503bec834330b3327c312c2a62d8bee1&base_oid=c65687ca2ea04780cd8ebbd7948d8a0a253a9a19&head_oid=cc7edafd16e7e797c10271e0e95791873d3bea2a
+    def __init__(self, raw: pd.DataFrame):
         self.raw = raw
 
 
@@ -421,3 +421,80 @@ def test_checklist_marks_new_disabled_event_ownership_as_paused():
             & (checklist_df["api_name"] == api)
         ].iloc[0]
         assert row["acquisition_status"] == "暂停获取"
+
+def test_selected_api_names_limits_recovery_scope(tmp_path):
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price", "margin_leverage", "financial_fundamental", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={},
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=[
+            "stock_zh_a_hist",
+            "stock_individual_info_em",
+            "stock_margin_detail_szse",
+            "stock_financial_analysis_indicator",
+            "stock_gpzy_pledge_ratio_detail_em",
+        ],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["api_name"]) == {
+        "stock_zh_a_hist",
+        "stock_individual_info_em",
+        "stock_margin_detail_szse",
+        "stock_financial_analysis_indicator",
+        "stock_gpzy_pledge_ratio_detail_em",
+    }
+    assert set(df["status"]) == {"skipped"}
+
+
+def test_selected_api_names_with_include_disabled_runs_controlled_recovery(tmp_path):
+    seen = set()
+
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    def ok(api_name):
+        def _fn(**kwargs):
+            seen.add(api_name)
+            return _Result(pd.DataFrame({"x": [1]}))
+
+        return _fn
+
+    adapters = {
+        "stock_zh_a_hist": ok("stock_zh_a_hist"),
+        "stock_individual_info_em": ok("stock_individual_info_em"),
+        "stock_margin_detail_szse": ok("stock_margin_detail_szse"),
+        "stock_financial_analysis_indicator": ok("stock_financial_analysis_indicator"),
+        "stock_gpzy_pledge_ratio_detail_em": ok("stock_gpzy_pledge_ratio_detail_em"),
+    }
+    targets = list(adapters.keys())
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_price", "margin_leverage", "financial_fundamental", "event_ownership"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map=adapters,
+        continue_on_error=True,
+        include_disabled=True,
+        selected_api_names=targets,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["api_name"]) == set(targets)
+    assert set(df["status"]) == {"success"}
+    assert seen == set(targets)
