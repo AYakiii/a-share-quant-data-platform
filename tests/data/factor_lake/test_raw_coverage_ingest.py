@@ -453,7 +453,12 @@ def test_selected_api_names_limits_recovery_scope(tmp_path):
         "stock_financial_analysis_indicator",
         "stock_gpzy_pledge_ratio_detail_em",
     }
-    assert set(df["status"]) == {"skipped"}
+    status_by_api = dict(zip(df["api_name"], df["status"], strict=False))
+    assert status_by_api["stock_zh_a_hist"] == "skipped"
+    assert status_by_api["stock_individual_info_em"] == "skipped"
+    assert status_by_api["stock_financial_analysis_indicator"] == "skipped"
+    assert status_by_api["stock_gpzy_pledge_ratio_detail_em"] == "skipped"
+    assert status_by_api["stock_margin_detail_szse"] == "pending_adapter"
 
 
 def test_selected_api_names_with_include_disabled_runs_controlled_recovery(tmp_path):
@@ -559,10 +564,54 @@ def test_individual_info_csv_fallback_has_explicit_file_format(tmp_path):
         assert meta.iloc[0]["file_format"] == "csv"
 
 
-def test_jgdy_tj_disabled_pair_matches_all_coverage_families():
+def test_jgdy_tj_has_single_default_path_and_disclosure_duplicate_paused():
     from qsys.data.factor_lake.raw_ingest import COVERAGE_API_SPECS, TEMP_DISABLED_APIS
 
     families = [f for f, specs in COVERAGE_API_SPECS.items() if any(s["api_name"] == "stock_jgdy_tj_em" for s in specs)]
-    assert families
-    for family in families:
-        assert (family, "stock_jgdy_tj_em") in TEMP_DISABLED_APIS
+    assert "trading_attention" in families
+    assert "disclosure_ir" in families
+    assert ("trading_attention", "stock_jgdy_tj_em") not in TEMP_DISABLED_APIS
+    assert ("disclosure_ir", "stock_jgdy_tj_em") in TEMP_DISABLED_APIS
+
+
+def test_restored_default_sources_not_skipped_without_include_disabled(tmp_path):
+    class _Result:
+        def __init__(self, raw):
+            self.raw = raw
+
+    seen = set()
+
+    def mark(api_name):
+        def _fn(**kwargs):
+            seen.add(api_name)
+            return _Result(pd.DataFrame({"x": [1]}))
+
+        return _fn
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["margin_leverage", "industry_concept", "trading_attention", "disclosure_ir"],
+        symbols=["000001"],
+        index_symbols=["000300"],
+        report_dates=["20240331"],
+        trade_dates=["20240329"],
+        industry_names=["半导体"],
+        concept_names=["AI PC"],
+        start_date="20240101",
+        end_date="20240331",
+        adapter_map={
+            "stock_margin_detail_szse": mark("stock_margin_detail_szse"),
+            "stock_industry_clf_hist_sw": mark("stock_industry_clf_hist_sw"),
+            "stock_jgdy_tj_em": mark("stock_jgdy_tj_em"),
+        },
+        continue_on_error=True,
+        include_disabled=False,
+        selected_api_names=["stock_margin_detail_szse", "stock_industry_clf_hist_sw", "stock_jgdy_tj_em"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    rows = df.set_index(["source_family", "api_name"])["status"].to_dict()
+    assert rows[("margin_leverage", "stock_margin_detail_szse")] == "success"
+    assert rows[("industry_concept", "stock_industry_clf_hist_sw")] == "success"
+    assert rows[("trading_attention", "stock_jgdy_tj_em")] == "success"
+    assert rows[("disclosure_ir", "stock_jgdy_tj_em")] == "skipped"
+    assert seen == {"stock_margin_detail_szse", "stock_industry_clf_hist_sw", "stock_jgdy_tj_em"}

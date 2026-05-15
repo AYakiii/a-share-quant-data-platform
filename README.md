@@ -416,3 +416,4 @@ Notes for Phase 18A-18 recovery:
 - `raw_source_acquisition_checklist.csv` records the **default acquisition policy view** (`获取` / `暂停获取` / `排除`) and keeps base schema:
   `api_name,source_family,acquisition_status`.
 - For disabled heavy/detail sources (for example `stock_gpzy_pledge_ratio_detail_em`, `stock_jgdy_detail_em`), checklist may remain `暂停获取` even if an include-disabled probe was run.
+- Default queue restored for Colab-verified sources: `stock_margin_detail_szse`, `stock_industry_clf_hist_sw`, and canonical `trading_attention/stock_jgdy_tj_em` (while duplicate `disclosure_ir/stock_jgdy_tj_em` remains paused to avoid duplicate default ingestion).
