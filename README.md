@@ -399,15 +399,23 @@ Output files:
 Buffered policy is not automatically better than strict Top-N. Evaluate with after-cost return, turnover reduction, total cost reduction, holding-period stability, buy/sell forward-return diagnostics, and robustness across parameter settings.
 
 
-## Phase 18A-18 Colab controlled recovery (P0/P1 selected sources)
+## Phase 18A-19 official raw lake acquisition runner
 
-Use the raw coverage runner with explicit selected APIs for controlled recovery:
+Default mode is **formal full-market/full-period Raw Data Lake acquisition**.
+When symbol/date/industry/concept filters are omitted, the runner expands via acquisition-universe defaults.
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_coverage_ingest \
-      --families market_price,margin_leverage,financial_fundamental,event_ownership \
-      --include-disabled \
-      --api-names stock_zh_a_hist,stock_individual_info_em,stock_margin_detail_szse,stock_financial_analysis_indicator,stock_gpzy_pledge_ratio_detail_em \
-      --max-workers 2
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+      --output-root outputs/factor_lake_raw \
+      --start-date 20100101 \
+      --end-date 20101231 \
+      --families market_price,index_market,margin_leverage,industry_concept,financial_fundamental,event_ownership,corporate_action,trading_attention,disclosure_ir
+
+Targeted filters are supported for debug/recovery (not default semantics):
+
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+      --symbols 000001,000002 \
+      --trade-dates 20100104,20100105 \
+      --api-names stock_zh_a_hist
 
 Default policy keeps disabled sources skipped unless `--include-disabled` is set.
 
