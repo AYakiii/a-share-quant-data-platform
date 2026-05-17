@@ -440,6 +440,35 @@ def _call_api_with_retry(
     raise last_exc
 
 
+def _to_akshare_daily_symbol(symbol: str | int) -> str:
+    raw = str(symbol).strip().lower()
+    if raw.startswith(("sz", "sh", "bj")):
+        return raw
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    digits = digits.zfill(6)
+    if digits.startswith(("000", "001", "002", "003", "300")):
+        return f"sz{digits}"
+    if digits.startswith(("600", "601", "603", "605", "688")):
+        return f"sh{digits}"
+    if digits.startswith(("430", "830", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "874", "875", "876", "877", "920", "921", "922", "923", "924", "925", "926", "927", "928", "929")):
+        return f"bj{digits}"
+    return f"sz{digits}"
+
+
+def _filter_daily_frame_by_range(raw: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    if raw.empty or "date" not in raw.columns:
+        return raw
+    df = raw.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    start_dt = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+    end_dt = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+    if pd.notna(start_dt):
+        df = df[df["date"] >= start_dt]
+    if pd.notna(end_dt):
+        df = df[df["date"] <= end_dt]
+    return df
+
+
 def _run_single_coverage_task(
     output_root: str,
     family: str,
@@ -477,6 +506,18 @@ def _run_single_coverage_task(
         }
 
     used_api_name = api_name
+    fallback_from = ""
+    requested_api_name = api_name
+    original_symbol = ""
+    if "symbol" in params:
+        symbol_text = str(params.get("symbol", "")).strip().lower()
+        if symbol_text.startswith(("sz", "sh", "bj")):
+            symbol_text = symbol_text[2:]
+        digits = "".join(ch for ch in symbol_text if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+    akshare_symbol = ""
+    primary_error = ""
+    fallback_error = ""
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
@@ -495,13 +536,19 @@ def _run_single_coverage_task(
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
                     ret = _call_api_with_retry(fn, filtered)
-                except Exception:
+                except Exception as primary_exc:
+                    primary_error = f"{type(primary_exc).__name__}: {primary_exc}"
                     if daily_fn is None:
                         raise
-                    daily_params = dict(filtered)
-                    daily_params["adjust"] = ""
-                    ret = _call_api_with_retry(daily_fn, daily_params)
+                    fallback_from = "stock_zh_a_hist"
                     used_api_name = "stock_zh_a_daily"
+                    akshare_symbol = _to_akshare_daily_symbol(original_symbol)
+                    daily_params = {"symbol": akshare_symbol, "adjust": ""}
+                    try:
+                        ret = _call_api_with_retry(daily_fn, daily_params)
+                    except Exception as daily_exc:
+                        fallback_error = f"{type(daily_exc).__name__}: {daily_exc}"
+                        raise
             else:
                 ret = fn(**filtered)
             if ret is None:
@@ -509,11 +556,29 @@ def _run_single_coverage_task(
             raw = ret.raw if hasattr(ret, "raw") else ret
             if not isinstance(raw, pd.DataFrame):
                 raw = pd.DataFrame(raw)
+            if used_api_name == "stock_zh_a_daily":
+                raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
             partition = dict(filtered) if filtered else {"api_name": api_name}
+            if used_api_name == "stock_zh_a_daily":
+                partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
-                dp, mp = write_raw_partition(output_root, family, used_api_name, partition, raw, {"source_family": family, "api_name": used_api_name, "params": filtered, "status": status, "row_count": n_rows})
+                dp, mp = write_raw_partition(
+                    output_root, family, used_api_name, partition, raw,
+                    {
+                        "source_family": family,
+                        "api_name": used_api_name,
+                        "requested_api_name": requested_api_name,
+                        "actual_api_name": used_api_name,
+                        "fallback_from": fallback_from,
+                        "original_symbol": original_symbol,
+                        "akshare_symbol": akshare_symbol,
+                        "params": filtered,
+                        "status": status,
+                        "row_count": n_rows,
+                    }
+                )
                 out_path, meta_path = str(dp), str(mp)
             except Exception as write_exc:  # noqa: BLE001
                 if api_name == "stock_individual_info_em":
@@ -523,6 +588,8 @@ def _run_single_coverage_task(
                     raise
     except Exception as exc:  # noqa: BLE001
         err = _normalize_error_message(api_name, str(exc))
+        if primary_error or fallback_error:
+            err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
         err_type = type(exc).__name__
         if _should_downgrade_to_empty(api_name, err):
             status = "empty"
@@ -538,6 +605,11 @@ def _run_single_coverage_task(
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": used_api_name,
+        "requested_api_name": requested_api_name,
+        "actual_api_name": used_api_name,
+        "fallback_from": fallback_from,
+        "original_symbol": original_symbol,
+        "akshare_symbol": akshare_symbol,
         "status": status,
         "rows": n_rows,
         "error_type": err_type,
