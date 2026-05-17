@@ -15,14 +15,12 @@ def test_official_catalog_contract(tmp_path):
         output_root=str(tmp_path),
         families=["market_price"],
         symbols=["000001"],
-        index_symbols=["000300"],
         trade_dates=["20100104"],
-        report_dates=["20100331"],
-        industry_names=["半导体"],
-        concept_names=["AI PC"],
         start_date="20100101",
         end_date="20100131",
-        adapter_map={"stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]}))},
+        adapter_map={
+            "stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]}))
+        },
         include_disabled=True,
     )
     df = pd.read_csv(out["catalog_path"])
