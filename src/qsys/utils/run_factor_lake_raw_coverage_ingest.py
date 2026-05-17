@@ -13,22 +13,23 @@ def _split_csv(v: str) -> list[str]:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Broad raw source coverage ingest")
-    p.add_argument("--output-root", default="outputs/factor_lake_raw_coverage")
+    p = argparse.ArgumentParser(description="Official full-market/full-period Raw Data Lake acquisition runner")
+    p.add_argument("--output-root", default="outputs/factor_lake_raw")
     p.add_argument("--families", default="market_price,index_market,margin_leverage,financial_fundamental,industry_concept,event_ownership,corporate_action,disclosure_ir,trading_attention")
-    p.add_argument("--symbols", default="000001")
-    p.add_argument("--index-symbols", default="000300")
-    p.add_argument("--report-dates", default="20240331")
-    p.add_argument("--trade-dates", default="20240329")
-    p.add_argument("--industry-names", default="半导体")
-    p.add_argument("--concept-names", default="AI PC")
-    p.add_argument("--start-date", default="20240101")
-    p.add_argument("--end-date", default="20240331")
+    p.add_argument("--symbols", default="")
+    p.add_argument("--index-symbols", default="")
+    p.add_argument("--report-dates", default="")
+    p.add_argument("--trade-dates", default="")
+    p.add_argument("--industry-names", default="")
+    p.add_argument("--concept-names", default="")
+    p.add_argument("--start-date", default="20100101")
+    p.add_argument("--end-date", default="20101231")
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--include-disabled", action="store_true")
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--api-names", default="", help="Optional comma-separated API names for selected source recovery")
+    p.add_argument("--resume", action="store_true", help="Resume by skipping APIs already marked success in existing catalog")
     args = p.parse_args()
 
     out = run_raw_coverage_ingest(
@@ -48,6 +49,7 @@ def main() -> None:
         include_disabled=args.include_disabled,
         max_workers=args.max_workers,
         selected_api_names=_split_csv(args.api_names),
+        resume=args.resume,
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))
 

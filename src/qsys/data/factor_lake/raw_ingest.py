@@ -16,6 +16,7 @@ import pandas as pd
 from qsys.data.factor_lake.io import write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
 from qsys.data.factor_lake.registry import DATASET_REGISTRY, get_dataset_spec, plan_partitions
+from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_names, load_stock_symbols
 from qsys.data.sources.akshare_index import fetch_stock_zh_index_hist_csindex
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
@@ -335,33 +336,33 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "none":
         return [{}]
     if mode == "symbol_only":
-        return [{"symbol": symbols[0]}]
+        return [{"symbol": symbol} for symbol in symbols]
     if mode == "symbol_range":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in symbols]
     if mode == "daily_symbol_range":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "adjust": ""}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjust": ""} for symbol in symbols]
     if mode == "daily_symbol_range_hist":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"} for symbol in symbols]
     if mode == "index_symbol_range":
-        return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in index_symbols]
     if mode == "index_symbol":
-        return [{"symbol": index_symbols[0]}]
+        return [{"symbol": symbol} for symbol in index_symbols]
     if mode == "trade_date":
-        return [{"date": trade_dates[0]}]
+        return [{"date": date} for date in trade_dates]
     if mode == "report_date":
-        return [{"date": report_dates[0]}]
+        return [{"date": date} for date in report_dates]
     if mode == "symbol_report_date":
-        return [{"symbol": symbols[0], "date": report_dates[0]}]
+        return [{"symbol": symbol, "date": date} for symbol in symbols for date in report_dates]
     if mode == "industry_code":
         return [{"symbol": "801010"}]
     if mode == "industry_name_range":
-        return [{"symbol": industry_names[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": name, "start_date": start_date, "end_date": end_date} for name in industry_names]
     if mode == "industry_name":
-        return [{"symbol": industry_names[0]}]
+        return [{"symbol": name} for name in industry_names]
     if mode == "concept_name_range":
-        return [{"symbol": concept_names[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": name, "start_date": start_date, "end_date": end_date} for name in concept_names]
     if mode == "concept_name":
-        return [{"symbol": concept_names[0]}]
+        return [{"symbol": name} for name in concept_names]
     if mode == "date_range":
         return [{"start_date": start_date, "end_date": end_date}]
     return [{}]
@@ -510,7 +511,20 @@ def _run_single_coverage_task(
     }
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False) -> dict:
+    symbols = load_stock_symbols(symbols)
+    index_symbols = load_index_symbols(index_symbols)
+    trade_dates = build_trade_dates(start_date, end_date, trade_dates)
+    report_dates = build_report_dates(start_date, end_date, report_dates)
+    industry_names = load_industry_names(industry_names)
+    concept_names = load_concept_names(concept_names)
+
+    resume_keys: set[tuple[str, str, str]] = set()
+    catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
+    if resume and catalog_path.exists():
+        existing = pd.read_csv(catalog_path)
+        for _, row in existing.iterrows():
+            resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
@@ -522,6 +536,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 continue
             params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
+                if resume and (family, api_name, "success") in resume_keys:
+                    continue
                 tasks.append((family, api_name, params))
 
     if max_workers <= 1:
