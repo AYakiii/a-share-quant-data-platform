@@ -421,6 +421,25 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     return False
 
 
+def _call_api_with_retry(
+    fn: AdapterFn,
+    filtered: dict[str, str],
+    retries: int = 3,
+    retry_wait: float = 1.0,
+) -> object:
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn(**filtered)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(retry_wait * attempt)
+    if last_exc is None:
+        raise RuntimeError("unknown_api_error")
+    raise last_exc
+
+
 def _run_single_coverage_task(
     output_root: str,
     family: str,
@@ -457,6 +476,7 @@ def _run_single_coverage_task(
             "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
         }
 
+    used_api_name = api_name
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
@@ -471,7 +491,19 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = params
-            ret = fn(**filtered)
+            if api_name == "stock_zh_a_hist":
+                daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
+                try:
+                    ret = _call_api_with_retry(fn, filtered)
+                except Exception:
+                    if daily_fn is None:
+                        raise
+                    daily_params = dict(filtered)
+                    daily_params["adjust"] = ""
+                    ret = _call_api_with_retry(daily_fn, daily_params)
+                    used_api_name = "stock_zh_a_daily"
+            else:
+                ret = fn(**filtered)
             if ret is None:
                 raise ValueError("none_result_from_api")
             raw = ret.raw if hasattr(ret, "raw") else ret
@@ -481,7 +513,7 @@ def _run_single_coverage_task(
             status = "empty" if raw.empty else "success"
             partition = dict(filtered) if filtered else {"api_name": api_name}
             try:
-                dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
+                dp, mp = write_raw_partition(output_root, family, used_api_name, partition, raw, {"source_family": family, "api_name": used_api_name, "params": filtered, "status": status, "row_count": n_rows})
                 out_path, meta_path = str(dp), str(mp)
             except Exception as write_exc:  # noqa: BLE001
                 if api_name == "stock_individual_info_em":
@@ -505,7 +537,7 @@ def _run_single_coverage_task(
         "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
-        "api_name": api_name,
+        "api_name": used_api_name,
         "status": status,
         "rows": n_rows,
         "error_type": err_type,

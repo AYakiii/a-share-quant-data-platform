@@ -74,3 +74,63 @@ def test_index_market_requires_index_universe(tmp_path):
         assert False, "expected missing index_symbols.csv to fail"
     except FileNotFoundError as exc:
         assert "index_symbols.csv" in str(exc)
+
+
+def test_market_price_primary_hist_success(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        start_date="20100101",
+        end_date="20100131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]}))},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "stock_zh_a_hist" in set(df["api_name"])
+
+
+def test_market_price_primary_fail_fallback_daily_success(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def bad_hist(**kwargs):
+        raise ConnectionError("RemoteDisconnected")
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        start_date="20100101",
+        end_date="20100131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={
+            "stock_zh_a_hist": bad_hist,
+            "stock_zh_a_daily": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})),
+        },
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "stock_zh_a_daily" in set(df["api_name"])
+    assert "success" in set(df["status"])
+
+
+def test_market_price_primary_and_fallback_fail(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def bad(**kwargs):
+        raise ConnectionError("RemoteDisconnected")
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        start_date="20100101",
+        end_date="20100131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad, "stock_zh_a_daily": bad},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "failed" in set(df["status"])
