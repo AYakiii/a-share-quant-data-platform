@@ -16,6 +16,7 @@ import pandas as pd
 from qsys.data.factor_lake.io import write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
 from qsys.data.factor_lake.registry import DATASET_REGISTRY, get_dataset_spec, plan_partitions
+from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_names, load_stock_symbols
 from qsys.data.sources.akshare_index import fetch_stock_zh_index_hist_csindex
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
@@ -335,33 +336,33 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "none":
         return [{}]
     if mode == "symbol_only":
-        return [{"symbol": symbols[0]}]
+        return [{"symbol": symbol} for symbol in symbols]
     if mode == "symbol_range":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in symbols]
     if mode == "daily_symbol_range":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "adjust": ""}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date, "adjust": ""} for symbol in symbols]
     if mode == "daily_symbol_range_hist":
-        return [{"symbol": symbols[0], "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date, "period": "daily", "adjust": "qfq"} for symbol in symbols]
     if mode == "index_symbol_range":
-        return [{"symbol": index_symbols[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in index_symbols]
     if mode == "index_symbol":
-        return [{"symbol": index_symbols[0]}]
+        return [{"symbol": symbol} for symbol in index_symbols]
     if mode == "trade_date":
-        return [{"date": trade_dates[0]}]
+        return [{"date": date} for date in trade_dates]
     if mode == "report_date":
-        return [{"date": report_dates[0]}]
+        return [{"date": date} for date in report_dates]
     if mode == "symbol_report_date":
-        return [{"symbol": symbols[0], "date": report_dates[0]}]
+        return [{"symbol": symbol, "date": date} for symbol in symbols for date in report_dates]
     if mode == "industry_code":
         return [{"symbol": "801010"}]
     if mode == "industry_name_range":
-        return [{"symbol": industry_names[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": name, "start_date": start_date, "end_date": end_date} for name in industry_names]
     if mode == "industry_name":
-        return [{"symbol": industry_names[0]}]
+        return [{"symbol": name} for name in industry_names]
     if mode == "concept_name_range":
-        return [{"symbol": concept_names[0], "start_date": start_date, "end_date": end_date}]
+        return [{"symbol": name, "start_date": start_date, "end_date": end_date} for name in concept_names]
     if mode == "concept_name":
-        return [{"symbol": concept_names[0]}]
+        return [{"symbol": name} for name in concept_names]
     if mode == "date_range":
         return [{"start_date": start_date, "end_date": end_date}]
     return [{}]
@@ -432,6 +433,7 @@ def _run_single_coverage_task(
     started_at = datetime.now(UTC)
     status = "pending_adapter"
     err = ""
+    err_type = ""
     n_rows = 0
     out_path = meta_path = ""
 
@@ -477,7 +479,7 @@ def _run_single_coverage_task(
                 raw = pd.DataFrame(raw)
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = {"scope": "coverage", "key": api_name}
+            partition = dict(filtered) if filtered else {"api_name": api_name}
             try:
                 dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
                 out_path, meta_path = str(dp), str(mp)
@@ -489,18 +491,24 @@ def _run_single_coverage_task(
                     raise
     except Exception as exc:  # noqa: BLE001
         err = _normalize_error_message(api_name, str(exc))
+        err_type = type(exc).__name__
         if _should_downgrade_to_empty(api_name, err):
             status = "empty"
             n_rows = 0
+            err_type = "downgraded_to_empty"
         else:
             status = "failed"
 
     finished_at = datetime.now(UTC)
     return {
+        "dataset_name": "raw_source_api",
+        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": api_name,
         "status": status,
         "rows": n_rows,
+        "error_type": err_type,
         "error_message": err,
         "output_path": out_path,
         "metadata_path": meta_path,
@@ -510,7 +518,21 @@ def _run_single_coverage_task(
     }
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False) -> dict:
+    symbols = load_stock_symbols(symbols)
+    index_symbols = load_index_symbols(index_symbols)
+    trade_dates = build_trade_dates(start_date, end_date, trade_dates)
+    report_dates = build_report_dates(start_date, end_date, report_dates)
+    industry_names = load_industry_names(industry_names)
+    concept_names = load_concept_names(concept_names)
+
+    resume_keys: set[tuple[str, str, str]] = set()
+    catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
+    if resume and catalog_path.exists():
+        existing = pd.read_csv(catalog_path)
+        for _, row in existing.iterrows():
+            resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
+    run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
@@ -522,11 +544,14 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 continue
             params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
+                if resume and (family, api_name, "success") in resume_keys:
+                    continue
                 tasks.append((family, api_name, params))
 
     if max_workers <= 1:
         for family, api_name, params in tasks:
             row = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            row["run_id"] = run_id
             rows.append(row)
             if row["status"] == "failed" and not continue_on_error:
                 break
@@ -537,6 +562,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
             for fut in futures:
                 row = fut.result()
+                row["run_id"] = run_id
                 rows.append(row)
                 if request_sleep > 0:
                     time.sleep(request_sleep)
@@ -587,3 +613,8 @@ def build_acquisition_checklist(catalog_df: pd.DataFrame) -> tuple[pd.DataFrame,
     checklist_df = pd.DataFrame(rows, columns=["api_name", "source_family", "acquisition_status"])
     summary_df = checklist_df.groupby("acquisition_status", as_index=False).size().rename(columns={"size": "count"})
     return checklist_df, summary_df
+
+
+def run_raw_ingest_official(**kwargs: object) -> dict:
+    """Official Stage-1 raw ingestion entrypoint (dataset-centered raw acquisition orchestration)."""
+    return run_raw_coverage_ingest(**kwargs)
