@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from qsys.data.factor_lake.raw_ingest import run_raw_ingest_official
+from qsys.data.factor_lake.raw_ingest import _to_akshare_daily_symbol, run_raw_ingest_official
 
 
 class _Result:
@@ -134,3 +134,71 @@ def test_market_price_primary_and_fallback_fail(tmp_path):
     )
     df = pd.read_csv(out["catalog_path"])
     assert "failed" in set(df["status"])
+    assert "primary_error=" in str(df["error_message"].iloc[0])
+    assert "fallback_error=" in str(df["error_message"].iloc[0])
+
+
+def test_daily_symbol_mapping_rules():
+    assert _to_akshare_daily_symbol("000001") == "sz000001"
+    assert _to_akshare_daily_symbol("300001") == "sz300001"
+    assert _to_akshare_daily_symbol("600000") == "sh600000"
+    assert _to_akshare_daily_symbol("688001") == "sh688001"
+    assert _to_akshare_daily_symbol("920000") == "bj920000"
+    assert _to_akshare_daily_symbol(1) == "sz000001"
+    assert _to_akshare_daily_symbol("sz000001") == "sz000001"
+
+
+def test_market_price_primary_success_no_fallback_call(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    called = {"daily": False}
+
+    def daily(**kwargs):
+        called["daily"] = True
+        return _Result(pd.DataFrame({"x": [1]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        start_date="20100101",
+        end_date="20100131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]})), "stock_zh_a_daily": daily},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert called["daily"] is False
+    assert (df["fallback_from"].fillna("") == "").all()
+
+
+def test_market_price_fallback_daily_params_and_filter_and_catalog(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    got_kwargs = {}
+
+    def bad_hist(**kwargs):
+        raise KeyError("date")
+
+    def daily(**kwargs):
+        got_kwargs.update(kwargs)
+        return _Result(pd.DataFrame({"date": ["2009-12-31", "2010-01-04", "2010-02-01"], "x": [1, 2, 3]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20100101",
+        end_date="20100131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad_hist, "stock_zh_a_daily": daily},
+    )
+    assert got_kwargs == {"symbol": "sz000001", "adjust": ""}
+    df = pd.read_csv(out["catalog_path"])
+    row = df.iloc[0]
+    assert row["requested_api_name"] == "stock_zh_a_hist"
+    assert row["actual_api_name"] == "stock_zh_a_daily"
+    assert row["fallback_from"] == "stock_zh_a_hist"
+    assert str(row["original_symbol"]).zfill(6) == "000001"
+    assert row["akshare_symbol"] == "sz000001"
+    assert row["rows"] == 1
