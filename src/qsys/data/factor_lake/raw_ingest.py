@@ -518,13 +518,30 @@ def _run_single_coverage_task(
     }
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False) -> dict:
-    symbols = load_stock_symbols(symbols)
-    index_symbols = load_index_symbols(index_symbols)
-    trade_dates = build_trade_dates(start_date, end_date, trade_dates)
-    report_dates = build_report_dates(start_date, end_date, report_dates)
-    industry_names = load_industry_names(industry_names)
-    concept_names = load_concept_names(concept_names)
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe") -> dict:
+    selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
+    selected_specs: list[dict[str, str]] = []
+    for family in families:
+        for spec in COVERAGE_API_SPECS.get(family, []):
+            api_name = spec["api_name"]
+            if selected and api_name not in selected:
+                continue
+            selected_specs.append(spec)
+
+    required_modes = {spec["param_mode"] for spec in selected_specs}
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
+    need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
+    need_trade_dates = "trade_date" in required_modes
+    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
+    need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
+    need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
+
+    symbols = load_stock_symbols(symbols, universe_root=universe_root) if need_symbols else (symbols or [])
+    index_symbols = load_index_symbols(index_symbols, universe_root=universe_root) if need_index_symbols else (index_symbols or [])
+    trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
+    report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
+    industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
+    concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
     resume_keys: set[tuple[str, str, str]] = set()
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
@@ -536,7 +553,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
-    selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
