@@ -433,6 +433,7 @@ def _run_single_coverage_task(
     started_at = datetime.now(UTC)
     status = "pending_adapter"
     err = ""
+    err_type = ""
     n_rows = 0
     out_path = meta_path = ""
 
@@ -478,7 +479,7 @@ def _run_single_coverage_task(
                 raw = pd.DataFrame(raw)
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = {"scope": "coverage", "key": api_name}
+            partition = dict(filtered) if filtered else {"api_name": api_name}
             try:
                 dp, mp = write_raw_partition(output_root, family, api_name, partition, raw, {"source_family": family, "api_name": api_name, "params": filtered, "status": status, "row_count": n_rows})
                 out_path, meta_path = str(dp), str(mp)
@@ -490,18 +491,24 @@ def _run_single_coverage_task(
                     raise
     except Exception as exc:  # noqa: BLE001
         err = _normalize_error_message(api_name, str(exc))
+        err_type = type(exc).__name__
         if _should_downgrade_to_empty(api_name, err):
             status = "empty"
             n_rows = 0
+            err_type = "downgraded_to_empty"
         else:
             status = "failed"
 
     finished_at = datetime.now(UTC)
     return {
+        "dataset_name": "raw_source_api",
+        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": api_name,
         "status": status,
         "rows": n_rows,
+        "error_type": err_type,
         "error_message": err,
         "output_path": out_path,
         "metadata_path": meta_path,
@@ -525,6 +532,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         existing = pd.read_csv(catalog_path)
         for _, row in existing.iterrows():
             resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
+    run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
@@ -543,6 +551,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     if max_workers <= 1:
         for family, api_name, params in tasks:
             row = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            row["run_id"] = run_id
             rows.append(row)
             if row["status"] == "failed" and not continue_on_error:
                 break
@@ -553,6 +562,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
             for fut in futures:
                 row = fut.result()
+                row["run_id"] = run_id
                 rows.append(row)
                 if request_sleep > 0:
                     time.sleep(request_sleep)
@@ -603,3 +613,8 @@ def build_acquisition_checklist(catalog_df: pd.DataFrame) -> tuple[pd.DataFrame,
     checklist_df = pd.DataFrame(rows, columns=["api_name", "source_family", "acquisition_status"])
     summary_df = checklist_df.groupby("acquisition_status", as_index=False).size().rename(columns={"size": "count"})
     return checklist_df, summary_df
+
+
+def run_raw_ingest_official(**kwargs: object) -> dict:
+    """Official Stage-1 raw ingestion entrypoint (dataset-centered raw acquisition orchestration)."""
+    return run_raw_coverage_ingest(**kwargs)

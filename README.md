@@ -404,7 +404,7 @@ Buffered policy is not automatically better than strict Top-N. Evaluate with aft
 Default mode is **formal full-market/full-period Raw Data Lake acquisition**.
 When symbol/date/industry/concept filters are omitted, the runner expands via acquisition-universe defaults.
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_coverage_ingest \
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
       --output-root outputs/factor_lake_raw \
       --start-date 20100101 \
       --end-date 20101231 \
@@ -412,7 +412,7 @@ When symbol/date/industry/concept filters are omitted, the runner expands via ac
 
 Targeted filters are supported for debug/recovery (not default semantics):
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_coverage_ingest \
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
       --symbols 000001,000002 \
       --trade-dates 20100104,20100105 \
       --api-names stock_zh_a_hist
