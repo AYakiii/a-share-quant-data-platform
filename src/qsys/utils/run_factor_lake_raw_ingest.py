@@ -16,7 +16,7 @@ def main() -> None:
     p.add_argument("--output-root", default="outputs/factor_lake_raw")
     p.add_argument("--families", default="market_price,index_market,margin_leverage,financial_fundamental,industry_concept,event_ownership,corporate_action,disclosure_ir,trading_attention")
     p.add_argument("--start-date", default="20100101")
-    p.add_argument("--end-date", default="20101231")
+    p.add_argument("--end-date", default="20100131")
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--continue-on-error", action="store_true")
