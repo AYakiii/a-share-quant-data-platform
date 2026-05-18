@@ -469,6 +469,108 @@ def _filter_daily_frame_by_range(raw: pd.DataFrame, start_date: str, end_date: s
     return df
 
 
+def _split_daily_by_year_month(raw: pd.DataFrame, start_date: str, end_date: str) -> dict[tuple[str, str], pd.DataFrame]:
+    if raw.empty:
+        return {}
+    if "date" not in raw.columns:
+        start_year = str(start_date)[:4] if start_date else ""
+        start_month = str(start_date)[4:6] if len(str(start_date)) >= 6 else ""
+        if start_year.isdigit():
+            month = start_month if start_month.isdigit() else "01"
+            return {(start_year, month): raw.copy()}
+        return {}
+    df = raw.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[df["date"].notna()]
+    if df.empty:
+        return {}
+    out: dict[tuple[str, str], pd.DataFrame] = {}
+    grouped = df.groupby([df["date"].dt.year, df["date"].dt.month])
+    for (year, month), part in grouped:
+        out[(str(int(year)), f"{int(month):02d}")] = part.sort_values("date").reset_index(drop=True)
+    return out
+
+
+def _write_market_price_month_partitions(
+    output_root: str,
+    family: str,
+    used_api_name: str,
+    requested_api_name: str,
+    fallback_from: str,
+    original_symbol: str,
+    akshare_symbol: str,
+    params: dict[str, str],
+    raw: pd.DataFrame,
+    symbol_value: str,
+    adjust_label: str,
+    started_at: datetime,
+) -> list[dict[str, object]]:
+    month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
+    task_rows: list[dict[str, object]] = []
+    for (year, month), month_df in month_frames.items():
+        min_date = str(month_df["date"].min().date()) if "date" in month_df.columns else ""
+        max_date = str(month_df["date"].max().date()) if "date" in month_df.columns else ""
+        partition = {"symbol": symbol_value, "adjust": adjust_label, "year": year, "month": month}
+        metadata = {
+            "api_name": used_api_name,
+            "source_family": family,
+            "dataset_name": "raw_source_api",
+            "requested_api_name": requested_api_name,
+            "actual_api_name": used_api_name,
+            "fallback_from": fallback_from,
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "start_date": str(params.get("start_date", "")),
+            "end_date": str(params.get("end_date", "")),
+            "year": year,
+            "month": month,
+            "min_date": min_date,
+            "max_date": max_date,
+            "rows": int(len(month_df)),
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            dp, mp = write_raw_partition(output_root, family, used_api_name, partition, month_df, metadata)
+            part_status = "success"
+            part_err_type = ""
+            part_err_msg = ""
+        except FileExistsError as exists_exc:
+            dp = Path(output_root) / "data" / "raw" / "akshare" / family / used_api_name / f"symbol={symbol_value}" / f"adjust={adjust_label}" / f"year={year}" / f"month={month}" / "data.parquet"
+            mp = dp.with_name("metadata.json")
+            part_status = "already_exists"
+            part_err_type = "FileExistsError"
+            part_err_msg = str(exists_exc)
+        task_rows.append(
+            {
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "source_family": family,
+                "api_name": used_api_name,
+                "requested_api_name": requested_api_name,
+                "actual_api_name": used_api_name,
+                "fallback_from": fallback_from,
+                "original_symbol": original_symbol,
+                "akshare_symbol": akshare_symbol,
+                "year": year,
+                "month": month,
+                "min_date": min_date,
+                "max_date": max_date,
+                "status": part_status,
+                "rows": int(len(month_df)),
+                "error_type": part_err_type,
+                "error_message": part_err_msg,
+                "output_path": str(dp),
+                "metadata_path": str(mp),
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(UTC).isoformat(),
+                "elapsed_sec": max((datetime.now(UTC) - started_at).total_seconds(), 0.0),
+            }
+        )
+    return task_rows
+
+
 def _run_single_coverage_task(
     output_root: str,
     family: str,
@@ -477,7 +579,7 @@ def _run_single_coverage_task(
     adapters: dict[str, AdapterFn],
     ak_module: object | None,
     include_disabled: bool,
-) -> dict[str, object]:
+) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     status = "pending_adapter"
     err = ""
@@ -492,7 +594,7 @@ def _run_single_coverage_task(
             )
         )
         finished_at = datetime.now(UTC)
-        return {
+        return [{
             "source_family": family,
             "api_name": api_name,
             "status": "skipped",
@@ -503,7 +605,7 @@ def _run_single_coverage_task(
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }
+        }]
 
     used_api_name = api_name
     fallback_from = ""
@@ -564,26 +666,42 @@ def _run_single_coverage_task(
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
-                dp, mp = write_raw_partition(
-                    output_root, family, used_api_name, partition, raw,
-                    {
-                        "source_family": family,
-                        "api_name": used_api_name,
-                        "requested_api_name": requested_api_name,
-                        "actual_api_name": used_api_name,
-                        "fallback_from": fallback_from,
-                        "original_symbol": original_symbol,
-                        "akshare_symbol": akshare_symbol,
-                        "params": filtered,
-                        "status": status,
-                        "row_count": n_rows,
-                    }
-                )
-                out_path, meta_path = str(dp), str(mp)
+                if used_api_name in {"stock_zh_a_daily", "stock_zh_a_hist"} and family == "market_price":
+                    symbol_value = akshare_symbol if used_api_name == "stock_zh_a_daily" else str(filtered.get("symbol", ""))
+                    adjust_label = "none" if used_api_name == "stock_zh_a_daily" else str(filtered.get("adjust", "none") or "none")
+                    task_rows = _write_market_price_month_partitions(
+                        output_root, family, used_api_name, requested_api_name, fallback_from, original_symbol, akshare_symbol,
+                        params, raw, symbol_value, adjust_label, started_at
+                    )
+                    if not task_rows:
+                        status = "empty"
+                    else:
+                        return task_rows
+                else:
+                    dp, mp = write_raw_partition(
+                        output_root, family, used_api_name, partition, raw,
+                        {
+                            "source_family": family,
+                            "api_name": used_api_name,
+                            "requested_api_name": requested_api_name,
+                            "actual_api_name": used_api_name,
+                            "fallback_from": fallback_from,
+                            "original_symbol": original_symbol,
+                            "akshare_symbol": akshare_symbol,
+                            "params": filtered,
+                            "status": status,
+                            "row_count": n_rows,
+                        }
+                    )
+                    out_path, meta_path = str(dp), str(mp)
             except Exception as write_exc:  # noqa: BLE001
                 if api_name == "stock_individual_info_em":
                     out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
                     err = f"csv_fallback_after_write_error: {write_exc}"
+                elif isinstance(write_exc, FileExistsError):
+                    status = "already_exists"
+                    err_type = "FileExistsError"
+                    err = str(write_exc)
                 else:
                     raise
     except Exception as exc:  # noqa: BLE001
@@ -599,7 +717,7 @@ def _run_single_coverage_task(
             status = "failed"
 
     finished_at = datetime.now(UTC)
-    return {
+    return [{
         "dataset_name": "raw_source_api",
         "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
@@ -619,7 +737,7 @@ def _run_single_coverage_task(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-    }
+    }]
 
 
 def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe") -> dict:
@@ -670,10 +788,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
     if max_workers <= 1:
         for family, api_name, params in tasks:
-            row = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-            row["run_id"] = run_id
-            rows.append(row)
-            if row["status"] == "failed" and not continue_on_error:
+            task_rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            for row in task_rows:
+                row["run_id"] = run_id
+                rows.append(row)
+            if any(row["status"] == "failed" for row in task_rows) and not continue_on_error:
                 break
             if request_sleep > 0:
                 time.sleep(request_sleep)
@@ -681,9 +800,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
             for fut in futures:
-                row = fut.result()
-                row["run_id"] = run_id
-                rows.append(row)
+                task_rows = fut.result()
+                for row in task_rows:
+                    row["run_id"] = run_id
+                    rows.append(row)
                 if request_sleep > 0:
                     time.sleep(request_sleep)
 
