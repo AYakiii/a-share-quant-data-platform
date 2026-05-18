@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import json
 
 from qsys.data.factor_lake.raw_ingest import _to_akshare_daily_symbol, run_raw_ingest_official
 
@@ -112,8 +113,9 @@ def test_market_price_primary_fail_fallback_daily_success(tmp_path):
         },
     )
     df = pd.read_csv(out["catalog_path"])
-    assert "stock_zh_a_daily" in set(df["api_name"])
-    assert "success" in set(df["status"])
+    daily_df = df[df["api_name"] == "stock_zh_a_daily"]
+    assert not daily_df.empty
+    assert "success" in set(daily_df["status"])
 
 
 def test_market_price_primary_and_fallback_fail(tmp_path):
@@ -202,3 +204,131 @@ def test_market_price_fallback_daily_params_and_filter_and_catalog(tmp_path):
     assert str(row["original_symbol"]).zfill(6) == "000001"
     assert row["akshare_symbol"] == "sz000001"
     assert row["rows"] == 1
+
+
+def test_market_price_fallback_daily_writes_year_month_partition_and_metadata(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def bad_hist(**kwargs):
+        raise KeyError("date")
+
+    def daily(**kwargs):
+        return _Result(pd.DataFrame({"date": ["2025-01-02", "2025-01-31"], "x": [1, 2]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20250101",
+        end_date="20251231",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad_hist, "stock_zh_a_daily": daily},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    daily_df = df[df["api_name"] == "stock_zh_a_daily"]
+    assert len(daily_df) == 1
+    row = daily_df.iloc[0]
+    assert int(row["year"]) == 2025
+    assert int(row["month"]) == 1
+    assert "year=2025" in row["output_path"]
+    assert "month=01" in row["output_path"]
+    assert "adjust=none" in row["output_path"]
+    assert "pool_id=" not in row["output_path"]
+    assert "batch_id=" not in row["output_path"]
+    with open(row["metadata_path"], encoding="utf-8") as f:
+        meta = json.load(f)
+    assert meta["requested_api_name"] == "stock_zh_a_hist"
+    assert meta["actual_api_name"] == "stock_zh_a_daily"
+    assert meta["fallback_from"] == "stock_zh_a_hist"
+    assert meta["original_symbol"] == "000001"
+    assert meta["akshare_symbol"] == "sz000001"
+    assert str(meta["year"]) == "2025"
+    assert str(meta["month"]) == "01"
+    assert meta["min_date"] == "2025-01-02"
+    assert meta["max_date"] == "2025-01-31"
+
+
+def test_market_price_fallback_daily_spanning_two_months_writes_two_rows(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def bad_hist(**kwargs):
+        raise KeyError("date")
+
+    def daily(**kwargs):
+        return _Result(pd.DataFrame({"date": ["2025-01-31", "2025-02-03"], "x": [1, 2]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20250101",
+        end_date="20250210",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad_hist, "stock_zh_a_daily": daily},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    daily_df = df[df["api_name"] == "stock_zh_a_daily"]
+    assert {int(y) for y in daily_df["year"].dropna().tolist()} == {2025}
+    assert {int(m) for m in daily_df["month"].dropna().tolist()} == {1, 2}
+    assert len(daily_df) == 2
+    assert daily_df["output_path"].str.contains("year=2025/month=01").any()
+    assert daily_df["output_path"].str.contains("year=2025/month=02").any()
+
+
+def test_market_price_fallback_daily_spanning_two_years_writes_multi_month_partitions(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def bad_hist(**kwargs):
+        raise KeyError("date")
+
+    def daily(**kwargs):
+        return _Result(pd.DataFrame({"date": ["2025-12-31", "2026-01-02", "2026-01-10"], "x": [1, 2, 3]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20251201",
+        end_date="20260110",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad_hist, "stock_zh_a_daily": daily},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    daily_df = df[df["api_name"] == "stock_zh_a_daily"]
+    keys = {(int(y), int(m)) for y, m in zip(daily_df["year"], daily_df["month"])}
+    assert keys == {(2025, 12), (2026, 1)}
+    assert len(daily_df) == 2
+
+
+def test_market_price_existing_partition_not_overwritten(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    target = tmp_path / "out" / "data" / "raw" / "akshare" / "market_price" / "stock_zh_a_daily" / "symbol=sz000001" / "adjust=none" / "year=2025" / "month=01"
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "data.parquet").write_bytes(b"dummy")
+
+    def bad_hist(**kwargs):
+        raise KeyError("date")
+
+    def daily(**kwargs):
+        return _Result(pd.DataFrame({"date": ["2025-01-02"], "x": [1]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20250101",
+        end_date="20250131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": bad_hist, "stock_zh_a_daily": daily},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "already_exists" in set(df["status"])
