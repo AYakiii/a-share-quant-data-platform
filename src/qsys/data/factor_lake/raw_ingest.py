@@ -491,6 +491,86 @@ def _split_daily_by_year_month(raw: pd.DataFrame, start_date: str, end_date: str
     return out
 
 
+def _write_market_price_month_partitions(
+    output_root: str,
+    family: str,
+    used_api_name: str,
+    requested_api_name: str,
+    fallback_from: str,
+    original_symbol: str,
+    akshare_symbol: str,
+    params: dict[str, str],
+    raw: pd.DataFrame,
+    symbol_value: str,
+    adjust_label: str,
+    started_at: datetime,
+) -> list[dict[str, object]]:
+    month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
+    task_rows: list[dict[str, object]] = []
+    for (year, month), month_df in month_frames.items():
+        min_date = str(month_df["date"].min().date()) if "date" in month_df.columns else ""
+        max_date = str(month_df["date"].max().date()) if "date" in month_df.columns else ""
+        partition = {"symbol": symbol_value, "adjust": adjust_label, "year": year, "month": month}
+        metadata = {
+            "api_name": used_api_name,
+            "source_family": family,
+            "dataset_name": "raw_source_api",
+            "requested_api_name": requested_api_name,
+            "actual_api_name": used_api_name,
+            "fallback_from": fallback_from,
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "start_date": str(params.get("start_date", "")),
+            "end_date": str(params.get("end_date", "")),
+            "year": year,
+            "month": month,
+            "min_date": min_date,
+            "max_date": max_date,
+            "rows": int(len(month_df)),
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            dp, mp = write_raw_partition(output_root, family, used_api_name, partition, month_df, metadata)
+            part_status = "success"
+            part_err_type = ""
+            part_err_msg = ""
+        except FileExistsError as exists_exc:
+            dp = Path(output_root) / "data" / "raw" / "akshare" / family / used_api_name / f"symbol={symbol_value}" / f"adjust={adjust_label}" / f"year={year}" / f"month={month}" / "data.parquet"
+            mp = dp.with_name("metadata.json")
+            part_status = "already_exists"
+            part_err_type = "FileExistsError"
+            part_err_msg = str(exists_exc)
+        task_rows.append(
+            {
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "source_family": family,
+                "api_name": used_api_name,
+                "requested_api_name": requested_api_name,
+                "actual_api_name": used_api_name,
+                "fallback_from": fallback_from,
+                "original_symbol": original_symbol,
+                "akshare_symbol": akshare_symbol,
+                "year": year,
+                "month": month,
+                "min_date": min_date,
+                "max_date": max_date,
+                "status": part_status,
+                "rows": int(len(month_df)),
+                "error_type": part_err_type,
+                "error_message": part_err_msg,
+                "output_path": str(dp),
+                "metadata_path": str(mp),
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(UTC).isoformat(),
+                "elapsed_sec": max((datetime.now(UTC) - started_at).total_seconds(), 0.0),
+            }
+        )
+    return task_rows
+
+
 def _run_single_coverage_task(
     output_root: str,
     family: str,
@@ -586,70 +666,13 @@ def _run_single_coverage_task(
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
-                if used_api_name == "stock_zh_a_daily":
-                    month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
-                    task_rows: list[dict[str, object]] = []
-                    for (year, month), month_df in month_frames.items():
-                        min_date = str(month_df["date"].min().date()) if "date" in month_df.columns else ""
-                        max_date = str(month_df["date"].max().date()) if "date" in month_df.columns else ""
-                        partition = {"symbol": akshare_symbol, "adjust": "none", "year": year, "month": month}
-                        metadata = {
-                            "api_name": used_api_name,
-                            "source_family": family,
-                            "dataset_name": "raw_source_api",
-                            "requested_api_name": requested_api_name,
-                            "actual_api_name": used_api_name,
-                            "fallback_from": fallback_from,
-                            "original_symbol": original_symbol,
-                            "akshare_symbol": akshare_symbol,
-                            "start_date": str(params.get("start_date", "")),
-                            "end_date": str(params.get("end_date", "")),
-                            "year": year,
-                            "month": month,
-                            "min_date": min_date,
-                            "max_date": max_date,
-                            "rows": int(len(month_df)),
-                            "created_at": datetime.now(UTC).isoformat(),
-                            "updated_at": datetime.now(UTC).isoformat(),
-                        }
-                        try:
-                            dp, mp = write_raw_partition(output_root, family, used_api_name, partition, month_df, metadata)
-                            part_status = "success"
-                            part_err_type = ""
-                            part_err_msg = ""
-                        except FileExistsError as exists_exc:
-                            dp = Path(output_root) / "data" / "raw" / "akshare" / family / used_api_name / f"symbol={akshare_symbol}" / "adjust=none" / f"year={year}" / f"month={month}" / "data.parquet"
-                            mp = dp.with_name("metadata.json")
-                            part_status = "already_exists"
-                            part_err_type = "FileExistsError"
-                            part_err_msg = str(exists_exc)
-                        task_rows.append(
-                            {
-                                "dataset_name": "raw_source_api",
-                                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
-                                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-                                "source_family": family,
-                                "api_name": used_api_name,
-                                "requested_api_name": requested_api_name,
-                                "actual_api_name": used_api_name,
-                                "fallback_from": fallback_from,
-                                "original_symbol": original_symbol,
-                                "akshare_symbol": akshare_symbol,
-                                "year": year,
-                                "month": month,
-                                "min_date": min_date,
-                                "max_date": max_date,
-                                "status": part_status,
-                                "rows": int(len(month_df)),
-                                "error_type": part_err_type,
-                                "error_message": part_err_msg,
-                                "output_path": str(dp),
-                                "metadata_path": str(mp),
-                                "started_at": started_at.isoformat(),
-                                "finished_at": datetime.now(UTC).isoformat(),
-                                "elapsed_sec": max((datetime.now(UTC) - started_at).total_seconds(), 0.0),
-                            }
-                        )
+                if used_api_name in {"stock_zh_a_daily", "stock_zh_a_hist"} and family == "market_price":
+                    symbol_value = akshare_symbol if used_api_name == "stock_zh_a_daily" else str(filtered.get("symbol", ""))
+                    adjust_label = "none" if used_api_name == "stock_zh_a_daily" else str(filtered.get("adjust", "none") or "none")
+                    task_rows = _write_market_price_month_partitions(
+                        output_root, family, used_api_name, requested_api_name, fallback_from, original_symbol, akshare_symbol,
+                        params, raw, symbol_value, adjust_label, started_at
+                    )
                     if not task_rows:
                         status = "empty"
                     else:

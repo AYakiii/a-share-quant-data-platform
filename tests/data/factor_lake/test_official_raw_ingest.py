@@ -90,7 +90,12 @@ def test_market_price_primary_hist_success(tmp_path):
         adapter_map={"stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]}))},
     )
     df = pd.read_csv(out["catalog_path"])
-    assert "stock_zh_a_hist" in set(df["api_name"])
+    hist_df = df[df["api_name"] == "stock_zh_a_hist"]
+    assert not hist_df.empty
+    assert hist_df["output_path"].str.contains("year=").all()
+    assert hist_df["output_path"].str.contains("month=").all()
+    assert not hist_df["output_path"].str.contains("start_date=").any()
+    assert not hist_df["output_path"].str.contains("end_date=").any()
 
 
 def test_market_price_primary_fail_fallback_daily_success(tmp_path):
@@ -204,6 +209,7 @@ def test_market_price_fallback_daily_params_and_filter_and_catalog(tmp_path):
     assert str(row["original_symbol"]).zfill(6) == "000001"
     assert row["akshare_symbol"] == "sz000001"
     assert row["rows"] == 1
+    assert "month=" in row["output_path"]
 
 
 def test_market_price_fallback_daily_writes_year_month_partition_and_metadata(tmp_path):
@@ -304,6 +310,39 @@ def test_market_price_fallback_daily_spanning_two_years_writes_multi_month_parti
     keys = {(int(y), int(m)) for y, m in zip(daily_df["year"], daily_df["month"])}
     assert keys == {(2025, 12), (2026, 1)}
     assert len(daily_df) == 2
+
+
+def test_market_price_hist_primary_spanning_months_writes_month_rows(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        return _Result(pd.DataFrame({"date": ["2024-01-31", "2024-02-01", "2024-02-28"], "x": [1, 2, 3]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000009"],
+        start_date="20240101",
+        end_date="20240228",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+    )
+    df = pd.read_csv(out["catalog_path"])
+    hist_df = df[df["api_name"] == "stock_zh_a_hist"]
+    assert len(hist_df) == 2
+    assert {int(m) for m in hist_df["month"]} == {1, 2}
+    assert hist_df["output_path"].str.contains("symbol=000009").any()
+    assert hist_df["output_path"].str.contains("adjust=qfq").all()
+    assert (~hist_df["output_path"].str.contains("pool_id=")).all()
+    assert (~hist_df["output_path"].str.contains("batch_id=")).all()
+    row = hist_df.iloc[0]
+    with open(row["metadata_path"], encoding="utf-8") as f:
+        meta = json.load(f)
+    assert "year" in meta and "month" in meta
+    assert "min_date" in meta and "max_date" in meta
+    assert meta["original_symbol"] == "000009"
 
 
 def test_market_price_existing_partition_not_overwritten(tmp_path):
