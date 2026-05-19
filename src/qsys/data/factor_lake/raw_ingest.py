@@ -469,25 +469,35 @@ def _filter_daily_frame_by_range(raw: pd.DataFrame, start_date: str, end_date: s
     return df
 
 
+def _detect_daily_date_column(raw: pd.DataFrame) -> str | None:
+    for col in ("date", "日期", "trade_date"):
+        if col in raw.columns:
+            return col
+    return None
+
+
 def _split_daily_by_year_month(raw: pd.DataFrame, start_date: str, end_date: str) -> dict[tuple[str, str], pd.DataFrame]:
     if raw.empty:
         return {}
-    if "date" not in raw.columns:
+    date_col = _detect_daily_date_column(raw)
+    if date_col is None:
         start_year = str(start_date)[:4] if start_date else ""
         start_month = str(start_date)[4:6] if len(str(start_date)) >= 6 else ""
         if start_year.isdigit():
             month = start_month if start_month.isdigit() else "01"
             return {(start_year, month): raw.copy()}
         return {}
-    df = raw.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df[df["date"].notna()]
-    if df.empty:
+    date_series = pd.to_datetime(raw[date_col], errors="coerce")
+    valid_mask = date_series.notna()
+    if not valid_mask.any():
         return {}
+    df = raw.loc[valid_mask].copy()
+    grouped = date_series.loc[valid_mask].groupby([date_series.loc[valid_mask].dt.year, date_series.loc[valid_mask].dt.month])
     out: dict[tuple[str, str], pd.DataFrame] = {}
-    grouped = df.groupby([df["date"].dt.year, df["date"].dt.month])
-    for (year, month), part in grouped:
-        out[(str(int(year)), f"{int(month):02d}")] = part.sort_values("date").reset_index(drop=True)
+    for (year, month), idx in grouped.groups.items():
+        part = df.loc[idx]
+        sort_key = pd.to_datetime(part[date_col], errors="coerce")
+        out[(str(int(year)), f"{int(month):02d}")] = part.iloc[sort_key.argsort(kind="mergesort")].reset_index(drop=True)
     return out
 
 
@@ -507,9 +517,11 @@ def _write_market_price_month_partitions(
 ) -> list[dict[str, object]]:
     month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
     task_rows: list[dict[str, object]] = []
+    date_col = _detect_daily_date_column(raw)
     for (year, month), month_df in month_frames.items():
-        min_date = str(month_df["date"].min().date()) if "date" in month_df.columns else ""
-        max_date = str(month_df["date"].max().date()) if "date" in month_df.columns else ""
+        month_dates = pd.to_datetime(month_df[date_col], errors="coerce") if date_col and date_col in month_df.columns else pd.Series(dtype="datetime64[ns]")
+        min_date = str(month_dates.min().date()) if not month_dates.empty and month_dates.notna().any() else ""
+        max_date = str(month_dates.max().date()) if not month_dates.empty and month_dates.notna().any() else ""
         partition = {"symbol": symbol_value, "adjust": adjust_label, "year": year, "month": month}
         metadata = {
             "api_name": used_api_name,
