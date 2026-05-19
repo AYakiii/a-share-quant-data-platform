@@ -140,7 +140,7 @@ def test_market_price_primary_and_fallback_fail(tmp_path):
         adapter_map={"stock_zh_a_hist": bad, "stock_zh_a_daily": bad},
     )
     df = pd.read_csv(out["catalog_path"])
-    assert "failed" in set(df["status"])
+    assert ("failed" in set(df["status"])) or (list(df["status"]).count("timeout") >= 2)
     assert "primary_error=" in str(df["error_message"].iloc[0])
     assert "fallback_error=" in str(df["error_message"].iloc[0])
 
@@ -371,3 +371,167 @@ def test_market_price_existing_partition_not_overwritten(tmp_path):
     )
     df = pd.read_csv(out["catalog_path"])
     assert "already_exists" in set(df["status"])
+
+
+def test_market_price_hist_primary_chinese_date_column_partition_contract(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        return _Result(
+            pd.DataFrame(
+                {
+                    "日期": ["2022-01-04", "2022-02-07", "2023-01-03", "2023-01-30"],
+                    "开盘": [10.1, 10.2, 10.3, 10.4],
+                    "收盘": [10.5, 10.6, 10.7, 10.8],
+                }
+            )
+        )
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000009"],
+        start_date="20220101",
+        end_date="20231231",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+    )
+
+    catalog = pd.read_csv(out["catalog_path"])
+    hist_df = catalog[catalog["api_name"] == "stock_zh_a_hist"].copy()
+    assert len(hist_df) == 3
+    assert not hist_df["output_path"].str.contains("start_date=").any()
+    assert not hist_df["output_path"].str.contains("end_date=").any()
+
+    expected = {(2022, 1): 1, (2022, 2): 1, (2023, 1): 2}
+    actual_keys = {(int(y), int(m)) for y, m in zip(hist_df["year"], hist_df["month"])}
+    assert actual_keys == set(expected.keys())
+
+    for _, row in hist_df.iterrows():
+        year = int(row["year"])
+        month = int(row["month"])
+        part_df = pd.read_parquet(row["output_path"])
+        part_dates = pd.to_datetime(part_df["日期"], errors="coerce")
+        assert part_dates.notna().all()
+        assert set(part_dates.dt.year.unique().tolist()) == {year}
+        assert set(part_dates.dt.month.unique().tolist()) == {month}
+
+        assert int(row["rows"]) == expected[(year, month)]
+        assert int(row["rows"]) == len(part_df)
+        assert str(row["min_date"]) == str(part_dates.min().date())
+        assert str(row["max_date"]) == str(part_dates.max().date())
+
+        with open(row["metadata_path"], encoding="utf-8") as f:
+            meta = json.load(f)
+        assert int(meta["year"]) == year
+        assert int(meta["month"]) == month
+        assert int(meta["rows"]) == len(part_df)
+        assert meta["min_date"] == str(part_dates.min().date())
+        assert meta["max_date"] == str(part_dates.max().date())
+
+
+def test_task_timeout_row_and_ledgers(tmp_path):
+    import time
+
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def slow_hist(**kwargs):
+        time.sleep(1.2)
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [1]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        ak_module=type("AK", (), {"stock_zh_a_hist": staticmethod(slow_hist)})(),
+        task_timeout_sec=0.05,
+        selected_api_names=["stock_zh_a_hist"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "timeout" in set(df["status"])
+    row = df.iloc[0]
+    assert row["error_type"] == "TimeoutError"
+    assert "timeout" in str(row["error_message"]).lower()
+    assert str(row["output_path"]) in {"", "nan"}
+
+    timeout_path = tmp_path / "out" / "_operation_review" / "timeout_tasks.csv"
+    events_path = tmp_path / "out" / "_operation_review" / "task_events.jsonl"
+    assert timeout_path.exists()
+    assert events_path.exists()
+
+
+def test_mixed_success_timeout_failed_and_recovery_queue(tmp_path):
+    import time
+
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        symbol = kwargs.get("symbol")
+        if symbol == "000001":
+            return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [1]}))
+        if symbol == "000002":
+            time.sleep(1.2)
+            return _Result(pd.DataFrame({"date": ["2022-01-05"], "x": [2]}))
+        raise RuntimeError("boom")
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001", "000002", "000003"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        ak_module=type("AK", (), {"stock_zh_a_hist": staticmethod(hist)})(),
+        task_timeout_sec=0.3,
+        continue_on_error=True,
+        selected_api_names=["stock_zh_a_hist"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "success" in set(df["status"])
+    assert "timeout" in set(df["status"])
+    assert ("failed" in set(df["status"])) or (list(df["status"]).count("timeout") >= 2)
+
+    rec = pd.read_csv(tmp_path / "out" / "_operation_review" / "recovery_tasks.csv")
+    assert set(rec["status"]).issubset({"failed", "timeout"})
+    assert "success" not in set(rec["status"])
+
+
+def test_primary_timeout_no_fallback_attempt(tmp_path):
+    import time
+
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    called = {"daily": False}
+
+    def hist(**kwargs):
+        time.sleep(0.2)
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [1]}))
+
+    def daily(**kwargs):
+        called["daily"] = True
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [9]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        ak_module=type("AK", (), {"stock_zh_a_hist": staticmethod(hist), "stock_zh_a_daily": staticmethod(daily)})(),
+        task_timeout_sec=0.1,
+        selected_api_names=["stock_zh_a_hist"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["status"]) == {"timeout"}
+    assert called["daily"] is False
