@@ -101,6 +101,7 @@ def _run_without_batching(args: argparse.Namespace) -> dict:
         include_disabled=args.include_disabled,
         resume=args.resume,
         ak_module=ak,
+        task_timeout_sec=args.task_timeout_sec,
     )
 
 
@@ -139,6 +140,8 @@ def _build_child_cmd(args: argparse.Namespace, batch_output_root: Path, batch_sy
         args.universe_root,
         "--disable-symbol-batching",
     ]
+    if args.task_timeout_sec is not None:
+        cmd.extend(["--task-timeout-sec", str(args.task_timeout_sec)])
     if args.continue_on_error:
         cmd.append("--continue-on-error")
     if args.include_disabled:
@@ -299,6 +302,7 @@ def main() -> None:
     p.add_argument("--stop-on-batch-timeout", action="store_true")
     p.add_argument("--keep-batch-outputs", action="store_true")
     p.add_argument("--disable-symbol-batching", action="store_true")
+    p.add_argument("--task-timeout-sec", type=float, default=None)
     args = p.parse_args()
 
     should_batch = (not args.disable_symbol_batching) and int(args.symbol_batch_size or 0) > 0

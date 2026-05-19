@@ -5,6 +5,8 @@ import json
 import inspect
 import time
 import uuid
+import multiprocessing as mp
+import signal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -752,7 +754,140 @@ def _run_single_coverage_task(
     }]
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe") -> dict:
+
+
+
+
+def _run_task_with_signal_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
+    try:
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+    except TimeoutError as exc:
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", ""))
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": symbol,
+            "akshare_symbol": "",
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": str(exc),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+def _run_task_in_subprocess_with_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+
+    def _worker(q: mp.Queue) -> None:
+        try:
+            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            q.put(("ok", rows))
+        except Exception as exc:  # noqa: BLE001
+            q.put(("err", f"{type(exc).__name__}: {exc}"))
+
+    ctx = mp.get_context("fork")
+    q: mp.Queue = ctx.Queue()
+    proc = ctx.Process(target=_worker, args=(q,))
+    proc.start()
+    proc.join(task_timeout_sec)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", "")).strip().lower()
+        if symbol.startswith(("sz", "sh", "bj")):
+            symbol = symbol[2:]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": f"task timeout after {task_timeout_sec} sec",
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    if not q.empty():
+        status, payload = q.get()
+        if status == "ok":
+            return payload
+        finished_at = datetime.now(UTC)
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": str(params.get("symbol", "")),
+            "akshare_symbol": "",
+            "status": "failed",
+            "rows": 0,
+            "error_type": "SubprocessTaskError",
+            "error_message": str(payload),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    return []
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -785,6 +920,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
     run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
+    op_dir = Path(output_root) / "_operation_review"
+    op_dir.mkdir(parents=True, exist_ok=True)
+    task_events_path = op_dir / "task_events.jsonl"
+    if task_events_path.exists():
+        task_events_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
     for family in families:
@@ -798,26 +938,43 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     continue
                 tasks.append((family, api_name, params))
 
-    if max_workers <= 1:
-        for family, api_name, params in tasks:
+    def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
+        for row in task_rows:
+            row["run_id"] = run_id
+            rows.append(row)
+            event = {
+                "run_id": run_id,
+                "source_family": row.get("source_family", ""),
+                "api_name": row.get("api_name", ""),
+                "requested_api_name": row.get("requested_api_name", ""),
+                "fallback_from": row.get("fallback_from", ""),
+                "original_symbol": row.get("original_symbol", ""),
+                "akshare_symbol": row.get("akshare_symbol", ""),
+                "status": row.get("status", ""),
+                "error_type": row.get("error_type", ""),
+                "error_message": row.get("error_message", ""),
+                "started_at": row.get("started_at", ""),
+                "finished_at": row.get("finished_at", ""),
+                "elapsed_sec": row.get("elapsed_sec", 0),
+            }
+            with open(task_events_path, "a", encoding="utf-8") as ef:
+                ef.write(json.dumps(event, ensure_ascii=False) + "\n")
+            print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
+
+    for family, api_name, params in tasks:
+        print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+        if task_timeout_sec and task_timeout_sec > 0:
+            if adapters:
+                task_rows = _run_task_with_signal_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+            else:
+                task_rows = _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+        else:
             task_rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-            for row in task_rows:
-                row["run_id"] = run_id
-                rows.append(row)
-            if any(row["status"] == "failed" for row in task_rows) and not continue_on_error:
-                break
-            if request_sleep > 0:
-                time.sleep(request_sleep)
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
-            for fut in futures:
-                task_rows = fut.result()
-                for row in task_rows:
-                    row["run_id"] = run_id
-                    rows.append(row)
-                if request_sleep > 0:
-                    time.sleep(request_sleep)
+        _record_task_rows(task_rows)
+        if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
+            break
+        if request_sleep > 0:
+            time.sleep(request_sleep)
 
     out = Path(output_root)
     out.mkdir(parents=True, exist_ok=True)
@@ -825,6 +982,15 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     summary_path = out / "raw_ingest_summary.csv"
     df = pd.DataFrame(rows)
     df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
+    timeout_df = df[df["status"] == "timeout"].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
+    timeout_df.to_csv(op_dir / "timeout_tasks.csv", index=False, encoding="utf-8-sig")
+    recovery_df = df[df["status"].isin(["failed", "timeout"])].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
+    if not recovery_df.empty:
+        keep_cols = [c for c in ["source_family", "api_name", "requested_api_name", "original_symbol", "akshare_symbol", "status", "error_type", "error_message"] if c in recovery_df.columns]
+        recovery_df = recovery_df[keep_cols]
+        recovery_df["start_date"] = start_date
+        recovery_df["end_date"] = end_date
+    recovery_df.to_csv(op_dir / "recovery_tasks.csv", index=False, encoding="utf-8-sig")
     s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
     s.to_csv(summary_path, index=False, encoding="utf-8-sig")
     checklist_df, checklist_summary_df = build_acquisition_checklist(df)

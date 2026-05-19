@@ -105,6 +105,7 @@ def test_timeout_reporting_and_stop_on_timeout(tmp_path, monkeypatch):
         stop_on_batch_timeout=True,
         keep_batch_outputs=True,
         disable_symbol_batching=False,
+        task_timeout_sec=None,
     )
 
     out = cli._run_with_symbol_batching(args)
