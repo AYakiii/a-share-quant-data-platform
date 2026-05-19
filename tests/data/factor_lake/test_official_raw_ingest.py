@@ -566,3 +566,129 @@ def test_task_timeout_preserves_parallel_workers(tmp_path):
     df = pd.read_csv(out["catalog_path"])
     assert len(df) == 10
     assert elapsed < 8.0
+
+
+def test_task_retry_jsondecode_then_success(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    state = {"n": 0}
+
+    def hist(**kwargs):
+        state["n"] += 1
+        if state["n"] <= 3:
+            raise ValueError("JSONDecodeError: expecting value")
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [1]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+        selected_api_names=["stock_zh_a_hist"],
+        task_retry_attempts=1,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["status"]) == {"success"}
+    attempts = pd.read_csv(tmp_path / "out" / "_operation_review" / "task_attempts.csv")
+    assert len(attempts) >= 2
+
+
+def test_task_retry_timeout_then_success(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    state = {"n": 0}
+
+    def hist(**kwargs):
+        state["n"] += 1
+        if state["n"] <= 3:
+            raise TimeoutError("simulated timeout")
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [2]}))
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+        selected_api_names=["stock_zh_a_hist"],
+        task_retry_attempts=1,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["status"]) == {"success"}
+
+
+def test_task_retry_exhausted_keeps_final_failed(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        raise ConnectionError("remote disconnect")
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+        selected_api_names=["stock_zh_a_hist"],
+        task_retry_attempts=1,
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert set(df["status"]).issubset({"failed", "timeout"})
+    assert "attempts_used=2" in str(df.iloc[0]["error_message"])
+
+
+def test_task_retry_non_retryable_no_retry(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    state = {"n": 0}
+
+    def hist(**kwargs):
+        state["n"] += 1
+        raise ValueError("schema_mismatch")
+
+    run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+        selected_api_names=["stock_zh_a_hist"],
+        task_retry_attempts=2,
+    )
+    assert state["n"] == 3
+
+
+def test_task_retry_default_zero_preserves_behavior(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        raise ConnectionError("remote disconnect")
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000001"],
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+        selected_api_names=["stock_zh_a_hist"],
+    )
+    df = pd.read_csv(out["catalog_path"])
+    assert "attempts_used" not in str(df.iloc[0]["error_message"])

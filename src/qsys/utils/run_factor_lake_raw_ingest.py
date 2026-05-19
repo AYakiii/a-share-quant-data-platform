@@ -102,6 +102,10 @@ def _run_without_batching(args: argparse.Namespace) -> dict:
         resume=args.resume,
         ak_module=ak,
         task_timeout_sec=args.task_timeout_sec,
+        task_retry_attempts=args.task_retry_attempts,
+        task_retry_sleep_sec=args.task_retry_sleep_sec,
+        task_retry_backoff=args.task_retry_backoff,
+        task_retry_jitter_sec=args.task_retry_jitter_sec,
     )
 
 
@@ -142,6 +146,10 @@ def _build_child_cmd(args: argparse.Namespace, batch_output_root: Path, batch_sy
     ]
     if args.task_timeout_sec is not None:
         cmd.extend(["--task-timeout-sec", str(args.task_timeout_sec)])
+    cmd.extend(["--task-retry-attempts", str(args.task_retry_attempts)])
+    cmd.extend(["--task-retry-sleep-sec", str(args.task_retry_sleep_sec)])
+    cmd.extend(["--task-retry-backoff", str(args.task_retry_backoff)])
+    cmd.extend(["--task-retry-jitter-sec", str(args.task_retry_jitter_sec)])
     if args.continue_on_error:
         cmd.append("--continue-on-error")
     if args.include_disabled:
@@ -308,6 +316,10 @@ def main() -> None:
     p.add_argument("--keep-batch-outputs", action="store_true")
     p.add_argument("--disable-symbol-batching", action="store_true")
     p.add_argument("--task-timeout-sec", type=float, default=None)
+    p.add_argument("--task-retry-attempts", type=int, default=0)
+    p.add_argument("--task-retry-sleep-sec", type=float, default=0.0)
+    p.add_argument("--task-retry-backoff", type=float, default=1.0)
+    p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
     args = p.parse_args()
 
     should_batch = (not args.disable_symbol_batching) and int(args.symbol_batch_size or 0) > 0

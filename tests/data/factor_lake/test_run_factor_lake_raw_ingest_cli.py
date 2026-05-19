@@ -106,6 +106,10 @@ def test_timeout_reporting_and_stop_on_timeout(tmp_path, monkeypatch):
         keep_batch_outputs=True,
         disable_symbol_batching=False,
         task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
     )
 
     out = cli._run_with_symbol_batching(args)
@@ -151,6 +155,10 @@ def test_batch_timeout_reports_child_task_events_and_no_empty_master_catalog(tmp
         keep_batch_outputs=True,
         disable_symbol_batching=False,
         task_timeout_sec=1.0,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
     )
 
     out = cli._run_with_symbol_batching(args)

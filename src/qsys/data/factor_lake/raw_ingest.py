@@ -887,7 +887,7 @@ def _run_task_in_subprocess_with_timeout(
         }]
     return []
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -968,10 +968,60 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             ef.write(json.dumps(event, ensure_ascii=False) + "\n")
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
 
-    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+    task_attempt_records: list[dict[str, object]] = []
+
+    def _is_retryable_rows(task_rows: list[dict[str, object]]) -> bool:
+        if not task_rows:
+            return False
+        statuses = {str(r.get("status", "")) for r in task_rows}
+        if statuses & {"success", "empty", "already_exists"}:
+            return False
+        et = " ".join(str(r.get("error_type", "")) for r in task_rows)
+        em = " ".join(str(r.get("error_message", "")) for r in task_rows).lower()
+        retry_type_hits = ["timeouterror", "connectionerror", "remotedisconnected", "readtimeout", "jsondecodeerror"]
+        retry_msg_hits = ["response ended prematurely", "network_unstable_retry", "timeout", "remote", "connection", "read timed out", "expecting value"]
+        return any(x in et.lower() for x in retry_type_hits) or any(x in em for x in retry_msg_hits)
+
+    def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+
+    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        max_attempts = max(0, int(task_retry_attempts)) + 1
+        last_rows: list[dict[str, object]] = []
+        for attempt_no in range(1, max_attempts + 1):
+            rows_now = _execute_task_once(family, api_name, params)
+            for r in rows_now:
+                task_attempt_records.append({
+                    "source_family": r.get("source_family", ""),
+                    "api_name": r.get("api_name", ""),
+                    "requested_api_name": r.get("requested_api_name", ""),
+                    "actual_api_name": r.get("actual_api_name", ""),
+                    "original_symbol": r.get("original_symbol", ""),
+                    "akshare_symbol": r.get("akshare_symbol", ""),
+                    "attempt_no": attempt_no,
+                    "status": r.get("status", ""),
+                    "error_type": r.get("error_type", ""),
+                    "error_message": r.get("error_message", ""),
+                    "started_at": r.get("started_at", ""),
+                    "finished_at": r.get("finished_at", ""),
+                    "elapsed_sec": r.get("elapsed_sec", 0),
+                })
+            last_rows = rows_now
+            if not _is_retryable_rows(rows_now):
+                return rows_now
+            if attempt_no >= max_attempts:
+                if int(task_retry_attempts) > 0:
+                    for r in rows_now:
+                        r["error_message"] = f"{r.get('error_message','')}; attempts_used={max_attempts}"
+                return rows_now
+            sleep_sec = float(task_retry_sleep_sec) * (float(task_retry_backoff) ** (attempt_no - 1))
+            if task_retry_jitter_sec > 0:
+                sleep_sec += float(task_retry_jitter_sec)
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+        return last_rows
 
     if max_workers <= 1:
         for family, api_name, params in tasks:
@@ -1509,7 +1559,7 @@ def _run_task_in_subprocess_with_timeout(
         }]
     return []
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -1590,10 +1640,60 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             ef.write(json.dumps(event, ensure_ascii=False) + "\n")
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
 
-    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+    task_attempt_records: list[dict[str, object]] = []
+
+    def _is_retryable_rows(task_rows: list[dict[str, object]]) -> bool:
+        if not task_rows:
+            return False
+        statuses = {str(r.get("status", "")) for r in task_rows}
+        if statuses & {"success", "empty", "already_exists"}:
+            return False
+        et = " ".join(str(r.get("error_type", "")) for r in task_rows)
+        em = " ".join(str(r.get("error_message", "")) for r in task_rows).lower()
+        retry_type_hits = ["timeouterror", "connectionerror", "remotedisconnected", "readtimeout", "jsondecodeerror"]
+        retry_msg_hits = ["response ended prematurely", "network_unstable_retry", "timeout", "remote", "connection", "read timed out", "expecting value"]
+        return any(x in et.lower() for x in retry_type_hits) or any(x in em for x in retry_msg_hits)
+
+    def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+
+    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        max_attempts = max(0, int(task_retry_attempts)) + 1
+        last_rows: list[dict[str, object]] = []
+        for attempt_no in range(1, max_attempts + 1):
+            rows_now = _execute_task_once(family, api_name, params)
+            for r in rows_now:
+                task_attempt_records.append({
+                    "source_family": r.get("source_family", ""),
+                    "api_name": r.get("api_name", ""),
+                    "requested_api_name": r.get("requested_api_name", ""),
+                    "actual_api_name": r.get("actual_api_name", ""),
+                    "original_symbol": r.get("original_symbol", ""),
+                    "akshare_symbol": r.get("akshare_symbol", ""),
+                    "attempt_no": attempt_no,
+                    "status": r.get("status", ""),
+                    "error_type": r.get("error_type", ""),
+                    "error_message": r.get("error_message", ""),
+                    "started_at": r.get("started_at", ""),
+                    "finished_at": r.get("finished_at", ""),
+                    "elapsed_sec": r.get("elapsed_sec", 0),
+                })
+            last_rows = rows_now
+            if not _is_retryable_rows(rows_now):
+                return rows_now
+            if attempt_no >= max_attempts:
+                if int(task_retry_attempts) > 0:
+                    for r in rows_now:
+                        r["error_message"] = f"{r.get('error_message','')}; attempts_used={max_attempts}"
+                return rows_now
+            sleep_sec = float(task_retry_sleep_sec) * (float(task_retry_backoff) ** (attempt_no - 1))
+            if task_retry_jitter_sec > 0:
+                sleep_sec += float(task_retry_jitter_sec)
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+        return last_rows
 
     if max_workers <= 1:
         for family, api_name, params in tasks:
@@ -1631,6 +1731,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         recovery_df["start_date"] = start_date
         recovery_df["end_date"] = end_date
     recovery_df.to_csv(op_dir / "recovery_tasks.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(task_attempt_records).to_csv(op_dir / "task_attempts.csv", index=False, encoding="utf-8-sig")
     s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
     s.to_csv(summary_path, index=False, encoding="utf-8-sig")
     checklist_df, checklist_summary_df = build_acquisition_checklist(df)
