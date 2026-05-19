@@ -5,6 +5,8 @@ import json
 import inspect
 import time
 import uuid
+import multiprocessing as mp
+import signal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -469,25 +471,35 @@ def _filter_daily_frame_by_range(raw: pd.DataFrame, start_date: str, end_date: s
     return df
 
 
+def _detect_daily_date_column(raw: pd.DataFrame) -> str | None:
+    for col in ("date", "日期", "trade_date"):
+        if col in raw.columns:
+            return col
+    return None
+
+
 def _split_daily_by_year_month(raw: pd.DataFrame, start_date: str, end_date: str) -> dict[tuple[str, str], pd.DataFrame]:
     if raw.empty:
         return {}
-    if "date" not in raw.columns:
+    date_col = _detect_daily_date_column(raw)
+    if date_col is None:
         start_year = str(start_date)[:4] if start_date else ""
         start_month = str(start_date)[4:6] if len(str(start_date)) >= 6 else ""
         if start_year.isdigit():
             month = start_month if start_month.isdigit() else "01"
             return {(start_year, month): raw.copy()}
         return {}
-    df = raw.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df[df["date"].notna()]
-    if df.empty:
+    date_series = pd.to_datetime(raw[date_col], errors="coerce")
+    valid_mask = date_series.notna()
+    if not valid_mask.any():
         return {}
+    df = raw.loc[valid_mask].copy()
+    grouped = date_series.loc[valid_mask].groupby([date_series.loc[valid_mask].dt.year, date_series.loc[valid_mask].dt.month])
     out: dict[tuple[str, str], pd.DataFrame] = {}
-    grouped = df.groupby([df["date"].dt.year, df["date"].dt.month])
-    for (year, month), part in grouped:
-        out[(str(int(year)), f"{int(month):02d}")] = part.sort_values("date").reset_index(drop=True)
+    for (year, month), idx in grouped.groups.items():
+        part = df.loc[idx]
+        sort_key = pd.to_datetime(part[date_col], errors="coerce")
+        out[(str(int(year)), f"{int(month):02d}")] = part.iloc[sort_key.argsort(kind="mergesort")].reset_index(drop=True)
     return out
 
 
@@ -507,9 +519,11 @@ def _write_market_price_month_partitions(
 ) -> list[dict[str, object]]:
     month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
     task_rows: list[dict[str, object]] = []
+    date_col = _detect_daily_date_column(raw)
     for (year, month), month_df in month_frames.items():
-        min_date = str(month_df["date"].min().date()) if "date" in month_df.columns else ""
-        max_date = str(month_df["date"].max().date()) if "date" in month_df.columns else ""
+        month_dates = pd.to_datetime(month_df[date_col], errors="coerce") if date_col and date_col in month_df.columns else pd.Series(dtype="datetime64[ns]")
+        min_date = str(month_dates.min().date()) if not month_dates.empty and month_dates.notna().any() else ""
+        max_date = str(month_dates.max().date()) if not month_dates.empty and month_dates.notna().any() else ""
         partition = {"symbol": symbol_value, "adjust": adjust_label, "year": year, "month": month}
         metadata = {
             "api_name": used_api_name,
@@ -740,7 +754,140 @@ def _run_single_coverage_task(
     }]
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe") -> dict:
+
+
+
+
+def _run_task_with_signal_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
+    try:
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+    except TimeoutError as exc:
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", ""))
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": symbol,
+            "akshare_symbol": "",
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": str(exc),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+def _run_task_in_subprocess_with_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+
+    def _worker(q: mp.Queue) -> None:
+        try:
+            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            q.put(("ok", rows))
+        except Exception as exc:  # noqa: BLE001
+            q.put(("err", f"{type(exc).__name__}: {exc}"))
+
+    ctx = mp.get_context("fork")
+    q: mp.Queue = ctx.Queue()
+    proc = ctx.Process(target=_worker, args=(q,))
+    proc.start()
+    proc.join(task_timeout_sec)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", "")).strip().lower()
+        if symbol.startswith(("sz", "sh", "bj")):
+            symbol = symbol[2:]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": f"task timeout after {task_timeout_sec} sec",
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    if not q.empty():
+        status, payload = q.get()
+        if status == "ok":
+            return payload
+        finished_at = datetime.now(UTC)
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": str(params.get("symbol", "")),
+            "akshare_symbol": "",
+            "status": "failed",
+            "rows": 0,
+            "error_type": "SubprocessTaskError",
+            "error_message": str(payload),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    return []
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -773,6 +920,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
     run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
+    op_dir = Path(output_root) / "_operation_review"
+    op_dir.mkdir(parents=True, exist_ok=True)
+    task_events_path = op_dir / "task_events.jsonl"
+    if task_events_path.exists():
+        task_events_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
     for family in families:
@@ -786,24 +938,781 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     continue
                 tasks.append((family, api_name, params))
 
+    def _summarize_task(task_rows: list[dict[str, object]]) -> dict[str, object]:
+        if not task_rows:
+            return {"status": "failed", "error_type": "NoResult", "error_message": "empty task rows", "elapsed_sec": 0.0}
+        status_order = {"failed": 4, "timeout": 3, "empty": 2, "pending_adapter": 1, "success": 0}
+        best = sorted(task_rows, key=lambda r: status_order.get(str(r.get("status", "")), 5), reverse=True)[0]
+        return {
+            "run_id": run_id,
+            "source_family": best.get("source_family", ""),
+            "api_name": best.get("api_name", ""),
+            "requested_api_name": best.get("requested_api_name", ""),
+            "fallback_from": best.get("fallback_from", ""),
+            "original_symbol": best.get("original_symbol", ""),
+            "akshare_symbol": best.get("akshare_symbol", ""),
+            "status": best.get("status", ""),
+            "error_type": best.get("error_type", ""),
+            "error_message": best.get("error_message", ""),
+            "started_at": best.get("started_at", ""),
+            "finished_at": best.get("finished_at", ""),
+            "elapsed_sec": max(float(r.get("elapsed_sec", 0.0) or 0.0) for r in task_rows),
+        }
+
+    def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
+        for row in task_rows:
+            row["run_id"] = run_id
+            rows.append(row)
+        event = _summarize_task(task_rows)
+        with open(task_events_path, "a", encoding="utf-8") as ef:
+            ef.write(json.dumps(event, ensure_ascii=False) + "\n")
+        print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
+
+    task_attempt_records: list[dict[str, object]] = []
+
+    def _is_retryable_rows(task_rows: list[dict[str, object]]) -> bool:
+        if not task_rows:
+            return False
+        statuses = {str(r.get("status", "")) for r in task_rows}
+        if statuses & {"success", "empty", "already_exists"}:
+            return False
+        et = " ".join(str(r.get("error_type", "")) for r in task_rows)
+        em = " ".join(str(r.get("error_message", "")) for r in task_rows).lower()
+        retry_type_hits = ["timeouterror", "connectionerror", "remotedisconnected", "readtimeout", "jsondecodeerror"]
+        retry_msg_hits = ["response ended prematurely", "network_unstable_retry", "timeout", "remote", "connection", "read timed out", "expecting value"]
+        return any(x in et.lower() for x in retry_type_hits) or any(x in em for x in retry_msg_hits)
+
+    def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        if task_timeout_sec and task_timeout_sec > 0:
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+
+    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        max_attempts = max(0, int(task_retry_attempts)) + 1
+        last_rows: list[dict[str, object]] = []
+        for attempt_no in range(1, max_attempts + 1):
+            rows_now = _execute_task_once(family, api_name, params)
+            for r in rows_now:
+                task_attempt_records.append({
+                    "source_family": r.get("source_family", ""),
+                    "api_name": r.get("api_name", ""),
+                    "requested_api_name": r.get("requested_api_name", ""),
+                    "actual_api_name": r.get("actual_api_name", ""),
+                    "original_symbol": r.get("original_symbol", ""),
+                    "akshare_symbol": r.get("akshare_symbol", ""),
+                    "attempt_no": attempt_no,
+                    "status": r.get("status", ""),
+                    "error_type": r.get("error_type", ""),
+                    "error_message": r.get("error_message", ""),
+                    "started_at": r.get("started_at", ""),
+                    "finished_at": r.get("finished_at", ""),
+                    "elapsed_sec": r.get("elapsed_sec", 0),
+                })
+            last_rows = rows_now
+            if not _is_retryable_rows(rows_now):
+                return rows_now
+            if attempt_no >= max_attempts:
+                if int(task_retry_attempts) > 0:
+                    for r in rows_now:
+                        r["error_message"] = f"{r.get('error_message','')}; attempts_used={max_attempts}"
+                return rows_now
+            sleep_sec = float(task_retry_sleep_sec) * (float(task_retry_backoff) ** (attempt_no - 1))
+            if task_retry_jitter_sec > 0:
+                sleep_sec += float(task_retry_jitter_sec)
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+        return last_rows
+
     if max_workers <= 1:
         for family, api_name, params in tasks:
-            task_rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-            for row in task_rows:
-                row["run_id"] = run_id
-                rows.append(row)
-            if any(row["status"] == "failed" for row in task_rows) and not continue_on_error:
+            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+            task_rows = _execute_task(family, api_name, params)
+            _record_task_rows(task_rows)
+            if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
                 break
             if request_sleep > 0:
                 time.sleep(request_sleep)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = [ex.submit(_run_single_coverage_task, output_root, family, api_name, params, adapters, ak_module, include_disabled) for family, api_name, params in tasks]
+            futures = []
+            for family, api_name, params in tasks:
+                print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+                futures.append(ex.submit(_execute_task, family, api_name, params))
             for fut in futures:
                 task_rows = fut.result()
-                for row in task_rows:
-                    row["run_id"] = run_id
-                    rows.append(row)
+                _record_task_rows(task_rows)
+                if request_sleep > 0:
+                    time.sleep(request_sleep)
+    out = Path(output_root) / "raw" / family / api_name
+    out.mkdir(parents=True, exist_ok=True)
+    data_path = out / "fallback.csv"
+    metadata_path = out / "fallback.meta.csv"
+    raw.to_csv(data_path, index=False, encoding="utf-8-sig")
+    with metadata_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["source_family", "api_name", "row_count", "write_mode", "file_format"])
+        w.writerow([family, api_name, len(raw), "csv_fallback", "csv"])
+    return str(data_path), str(metadata_path)
+
+
+def _normalize_error_message(api_name: str, err: str) -> str:
+    low = err.lower()
+    unstable_apis = {
+        "stock_zh_a_hist",
+        "stock_margin_detail_szse",
+        "stock_gpzy_pledge_ratio_detail_em",
+        "stock_zh_a_gdhs",
+        "stock_board_industry_index_ths",
+        "stock_restricted_release_summary_em",
+    }
+    if api_name in unstable_apis and any(k in low for k in ["timeout", "remote", "connection", "read timed out", "max retries"]):
+        return f"network_unstable_retry: {err}"
+    if api_name == "stock_restricted_release_summary_em" and "response ended prematurely" in low:
+        return f"network_unstable_retry: {err}"
+    if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
+        k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
+    ):
+        return f"defensive_shape_guard: {err}"
+    return err
+
+
+def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
+    low = err.lower()
+    if api_name in {"stock_yjyg_em", "stock_yysj_em"} and any(k in low for k in ["none", "not subscriptable", "expecting value"]):
+        return True
+    if api_name == "stock_individual_info_em" and "expecting value" in low:
+        return True
+    if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
+        return True
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and ("are in the [columns]" in low or "keyerror" in low):
+        return True
+    if api_name == "sw_index_third_info" and any(k in low for k in ["parser_empty_response", "find_all", "nonetype"]):
+        return True
+    if api_name in {"stock_board_industry_index_ths", "stock_restricted_release_summary_em"} and "network_unstable_retry" in low:
+        return True
+    return False
+
+
+def _call_api_with_retry(
+    fn: AdapterFn,
+    filtered: dict[str, str],
+    retries: int = 3,
+    retry_wait: float = 1.0,
+) -> object:
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fn(**filtered)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(retry_wait * attempt)
+    if last_exc is None:
+        raise RuntimeError("unknown_api_error")
+    raise last_exc
+
+
+def _to_akshare_daily_symbol(symbol: str | int) -> str:
+    raw = str(symbol).strip().lower()
+    if raw.startswith(("sz", "sh", "bj")):
+        return raw
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    digits = digits.zfill(6)
+    if digits.startswith(("000", "001", "002", "003", "300")):
+        return f"sz{digits}"
+    if digits.startswith(("600", "601", "603", "605", "688")):
+        return f"sh{digits}"
+    if digits.startswith(("430", "830", "831", "832", "833", "834", "835", "836", "837", "838", "839", "870", "871", "872", "873", "874", "875", "876", "877", "920", "921", "922", "923", "924", "925", "926", "927", "928", "929")):
+        return f"bj{digits}"
+    return f"sz{digits}"
+
+
+def _filter_daily_frame_by_range(raw: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+    if raw.empty or "date" not in raw.columns:
+        return raw
+    df = raw.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    start_dt = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+    end_dt = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+    if pd.notna(start_dt):
+        df = df[df["date"] >= start_dt]
+    if pd.notna(end_dt):
+        df = df[df["date"] <= end_dt]
+    return df
+
+
+def _detect_daily_date_column(raw: pd.DataFrame) -> str | None:
+    for col in ("date", "日期", "trade_date"):
+        if col in raw.columns:
+            return col
+    return None
+
+
+def _split_daily_by_year_month(raw: pd.DataFrame, start_date: str, end_date: str) -> dict[tuple[str, str], pd.DataFrame]:
+    if raw.empty:
+        return {}
+    date_col = _detect_daily_date_column(raw)
+    if date_col is None:
+        start_year = str(start_date)[:4] if start_date else ""
+        start_month = str(start_date)[4:6] if len(str(start_date)) >= 6 else ""
+        if start_year.isdigit():
+            month = start_month if start_month.isdigit() else "01"
+            return {(start_year, month): raw.copy()}
+        return {}
+    date_series = pd.to_datetime(raw[date_col], errors="coerce")
+    valid_mask = date_series.notna()
+    if not valid_mask.any():
+        return {}
+    df = raw.loc[valid_mask].copy()
+    grouped = date_series.loc[valid_mask].groupby([date_series.loc[valid_mask].dt.year, date_series.loc[valid_mask].dt.month])
+    out: dict[tuple[str, str], pd.DataFrame] = {}
+    for (year, month), idx in grouped.groups.items():
+        part = df.loc[idx]
+        sort_key = pd.to_datetime(part[date_col], errors="coerce")
+        out[(str(int(year)), f"{int(month):02d}")] = part.iloc[sort_key.argsort(kind="mergesort")].reset_index(drop=True)
+    return out
+
+
+def _write_market_price_month_partitions(
+    output_root: str,
+    family: str,
+    used_api_name: str,
+    requested_api_name: str,
+    fallback_from: str,
+    original_symbol: str,
+    akshare_symbol: str,
+    params: dict[str, str],
+    raw: pd.DataFrame,
+    symbol_value: str,
+    adjust_label: str,
+    started_at: datetime,
+) -> list[dict[str, object]]:
+    month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
+    task_rows: list[dict[str, object]] = []
+    date_col = _detect_daily_date_column(raw)
+    for (year, month), month_df in month_frames.items():
+        month_dates = pd.to_datetime(month_df[date_col], errors="coerce") if date_col and date_col in month_df.columns else pd.Series(dtype="datetime64[ns]")
+        min_date = str(month_dates.min().date()) if not month_dates.empty and month_dates.notna().any() else ""
+        max_date = str(month_dates.max().date()) if not month_dates.empty and month_dates.notna().any() else ""
+        partition = {"symbol": symbol_value, "adjust": adjust_label, "year": year, "month": month}
+        metadata = {
+            "api_name": used_api_name,
+            "source_family": family,
+            "dataset_name": "raw_source_api",
+            "requested_api_name": requested_api_name,
+            "actual_api_name": used_api_name,
+            "fallback_from": fallback_from,
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "start_date": str(params.get("start_date", "")),
+            "end_date": str(params.get("end_date", "")),
+            "year": year,
+            "month": month,
+            "min_date": min_date,
+            "max_date": max_date,
+            "rows": int(len(month_df)),
+            "created_at": datetime.now(UTC).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        try:
+            dp, mp = write_raw_partition(output_root, family, used_api_name, partition, month_df, metadata)
+            part_status = "success"
+            part_err_type = ""
+            part_err_msg = ""
+        except FileExistsError as exists_exc:
+            dp = Path(output_root) / "data" / "raw" / "akshare" / family / used_api_name / f"symbol={symbol_value}" / f"adjust={adjust_label}" / f"year={year}" / f"month={month}" / "data.parquet"
+            mp = dp.with_name("metadata.json")
+            part_status = "already_exists"
+            part_err_type = "FileExistsError"
+            part_err_msg = str(exists_exc)
+        task_rows.append(
+            {
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "source_family": family,
+                "api_name": used_api_name,
+                "requested_api_name": requested_api_name,
+                "actual_api_name": used_api_name,
+                "fallback_from": fallback_from,
+                "original_symbol": original_symbol,
+                "akshare_symbol": akshare_symbol,
+                "year": year,
+                "month": month,
+                "min_date": min_date,
+                "max_date": max_date,
+                "status": part_status,
+                "rows": int(len(month_df)),
+                "error_type": part_err_type,
+                "error_message": part_err_msg,
+                "output_path": str(dp),
+                "metadata_path": str(mp),
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(UTC).isoformat(),
+                "elapsed_sec": max((datetime.now(UTC) - started_at).total_seconds(), 0.0),
+            }
+        )
+    return task_rows
+
+
+def _run_single_coverage_task(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+    status = "pending_adapter"
+    err = ""
+    err_type = ""
+    n_rows = 0
+    out_path = meta_path = ""
+
+    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+        disabled_reason = str(
+            DISABLED_API_METADATA.get((family, api_name), {}).get(
+                "disabled_reason", "temporarily disabled for acquisition control"
+            )
+        )
+        finished_at = datetime.now(UTC)
+        return [{
+            "source_family": family,
+            "api_name": api_name,
+            "status": "skipped",
+            "rows": 0,
+            "error_message": f"disabled_reason: {disabled_reason}",
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+
+    used_api_name = api_name
+    fallback_from = ""
+    requested_api_name = api_name
+    original_symbol = ""
+    if "symbol" in params:
+        symbol_text = str(params.get("symbol", "")).strip().lower()
+        if symbol_text.startswith(("sz", "sh", "bj")):
+            symbol_text = symbol_text[2:]
+        digits = "".join(ch for ch in symbol_text if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+    akshare_symbol = ""
+    primary_error = ""
+    fallback_error = ""
+    try:
+        fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+        if fn is None:
+            status = "pending_adapter"
+        else:
+            filtered = params
+            try:
+                sig = inspect.signature(fn)
+                accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                if not accepts_kwargs:
+                    allowed = set(sig.parameters.keys())
+                    filtered = {k: v for k, v in params.items() if k in allowed}
+            except (TypeError, ValueError):
+                filtered = params
+            if api_name == "stock_zh_a_hist":
+                daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
+                try:
+                    ret = _call_api_with_retry(fn, filtered)
+                except Exception as primary_exc:
+                    primary_error = f"{type(primary_exc).__name__}: {primary_exc}"
+                    if daily_fn is None:
+                        raise
+                    fallback_from = "stock_zh_a_hist"
+                    used_api_name = "stock_zh_a_daily"
+                    akshare_symbol = _to_akshare_daily_symbol(original_symbol)
+                    daily_params = {"symbol": akshare_symbol, "adjust": ""}
+                    try:
+                        ret = _call_api_with_retry(daily_fn, daily_params)
+                    except Exception as daily_exc:
+                        fallback_error = f"{type(daily_exc).__name__}: {daily_exc}"
+                        raise
+            else:
+                ret = fn(**filtered)
+            if ret is None:
+                raise ValueError("none_result_from_api")
+            raw = ret.raw if hasattr(ret, "raw") else ret
+            if not isinstance(raw, pd.DataFrame):
+                raw = pd.DataFrame(raw)
+            if used_api_name == "stock_zh_a_daily":
+                raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
+            n_rows = len(raw)
+            status = "empty" if raw.empty else "success"
+            partition = dict(filtered) if filtered else {"api_name": api_name}
+            if used_api_name == "stock_zh_a_daily":
+                partition = {"symbol": akshare_symbol, "adjust": ""}
+            try:
+                if used_api_name in {"stock_zh_a_daily", "stock_zh_a_hist"} and family == "market_price":
+                    symbol_value = akshare_symbol if used_api_name == "stock_zh_a_daily" else str(filtered.get("symbol", ""))
+                    adjust_label = "none" if used_api_name == "stock_zh_a_daily" else str(filtered.get("adjust", "none") or "none")
+                    task_rows = _write_market_price_month_partitions(
+                        output_root, family, used_api_name, requested_api_name, fallback_from, original_symbol, akshare_symbol,
+                        params, raw, symbol_value, adjust_label, started_at
+                    )
+                    if not task_rows:
+                        status = "empty"
+                    else:
+                        return task_rows
+                else:
+                    dp, mp = write_raw_partition(
+                        output_root, family, used_api_name, partition, raw,
+                        {
+                            "source_family": family,
+                            "api_name": used_api_name,
+                            "requested_api_name": requested_api_name,
+                            "actual_api_name": used_api_name,
+                            "fallback_from": fallback_from,
+                            "original_symbol": original_symbol,
+                            "akshare_symbol": akshare_symbol,
+                            "params": filtered,
+                            "status": status,
+                            "row_count": n_rows,
+                        }
+                    )
+                    out_path, meta_path = str(dp), str(mp)
+            except Exception as write_exc:  # noqa: BLE001
+                if api_name == "stock_individual_info_em":
+                    out_path, meta_path = _fallback_csv_write(output_root, family, api_name, raw)
+                    err = f"csv_fallback_after_write_error: {write_exc}"
+                elif isinstance(write_exc, FileExistsError):
+                    status = "already_exists"
+                    err_type = "FileExistsError"
+                    err = str(write_exc)
+                else:
+                    raise
+    except Exception as exc:  # noqa: BLE001
+        err = _normalize_error_message(api_name, str(exc))
+        if primary_error or fallback_error:
+            err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
+        err_type = type(exc).__name__
+        if _should_downgrade_to_empty(api_name, err):
+            status = "empty"
+            n_rows = 0
+            err_type = "downgraded_to_empty"
+        else:
+            status = "failed"
+
+    finished_at = datetime.now(UTC)
+    return [{
+        "dataset_name": "raw_source_api",
+        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "source_family": family,
+        "api_name": used_api_name,
+        "requested_api_name": requested_api_name,
+        "actual_api_name": used_api_name,
+        "fallback_from": fallback_from,
+        "original_symbol": original_symbol,
+        "akshare_symbol": akshare_symbol,
+        "status": status,
+        "rows": n_rows,
+        "error_type": err_type,
+        "error_message": err,
+        "output_path": out_path,
+        "metadata_path": meta_path,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+    }]
+
+
+
+
+
+
+def _run_task_with_signal_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+    def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
+        raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
+
+    old = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
+    try:
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+    except TimeoutError as exc:
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", ""))
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": symbol,
+            "akshare_symbol": "",
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": str(exc),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+def _run_task_in_subprocess_with_timeout(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    adapters: dict[str, AdapterFn],
+    ak_module: object | None,
+    include_disabled: bool,
+    task_timeout_sec: float,
+) -> list[dict[str, object]]:
+    started_at = datetime.now(UTC)
+
+    def _worker(q: mp.Queue) -> None:
+        try:
+            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            q.put(("ok", rows))
+        except Exception as exc:  # noqa: BLE001
+            q.put(("err", f"{type(exc).__name__}: {exc}"))
+
+    ctx = mp.get_context("fork")
+    q: mp.Queue = ctx.Queue()
+    proc = ctx.Process(target=_worker, args=(q,))
+    proc.start()
+    proc.join(task_timeout_sec)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        finished_at = datetime.now(UTC)
+        symbol = str(params.get("symbol", "")).strip().lower()
+        if symbol.startswith(("sz", "sh", "bj")):
+            symbol = symbol[2:]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "status": "timeout",
+            "rows": 0,
+            "error_type": "TimeoutError",
+            "error_message": f"task timeout after {task_timeout_sec} sec",
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    if not q.empty():
+        status, payload = q.get()
+        if status == "ok":
+            return payload
+        finished_at = datetime.now(UTC)
+        return [{
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": str(params.get("symbol", "")),
+            "akshare_symbol": "",
+            "status": "failed",
+            "rows": 0,
+            "error_type": "SubprocessTaskError",
+            "error_message": str(payload),
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }]
+    return []
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0) -> dict:
+    selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
+    selected_specs: list[dict[str, str]] = []
+    for family in families:
+        for spec in COVERAGE_API_SPECS.get(family, []):
+            api_name = spec["api_name"]
+            if selected and api_name not in selected:
+                continue
+            selected_specs.append(spec)
+
+    required_modes = {spec["param_mode"] for spec in selected_specs}
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
+    need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
+    need_trade_dates = "trade_date" in required_modes
+    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
+    need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
+    need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
+
+    symbols = load_stock_symbols(symbols, universe_root=universe_root) if need_symbols else (symbols or [])
+    index_symbols = load_index_symbols(index_symbols, universe_root=universe_root) if need_index_symbols else (index_symbols or [])
+    trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
+    report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
+    industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
+    concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
+
+    resume_keys: set[tuple[str, str, str]] = set()
+    catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
+    if resume and catalog_path.exists():
+        existing = pd.read_csv(catalog_path)
+        for _, row in existing.iterrows():
+            resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
+    run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
+    adapters = adapter_map or {}
+    op_dir = Path(output_root) / "_operation_review"
+    op_dir.mkdir(parents=True, exist_ok=True)
+    task_events_path = op_dir / "task_events.jsonl"
+    if task_events_path.exists():
+        task_events_path.unlink()
+    rows: list[dict] = []
+    tasks: list[tuple[str, str, dict[str, str]]] = []
+    for family in families:
+        for spec in COVERAGE_API_SPECS.get(family, []):
+            api_name = spec["api_name"]
+            if selected and api_name not in selected:
+                continue
+            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            for params in params_list:
+                if resume and (family, api_name, "success") in resume_keys:
+                    continue
+                tasks.append((family, api_name, params))
+
+    def _summarize_task(task_rows: list[dict[str, object]]) -> dict[str, object]:
+        if not task_rows:
+            return {"status": "failed", "error_type": "NoResult", "error_message": "empty task rows", "elapsed_sec": 0.0}
+        status_order = {"failed": 4, "timeout": 3, "empty": 2, "pending_adapter": 1, "success": 0}
+        best = sorted(task_rows, key=lambda r: status_order.get(str(r.get("status", "")), 5), reverse=True)[0]
+        return {
+            "run_id": run_id,
+            "source_family": best.get("source_family", ""),
+            "api_name": best.get("api_name", ""),
+            "requested_api_name": best.get("requested_api_name", ""),
+            "fallback_from": best.get("fallback_from", ""),
+            "original_symbol": best.get("original_symbol", ""),
+            "akshare_symbol": best.get("akshare_symbol", ""),
+            "status": best.get("status", ""),
+            "error_type": best.get("error_type", ""),
+            "error_message": best.get("error_message", ""),
+            "started_at": best.get("started_at", ""),
+            "finished_at": best.get("finished_at", ""),
+            "elapsed_sec": max(float(r.get("elapsed_sec", 0.0) or 0.0) for r in task_rows),
+        }
+
+    def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
+        for row in task_rows:
+            row["run_id"] = run_id
+            rows.append(row)
+        event = _summarize_task(task_rows)
+        with open(task_events_path, "a", encoding="utf-8") as ef:
+            ef.write(json.dumps(event, ensure_ascii=False) + "\n")
+        print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
+
+    task_attempt_records: list[dict[str, object]] = []
+
+    def _is_retryable_rows(task_rows: list[dict[str, object]]) -> bool:
+        if not task_rows:
+            return False
+        statuses = {str(r.get("status", "")) for r in task_rows}
+        if statuses & {"success", "empty", "already_exists"}:
+            return False
+        et = " ".join(str(r.get("error_type", "")) for r in task_rows)
+        em = " ".join(str(r.get("error_message", "")) for r in task_rows).lower()
+        retry_type_hits = ["timeouterror", "connectionerror", "remotedisconnected", "readtimeout", "jsondecodeerror"]
+        retry_msg_hits = ["response ended prematurely", "network_unstable_retry", "timeout", "remote", "connection", "read timed out", "expecting value"]
+        return any(x in et.lower() for x in retry_type_hits) or any(x in em for x in retry_msg_hits)
+
+    def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        if task_timeout_sec and task_timeout_sec > 0:
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+
+    def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
+        max_attempts = max(0, int(task_retry_attempts)) + 1
+        last_rows: list[dict[str, object]] = []
+        for attempt_no in range(1, max_attempts + 1):
+            rows_now = _execute_task_once(family, api_name, params)
+            for r in rows_now:
+                task_attempt_records.append({
+                    "source_family": r.get("source_family", ""),
+                    "api_name": r.get("api_name", ""),
+                    "requested_api_name": r.get("requested_api_name", ""),
+                    "actual_api_name": r.get("actual_api_name", ""),
+                    "original_symbol": r.get("original_symbol", ""),
+                    "akshare_symbol": r.get("akshare_symbol", ""),
+                    "attempt_no": attempt_no,
+                    "status": r.get("status", ""),
+                    "error_type": r.get("error_type", ""),
+                    "error_message": r.get("error_message", ""),
+                    "started_at": r.get("started_at", ""),
+                    "finished_at": r.get("finished_at", ""),
+                    "elapsed_sec": r.get("elapsed_sec", 0),
+                })
+            last_rows = rows_now
+            if not _is_retryable_rows(rows_now):
+                return rows_now
+            if attempt_no >= max_attempts:
+                if int(task_retry_attempts) > 0:
+                    for r in rows_now:
+                        r["error_message"] = f"{r.get('error_message','')}; attempts_used={max_attempts}"
+                return rows_now
+            sleep_sec = float(task_retry_sleep_sec) * (float(task_retry_backoff) ** (attempt_no - 1))
+            if task_retry_jitter_sec > 0:
+                sleep_sec += float(task_retry_jitter_sec)
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+        return last_rows
+
+    if max_workers <= 1:
+        for family, api_name, params in tasks:
+            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+            task_rows = _execute_task(family, api_name, params)
+            _record_task_rows(task_rows)
+            if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
+                break
+            if request_sleep > 0:
+                time.sleep(request_sleep)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = []
+            for family, api_name, params in tasks:
+                print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+                futures.append(ex.submit(_execute_task, family, api_name, params))
+            for fut in futures:
+                task_rows = fut.result()
+                _record_task_rows(task_rows)
                 if request_sleep > 0:
                     time.sleep(request_sleep)
 
@@ -813,6 +1722,16 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     summary_path = out / "raw_ingest_summary.csv"
     df = pd.DataFrame(rows)
     df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
+    timeout_df = df[df["status"] == "timeout"].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
+    timeout_df.to_csv(op_dir / "timeout_tasks.csv", index=False, encoding="utf-8-sig")
+    recovery_df = df[df["status"].isin(["failed", "timeout"])].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
+    if not recovery_df.empty:
+        keep_cols = [c for c in ["source_family", "api_name", "requested_api_name", "original_symbol", "akshare_symbol", "status", "error_type", "error_message"] if c in recovery_df.columns]
+        recovery_df = recovery_df[keep_cols]
+        recovery_df["start_date"] = start_date
+        recovery_df["end_date"] = end_date
+    recovery_df.to_csv(op_dir / "recovery_tasks.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(task_attempt_records).to_csv(op_dir / "task_attempts.csv", index=False, encoding="utf-8-sig")
     s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
     s.to_csv(summary_path, index=False, encoding="utf-8-sig")
     checklist_df, checklist_summary_df = build_acquisition_checklist(df)
