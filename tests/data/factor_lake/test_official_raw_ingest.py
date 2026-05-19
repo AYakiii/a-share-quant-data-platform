@@ -535,3 +535,34 @@ def test_primary_timeout_no_fallback_attempt(tmp_path):
     df = pd.read_csv(out["catalog_path"])
     assert set(df["status"]) == {"timeout"}
     assert called["daily"] is False
+
+
+def test_task_timeout_preserves_parallel_workers(tmp_path):
+    import time
+
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+    symbols = [f"{i:06d}" for i in range(10)]
+
+    def hist(**kwargs):
+        time.sleep(1.0)
+        return _Result(pd.DataFrame({"date": ["2022-01-04"], "x": [1]}))
+
+    t0 = time.perf_counter()
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=symbols,
+        start_date="20220101",
+        end_date="20220131",
+        universe_root=uroot,
+        include_disabled=True,
+        ak_module=type("AK", (), {"stock_zh_a_hist": staticmethod(hist)})(),
+        task_timeout_sec=10.0,
+        max_workers=5,
+        selected_api_names=["stock_zh_a_hist"],
+    )
+    elapsed = time.perf_counter() - t0
+    df = pd.read_csv(out["catalog_path"])
+    assert len(df) == 10
+    assert elapsed < 8.0

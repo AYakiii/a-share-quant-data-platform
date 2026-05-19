@@ -229,6 +229,7 @@ def _run_with_symbol_batching(args: argparse.Namespace) -> dict:
                 if raw_dir.exists():
                     shutil.rmtree(raw_dir)
 
+        child_task_events = batch_output_root / "_operation_review" / "task_events.jsonl"
         report_rows.append({
             "batch_label": label,
             "start_index": start,
@@ -242,6 +243,8 @@ def _run_with_symbol_batching(args: argparse.Namespace) -> dict:
             "merged_files": merged_files,
             "conflict_files": conflict_files,
             "log_path": str(log_path),
+            "child_task_events_path": str(child_task_events),
+            "child_task_events_exists": bool(child_task_events.exists()),
         })
 
         if timed_out and args.stop_on_batch_timeout:
@@ -253,12 +256,14 @@ def _run_with_symbol_batching(args: argparse.Namespace) -> dict:
     report_df = pd.DataFrame(report_rows)
     report_df.to_csv(op_review / "batch_run_report.csv", index=False)
 
+    final_catalog_path = output_root / "raw_ingest_catalog.csv"
     if merged_catalog_rows:
         final_catalog = pd.concat(merged_catalog_rows, ignore_index=True)
+        final_catalog.to_csv(final_catalog_path, index=False)
     else:
         final_catalog = pd.DataFrame()
-    final_catalog_path = output_root / "raw_ingest_catalog.csv"
-    final_catalog.to_csv(final_catalog_path, index=False)
+        if final_catalog_path.exists():
+            final_catalog_path.unlink()
 
     if not final_catalog.empty and "status" in final_catalog.columns:
         final_summary = final_catalog.groupby(["source_family", "api_name", "status"], dropna=False).size().reset_index(name="count")
@@ -269,7 +274,7 @@ def _run_with_symbol_batching(args: argparse.Namespace) -> dict:
 
     return {
         "output_root": str(output_root),
-        "catalog_path": str(final_catalog_path),
+        "catalog_path": str(final_catalog_path) if final_catalog_path.exists() else "",
         "summary_path": str(final_summary_path),
         "rows": int(len(final_catalog)),
         "batch_report_path": str(op_review / "batch_run_report.csv"),

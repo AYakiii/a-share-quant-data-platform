@@ -115,3 +115,45 @@ def test_timeout_reporting_and_stop_on_timeout(tmp_path, monkeypatch):
     assert int(report.iloc[0]["return_code"]) == -999
     assert bool(report.iloc[0]["merged_to_master"]) is False
     assert call_count["n"] == 1
+
+
+def test_batch_timeout_reports_child_task_events_and_no_empty_master_catalog(tmp_path, monkeypatch):
+    class _Proc:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+
+    def fake_run(*args, **kwargs):
+        raise cli.subprocess.TimeoutExpired(cmd="cmd", timeout=0.01)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    args = argparse.Namespace(
+        output_root=str(tmp_path / "out"),
+        families="market_price",
+        start_date="20220101",
+        end_date="20220131",
+        max_workers=2,
+        request_sleep=0.0,
+        continue_on_error=False,
+        include_disabled=False,
+        resume=False,
+        symbols=",".join([f"{i:06d}" for i in range(10)]),
+        index_symbols="",
+        trade_dates="",
+        report_dates="",
+        industry_names="",
+        concept_names="",
+        api_names="stock_zh_a_hist",
+        universe_root="config/factor_sources/acquisition_universe",
+        symbol_batch_size=5,
+        batch_timeout_sec=0.01,
+        stop_on_batch_timeout=True,
+        keep_batch_outputs=True,
+        disable_symbol_batching=False,
+        task_timeout_sec=1.0,
+    )
+
+    out = cli._run_with_symbol_batching(args)
+    report = pd.read_csv(out["batch_report_path"])
+    assert "child_task_events_path" in report.columns
+    assert (tmp_path / "out" / "raw_ingest_catalog.csv").exists() is False
