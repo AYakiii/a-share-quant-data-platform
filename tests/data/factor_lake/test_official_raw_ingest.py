@@ -371,3 +371,62 @@ def test_market_price_existing_partition_not_overwritten(tmp_path):
     )
     df = pd.read_csv(out["catalog_path"])
     assert "already_exists" in set(df["status"])
+
+
+def test_market_price_hist_primary_chinese_date_column_partition_contract(tmp_path):
+    uroot = tmp_path / "u"
+    _write_universe(uroot, stock=True, calendar=True)
+
+    def hist(**kwargs):
+        return _Result(
+            pd.DataFrame(
+                {
+                    "日期": ["2022-01-04", "2022-02-07", "2023-01-03", "2023-01-30"],
+                    "开盘": [10.1, 10.2, 10.3, 10.4],
+                    "收盘": [10.5, 10.6, 10.7, 10.8],
+                }
+            )
+        )
+
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path / "out"),
+        families=["market_price"],
+        symbols=["000009"],
+        start_date="20220101",
+        end_date="20231231",
+        universe_root=uroot,
+        include_disabled=True,
+        adapter_map={"stock_zh_a_hist": hist},
+    )
+
+    catalog = pd.read_csv(out["catalog_path"])
+    hist_df = catalog[catalog["api_name"] == "stock_zh_a_hist"].copy()
+    assert len(hist_df) == 3
+    assert not hist_df["output_path"].str.contains("start_date=").any()
+    assert not hist_df["output_path"].str.contains("end_date=").any()
+
+    expected = {(2022, 1): 1, (2022, 2): 1, (2023, 1): 2}
+    actual_keys = {(int(y), int(m)) for y, m in zip(hist_df["year"], hist_df["month"])}
+    assert actual_keys == set(expected.keys())
+
+    for _, row in hist_df.iterrows():
+        year = int(row["year"])
+        month = int(row["month"])
+        part_df = pd.read_parquet(row["output_path"])
+        part_dates = pd.to_datetime(part_df["日期"], errors="coerce")
+        assert part_dates.notna().all()
+        assert set(part_dates.dt.year.unique().tolist()) == {year}
+        assert set(part_dates.dt.month.unique().tolist()) == {month}
+
+        assert int(row["rows"]) == expected[(year, month)]
+        assert int(row["rows"]) == len(part_df)
+        assert str(row["min_date"]) == str(part_dates.min().date())
+        assert str(row["max_date"]) == str(part_dates.max().date())
+
+        with open(row["metadata_path"], encoding="utf-8") as f:
+            meta = json.load(f)
+        assert int(meta["year"]) == year
+        assert int(meta["month"]) == month
+        assert int(meta["rows"]) == len(part_df)
+        assert meta["min_date"] == str(part_dates.min().date())
+        assert meta["max_date"] == str(part_dates.max().date())
