@@ -130,6 +130,7 @@ def test_skipped_and_include_disabled_behavior(tmp_path, monkeypatch):
     )
     inv_force = pd.read_csv(out_force["run_dir"] / "cache_inventory.csv")
     assert inv_force.iloc[0]["status"] == "fetched"
+<<<<<<< codex/upgrade-rawwarehouse-core-for-multi-source-support-r4wdhm
 
 
 def test_stock_inventory_symbol_preserves_leading_zero_after_read_csv(tmp_path, monkeypatch):
@@ -153,10 +154,36 @@ def test_merge_symbols_file_and_cli_deduplicate_and_keep_order(tmp_path):
     assert out == ["000333", "000002", "000001"]
 
 
+=======
+
+
+def test_stock_inventory_symbol_preserves_leading_zero_after_read_csv(tmp_path, monkeypatch):
+    def _plan(**kwargs):
+        return [FetchPartition(values={"symbol": "000001", "start_date": "2026-01-01", "end_date": "2026-01-10"})]
+
+    def _path(raw_root, p):
+        return raw_root / "stock_zh_a_daily" / "v1" / f"symbol={p.values['symbol']}" / f"start_date={p.values['start_date']}_end_date={p.values['end_date']}" / "data.parquet"
+
+    spec = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", _plan, _fetch_ok, _path, {})
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 2, "n_columns": 1, "elapsed_seconds": 0.01})
+    out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "stock_zero", retries=0).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
+    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
+    assert inv.loc[0, "symbol"] == "'000001"
+
+
+def test_merge_symbols_file_and_cli_deduplicate_and_keep_order(tmp_path):
+    fp = tmp_path / "symbols.txt"
+    fp.write_text("# universe\n000001\n\n000002\n000001\n", encoding="utf-8")
+    out = _merge_symbols("000333,000002", str(fp))
+    assert out == ["000333", "000002", "000001"]
+
+
+>>>>>>> main
 def test_heartbeat_not_printed_when_show_progress_false(tmp_path, monkeypatch, capsys):
     plan = lambda **kwargs: [
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-06"}),
     ]
     monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
     RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "hb_off", max_workers=2, heartbeat_sec=0.05, show_progress=False).run(
@@ -186,6 +213,7 @@ def test_heartbeat_prints_in_parallel_mode(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "[heartbeat]" in out
 
+<<<<<<< codex/upgrade-rawwarehouse-core-for-multi-source-support-r4wdhm
 
 
 def test_partition_batching_processes_all_partitions(tmp_path, monkeypatch):
@@ -213,3 +241,5 @@ def test_dual_api_metadata_and_date_filtering(tmp_path, monkeypatch):
     out = ss._fetch_stock_zh_a_daily_partition(part)
     assert out["actual_api_name"]=="stock_zh_a_hist"
     assert out["rows_before_filter"]==3 and out["rows_after_filter"]==1
+=======
+>>>>>>> main
