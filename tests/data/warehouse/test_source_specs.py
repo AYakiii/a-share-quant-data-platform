@@ -5,6 +5,7 @@ from qsys.data.warehouse.source_specs import (
     STOCK_ZH_A_DAILY_SPEC,
     get_source_spec,
     list_source_specs,
+    SOURCE_SPECS,
 )
 
 
@@ -35,3 +36,7 @@ def test_stock_daily_plan_and_deterministic_path(tmp_path) -> None:
     assert "stock_zh_a_daily" in str(path)
     assert "symbol=000001" in str(path)
     assert "start_date=2026-01-01_end_date=2026-01-10" in str(path)
+
+
+def test_source_specs_exact_keys() -> None:
+    assert set(SOURCE_SPECS.keys()) == {"margin_detail", "stock_zh_a_daily"}

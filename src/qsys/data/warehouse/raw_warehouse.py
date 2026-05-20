@@ -160,7 +160,11 @@ class RawWarehouseRunner:
                             counts = dict(shared.get("counts", {})); counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1; shared["counts"] = counts
                 else:
                     with ThreadPoolExecutor(max_workers=workers) as ex:
-                        pending = {ex.submit(self._process_partition, p) for p in batch}
+                        pending = set()
+                        for p in batch:
+                            fut = ex.submit(self._process_partition, p)
+                            setattr(fut, "partition", p)
+                            pending.add(fut)
                         deadline = (time.perf_counter() + self.batch_timeout_sec) if self.batch_timeout_sec and self.batch_timeout_sec > 0 else None
                         while pending:
                             timeout = 0.1
@@ -173,9 +177,12 @@ class RawWarehouseRunner:
                             if deadline is not None and time.perf_counter() >= deadline:
                                 for fut in list(pending):
                                     fut.cancel()
-                                for _ in pending:
+                                for fut in list(pending):
+                                    fut.cancel()
+                                    part = getattr(fut, "partition", None)
+                                    pv = part.values if part is not None else {}
                                     completed_total += 1
-                                    rec = {"status": "timed_out", "path": "", "cache_exists_before": False, "attempts": 1, "started_at": _utc_now_iso(), "finished_at": _utc_now_iso(), "elapsed_seconds": 0.0, "rows": None, "n_columns": None, "error_type": "BatchTimeout", "error_message": "batch timeout exceeded", "traceback_tail": "", "timeout_seconds": self.batch_timeout_sec, "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "batch_id": batch_id, "batch_start_index": completed_total - 1, "batch_end_index": completed_total - 1, "batch_elapsed_seconds": time.perf_counter() - batch_start}
+                                    rec = {**pv, "status": "timed_out", "path": str(self.source_spec.build_raw_partition_path(Path(self.raw_root), part)) if part is not None else "", "cache_exists_before": False, "attempts": 1, "started_at": _utc_now_iso(), "finished_at": _utc_now_iso(), "elapsed_seconds": 0.0, "rows": None, "n_columns": None, "error_type": "BatchTimeout", "error_message": "batch timeout exceeded", "traceback_tail": "", "timeout_seconds": self.batch_timeout_sec, "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "requested_api_name": "", "actual_api_name": "", "fallback_from": "", "primary_error": "", "fallback_error": "", "original_symbol": pv.get("symbol", ""), "akshare_symbol": pv.get("symbol", ""), "rows_before_filter": None, "rows_after_filter": None, "min_date_before": None, "max_date_before": None, "min_date_after": None, "max_date_after": None, "batch_id": batch_id, "batch_start_index": completed_total - 1, "batch_end_index": completed_total - 1, "batch_elapsed_seconds": time.perf_counter() - batch_start}
                                     inventory.append(rec)
                                 break
                             for fut in done:
@@ -353,14 +360,21 @@ class RawWarehouseRunner:
 
     def _write_artifacts(self, run_dir: Path, inventory: list[dict[str, Any]], failed: list[dict[str, Any]], timed_out: list[dict[str, Any]], empty: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> None:
         pk = list(self.source_spec.partition_keys)
-        common = ["status", "path", "cache_exists_before", "attempts", "started_at", "finished_at", "elapsed_seconds", "rows", "n_columns", "error_type", "error_message", "traceback_tail", "timeout_seconds", "acquisition_status", "manual_review_required", "disabled_reason"]
-        inventory_rows = [_serialize_record_partition_keys(r, pk) for r in inventory]
-        failed_rows = [_serialize_record_partition_keys(r, pk) for r in failed]
-        timeout_rows = [_serialize_record_partition_keys(r, pk) for r in timed_out]
-        empty_rows = [_serialize_record_partition_keys(r, pk) for r in empty]
-        skipped_rows = [_serialize_record_partition_keys(r, pk) for r in skipped]
-        pd.DataFrame(inventory_rows, columns=pk + common).to_csv(run_dir / "cache_inventory.csv", index=False, quoting=csv.QUOTE_MINIMAL)
-        pd.DataFrame(failed_rows, columns=pk + common).to_csv(run_dir / "failed_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
-        pd.DataFrame(timeout_rows, columns=pk + common).to_csv(run_dir / "timeout_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
-        pd.DataFrame(empty_rows, columns=pk + common).to_csv(run_dir / "empty_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
-        pd.DataFrame(skipped_rows, columns=pk + common).to_csv(run_dir / "skipped_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        common = ["status", "path", "cache_exists_before", "attempts", "started_at", "finished_at", "elapsed_seconds", "rows", "n_columns", "error_type", "error_message", "traceback_tail", "timeout_seconds", "acquisition_status", "manual_review_required", "disabled_reason", "requested_api_name", "actual_api_name", "fallback_from", "primary_error", "fallback_error", "original_symbol", "akshare_symbol", "rows_before_filter", "rows_after_filter", "min_date_before", "max_date_before", "min_date_after", "max_date_after", "batch_id", "batch_start_index", "batch_end_index", "batch_elapsed_seconds"]
+        all_cols = pk + common
+        def _rows(xs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            rs = []
+            for r in xs:
+                rr = {c: r.get(c) for c in all_cols}
+                rs.append(_serialize_record_partition_keys(rr, pk))
+            return rs
+        inventory_rows = _rows(inventory)
+        failed_rows = _rows(failed)
+        timeout_rows = _rows(timed_out)
+        empty_rows = _rows(empty)
+        skipped_rows = _rows(skipped)
+        pd.DataFrame(inventory_rows, columns=all_cols).to_csv(run_dir / "cache_inventory.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(failed_rows, columns=all_cols).to_csv(run_dir / "failed_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(timeout_rows, columns=all_cols).to_csv(run_dir / "timeout_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(empty_rows, columns=all_cols).to_csv(run_dir / "empty_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(skipped_rows, columns=all_cols).to_csv(run_dir / "skipped_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)

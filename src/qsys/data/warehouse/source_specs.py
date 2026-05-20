@@ -133,21 +133,6 @@ def _fetch_stock_zh_a_daily_partition(partition: FetchPartition) -> dict[str, An
 def _margin_partition_path(raw_root: Path, partition: FetchPartition) -> Path:
     return raw_root / "margin_detail" / "v1" / f"exchange={partition.values['exchange']}" / f"trade_date={partition.values['trade_date']}" / "data.parquet"
 
-SOURCE_SPECS: dict[str, SourceSpec] = {
-    MARGIN_DETAIL_SPEC.source_name: MARGIN_DETAIL_SPEC,
-    STOCK_ZH_A_DAILY_SPEC.source_name: STOCK_ZH_A_DAILY_SPEC,
-}
-
-
-def _stock_zh_a_daily_partition_path(raw_root: Path, partition: FetchPartition) -> Path:
-    return raw_root / "stock_zh_a_daily" / "v1" / f"symbol={partition.values['symbol']}" / f"start_date={partition.values['start_date']}_end_date={partition.values['end_date']}" / "data.parquet"
-
-
-MARGIN_DETAIL_SPEC = SourceSpec("margin_detail", "v1", ("exchange", "trade_date"), "exchange_date", build_margin_detail_fetch_plan, _fetch_margin_partition, _margin_partition_path, {"trade_date": "date", "exchange": "category"}, True, "akshare", "margin", "P1", "enabled", False, None, "allow", "exchange-trade_date detail rows")
-
-STOCK_ZH_A_DAILY_SPEC = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", build_stock_zh_a_daily_fetch_plan, _fetch_stock_zh_a_daily_partition, _stock_zh_a_daily_partition_path, {"symbol": "category", "date": "date"}, False, "akshare", "market_price", "P0", "enabled", False, None, "warn", "asset-date daily bars")
-
-SOURCE_SPECS: dict[str, SourceSpec] = {MARGIN_DETAIL_SPEC.source_name: MARGIN_DETAIL_SPEC, STOCK_ZH_A_DAILY_SPEC.source_name: STOCK_ZH_A_DAILY_SPEC}
 
 def _stock_zh_a_daily_partition_path(raw_root: Path, partition: FetchPartition) -> Path:
     return raw_root / "stock_zh_a_daily" / "v1" / f"symbol={partition.values['symbol']}" / f"start_date={partition.values['start_date']}_end_date={partition.values['end_date']}" / "data.parquet"
