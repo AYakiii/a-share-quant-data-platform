@@ -4,6 +4,7 @@ import csv
 import json
 import multiprocessing as mp
 import random
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -91,6 +92,28 @@ class RawWarehouseRunner:
     show_progress: bool = False
     progress_every: int = 20
     include_disabled: bool = False
+    heartbeat_sec: float = 30.0
+
+    def _print_progress_heartbeat(self, *, started: float, total: int, completed: int, running: int, counts: dict[str, int]) -> None:
+        elapsed = max(0.0, time.perf_counter() - started)
+        remaining = max(0, total - completed)
+        rate = (completed / elapsed) if elapsed > 0 else 0.0
+        eta = (remaining / rate) if rate > 0 else None
+        msg = (
+            f"[heartbeat] elapsed={elapsed:.1f}s total={total} completed={completed} running={running} remaining={remaining} "
+            f"fetched={counts.get('fetched',0)} cache_hit={counts.get('cache_hit',0)} failed={counts.get('failed',0)} "
+            f"empty={counts.get('empty',0)} timed_out={counts.get('timed_out',0)} skipped={counts.get('skipped',0)} "
+            f"rate={rate:.2f}/s eta={(f'{eta:.1f}s' if eta is not None else 'n/a')}"
+        )
+        print(msg, flush=True)
+
+    def _heartbeat_loop(self, *, started: float, total: int, lock: threading.Lock, shared: dict[str, Any], stop_evt: threading.Event) -> None:
+        while not stop_evt.wait(max(0.1, self.heartbeat_sec)):
+            with lock:
+                completed = int(shared.get('completed', 0))
+                running = int(shared.get('running', 0))
+                counts = dict(shared.get('counts', {}))
+            self._print_progress_heartbeat(started=started, total=total, completed=completed, running=running, counts=counts)
 
     def run(self, **fetch_plan_kwargs: Any) -> dict[str, Path]:
         started = time.perf_counter()
@@ -103,23 +126,49 @@ class RawWarehouseRunner:
         step = max(1, self.progress_every)
 
         workers = max(1, self.max_workers)
-        if workers == 1:
-            for i, p in enumerate(partitions, 1):
-                rec, part_events = self._process_partition(p)
-                inventory.append(rec)
-                events.extend(part_events)
-                if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
-                    print(f"[{i}/{len(partitions)}] { {k: p.values[k] for k in self.source_spec.partition_keys} } -> {rec['status']}", flush=True)
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                futs = [ex.submit(self._process_partition, p) for p in partitions]
-                for i, fut in enumerate(as_completed(futs), 1):
-                    rec, part_events = fut.result()
+        shared: dict[str, Any] = {"completed": 0, "running": 0, "counts": {}}
+        lock = threading.Lock()
+        stop_evt = threading.Event()
+        hb_thread: threading.Thread | None = None
+        if self.show_progress and workers > 1:
+            hb_thread = threading.Thread(target=self._heartbeat_loop, kwargs={"started": started, "total": len(partitions), "lock": lock, "shared": shared, "stop_evt": stop_evt}, daemon=True)
+            hb_thread.start()
+
+        try:
+            if workers == 1:
+                for i, p in enumerate(partitions, 1):
+                    rec, part_events = self._process_partition(p)
                     inventory.append(rec)
                     events.extend(part_events)
+                    with lock:
+                        shared["completed"] = i
+                        counts = dict(shared.get("counts", {}))
+                        counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
+                        shared["counts"] = counts
                     if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
-                        base = {k: rec[k] for k in self.source_spec.partition_keys}
-                        print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
+                        print(f"[{i}/{len(partitions)}] { {k: p.values[k] for k in self.source_spec.partition_keys} } -> {rec['status']}", flush=True)
+            else:
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = [ex.submit(self._process_partition, p) for p in partitions]
+                    with lock:
+                        shared["running"] = len(futs)
+                    for i, fut in enumerate(as_completed(futs), 1):
+                        rec, part_events = fut.result()
+                        inventory.append(rec)
+                        events.extend(part_events)
+                        with lock:
+                            shared["completed"] = i
+                            shared["running"] = max(0, int(shared.get("running", 0)) - 1)
+                            counts = dict(shared.get("counts", {}))
+                            counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
+                            shared["counts"] = counts
+                        if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
+                            base = {k: rec[k] for k in self.source_spec.partition_keys}
+                            print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
+        finally:
+            stop_evt.set()
+            if hb_thread is not None:
+                hb_thread.join(timeout=2)
 
         pk = list(self.source_spec.partition_keys)
         inventory_sorted = sorted(inventory, key=lambda r: tuple(str(r.get(k, "")) for k in pk))

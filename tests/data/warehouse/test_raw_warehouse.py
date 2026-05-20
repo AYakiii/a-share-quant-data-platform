@@ -151,3 +151,38 @@ def test_merge_symbols_file_and_cli_deduplicate_and_keep_order(tmp_path):
     fp.write_text("# universe\n000001\n\n000002\n000001\n", encoding="utf-8")
     out = _merge_symbols("000333,000002", str(fp))
     assert out == ["000333", "000002", "000001"]
+
+
+def test_heartbeat_not_printed_when_show_progress_false(tmp_path, monkeypatch, capsys):
+    plan = lambda **kwargs: [
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+    ]
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
+    RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "hb_off", max_workers=2, heartbeat_sec=0.05, show_progress=False).run(
+        start_date="2025-01-02", end_date="2025-01-03", include_calendar_days=False, exchanges="sse"
+    )
+    out = capsys.readouterr().out
+    assert "[heartbeat]" not in out
+
+
+def test_heartbeat_prints_in_parallel_mode(tmp_path, monkeypatch, capsys):
+    plan = lambda **kwargs: [
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-06"}),
+    ]
+
+    def _slow(*args, **kwargs):
+        import time
+
+        time.sleep(0.15)
+        return {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.15}
+
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", _slow)
+    RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "hb_on", max_workers=2, heartbeat_sec=0.05, show_progress=True).run(
+        start_date="2025-01-02", end_date="2025-01-06", include_calendar_days=False, exchanges="sse"
+    )
+    out = capsys.readouterr().out
+    assert "[heartbeat]" in out
+
