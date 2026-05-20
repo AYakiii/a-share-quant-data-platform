@@ -8,7 +8,10 @@ from pathlib import Path
 import pandas as pd
 
 from qsys.data.warehouse import raw_warehouse as rw
-from qsys.data.warehouse.raw_warehouse import RawWarehouseRunner, run_fetch_write_with_hard_timeout
+from qsys.data.warehouse.raw_warehouse import (
+    RawWarehouseRunner,
+    run_fetch_write_with_hard_timeout,
+)
 from qsys.data.warehouse.source_specs import FetchPartition, SourceSpec
 from qsys.utils.build_raw_warehouse import _merge_symbols
 
@@ -30,9 +33,12 @@ def _fetch_ok(_):
 def test_worker_writes_parquet_and_returns_metadata_only(tmp_path):
     p = FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"})
     out_fp = tmp_path / "x.parquet"
+
     meta = run_fetch_write_with_hard_timeout(_fetch_ok, p, out_fp, 5)
+
     assert meta["status"] == "fetched"
-    assert meta["rows"] == 2 and meta["n_columns"] == 1
+    assert meta["rows"] == 2
+    assert meta["n_columns"] == 1
     assert out_fp.exists()
 
 
@@ -159,6 +165,7 @@ def test_heartbeat_not_printed_when_show_progress_false(tmp_path, monkeypatch, c
     plan = lambda **kwargs: [
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-06"}),
     ]
     monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
     RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "hb_off", max_workers=2, heartbeat_sec=0.05, show_progress=False).run(
