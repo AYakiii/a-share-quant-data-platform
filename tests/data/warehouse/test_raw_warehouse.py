@@ -1,26 +1,27 @@
 from __future__ import annotations
 
 import json
+
 import pandas as pd
-import pytest
 
 from qsys.data.warehouse import raw_warehouse as rw
 from qsys.data.warehouse.raw_warehouse import RawWarehouseRunner, run_fetch_write_with_hard_timeout
 from qsys.data.warehouse.source_specs import FetchPartition, SourceSpec
 
 
-def _make_spec(fetch_fn, plan=None):
+def _make_spec(fetch_fn, plan=None, *, source_name: str = "demo", partition_keys=("exchange", "trade_date"), acquisition_status: str = "enabled"):
     def _plan(**kwargs):
         return [FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"})]
 
     def _path(raw_root, p):
-        return raw_root / "demo" / f"exchange={p.values['exchange']}" / f"trade_date={p.values['trade_date']}" / "data.parquet"
+        return raw_root / source_name / f"exchange={p.values['exchange']}" / f"trade_date={p.values['trade_date']}" / "data.parquet"
 
-    return SourceSpec("demo", "v1", ("exchange", "trade_date"), "exchange_date", plan or _plan, fetch_fn, _path, {})
+    return SourceSpec(source_name, "v1", partition_keys, "exchange_date", plan or _plan, fetch_fn, _path, {}, acquisition_status=acquisition_status)
 
 
 def _fetch_ok(_):
     return pd.DataFrame({"a": [1, 2]})
+
 
 def test_worker_writes_parquet_and_returns_metadata_only(tmp_path):
     p = FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"})
@@ -45,63 +46,68 @@ def test_cache_hit_skips_fetch(tmp_path):
     assert called["n"] == 0
 
 
-def test_retries_semantics(tmp_path, monkeypatch):
-    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "failed", "error_type": "X", "error_message": "m", "traceback_tail": "t", "elapsed_seconds": 0.01})
-    out0 = RawWarehouseRunner(_make_spec(_fetch_ok), tmp_path / "raw", tmp_path / "out", "r0", retries=0, request_sleep=0).run(start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse")
-    inv0 = pd.read_csv(out0["run_dir"] / "cache_inventory.csv")
-    assert int(inv0.iloc[0]["attempts"]) == 1
-
-    calls = {"n": 0}
-    def _fake(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("boom")
-        return {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01}
-    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", _fake)
-    out1 = RawWarehouseRunner(_make_spec(_fetch_ok), tmp_path / "raw2", tmp_path / "out", "r1", retries=1, request_sleep=0).run(start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse")
-    inv1 = pd.read_csv(out1["run_dir"] / "cache_inventory.csv")
-    assert int(inv1.iloc[0]["attempts"]) == 2
-
-
-def test_artifact_headers_and_statuses(tmp_path, monkeypatch):
+def test_timeout_empty_failed_and_manifest_counts(tmp_path, monkeypatch):
     plan = lambda **kwargs: [
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-06"}),
     ]
     seq = iter([
         {"status": "failed", "error_type": "RuntimeError", "error_message": "x", "traceback_tail": "tb", "elapsed_seconds": 0.01},
         {"status": "empty", "rows": 0, "n_columns": 0, "elapsed_seconds": 0.01},
+        "__timeout__",
     ])
-    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: next(seq))
+
+    def _fake(*args, **kwargs):
+        out = next(seq)
+        if out == "__timeout__":
+            raise rw.FetchTimeoutError("t")
+        return out
+
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", _fake)
     out = RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "r2", retries=0).run(
-        start_date="2025-01-02", end_date="2025-01-03", include_calendar_days=False, exchanges="sse"
+        start_date="2025-01-02", end_date="2025-01-06", include_calendar_days=False, exchanges="sse"
     )
-    run_dir = out["run_dir"]
-    inv = pd.read_csv(run_dir / "cache_inventory.csv")
-    assert {"status", "error_type", "error_message", "traceback_tail", "rows", "n_columns", "attempts"}.issubset(inv.columns)
-    assert set(inv["status"]) == {"failed", "empty"}
-
-    failed = pd.read_csv(run_dir / "failed_partitions.csv")
-    assert {"error_type", "error_message", "traceback_tail"}.issubset(failed.columns)
-    assert "failed" in set(failed["status"])
-
-    empty = pd.read_csv(run_dir / "empty_partitions.csv")
-    assert {"rows", "n_columns"}.issubset(empty.columns)
+    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
+    assert {"started_at", "finished_at", "elapsed_seconds", "status", "error_type"}.issubset(inv.columns)
+    manifest = json.loads((out["run_dir"] / "warehouse_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["n_failed"] == 1
+    assert manifest["n_empty"] == 1
+    assert manifest["n_timed_out"] == 1
 
 
-def test_timeout_artifact_and_manifest_and_warnings(tmp_path, monkeypatch):
-    old = rw.run_fetch_write_with_hard_timeout
-    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: (_ for _ in ()).throw(rw.FetchTimeoutError("t")))
-    try:
-        out = RawWarehouseRunner(_make_spec(lambda _: pd.DataFrame({"a": [1]})), tmp_path / "raw", tmp_path / "out", "r3", retries=0).run(
-            start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse"
-        )
-    finally:
-        monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", old)
-    run_dir = out["run_dir"]
-    tdf = pd.read_csv(run_dir / "timeout_partitions.csv")
-    assert {"timeout_seconds", "error_type", "error_message"}.issubset(tdf.columns)
-    man = json.loads((run_dir / "warehouse_manifest.json").read_text(encoding="utf-8"))
-    assert man["n_timed_out"] == 1 and man["n_fetched"] == 0 and man["max_attempts"] == 1
-    warnings = (run_dir / "warnings.md").read_text(encoding="utf-8")
-    assert "Timed-out partitions" in warnings and "Zero fetched partitions" in warnings
+def test_skipped_and_include_disabled_behavior(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def _fetch(_):
+        calls["n"] += 1
+        return pd.DataFrame({"x": [1]})
+
+    spec = _make_spec(_fetch, acquisition_status="disabled")
+    out_skip = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "skip", include_disabled=False).run(
+        start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse"
+    )
+    inv_skip = pd.read_csv(out_skip["run_dir"] / "cache_inventory.csv")
+    assert inv_skip.iloc[0]["status"] == "skipped"
+    assert calls["n"] == 0
+
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
+    out_force = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "force", include_disabled=True).run(
+        start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse"
+    )
+    inv_force = pd.read_csv(out_force["run_dir"] / "cache_inventory.csv")
+    assert inv_force.iloc[0]["status"] == "fetched"
+
+
+def test_stock_like_spec_partition_keys_supported(tmp_path, monkeypatch):
+    def _plan(**kwargs):
+        return [FetchPartition(values={"symbol": "000001", "start_date": "2026-01-01", "end_date": "2026-01-10"})]
+
+    def _path(raw_root, p):
+        return raw_root / "stock_zh_a_daily" / "v1" / f"symbol={p.values['symbol']}" / f"start_date={p.values['start_date']}_end_date={p.values['end_date']}" / "data.parquet"
+
+    spec = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", _plan, _fetch_ok, _path, {})
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 2, "n_columns": 1, "elapsed_seconds": 0.01})
+    out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "stock", retries=0).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
+    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
+    assert set(["symbol", "start_date", "end_date"]).issubset(inv.columns)

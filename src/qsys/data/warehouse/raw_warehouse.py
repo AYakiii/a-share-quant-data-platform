@@ -5,6 +5,7 @@ import multiprocessing as mp
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -23,52 +24,27 @@ def _tail_traceback(err: BaseException, limit: int = 5) -> str:
     return "".join(lines[-limit:]).strip()
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
 def _fetch_write_worker(queue: mp.Queue[Any], fetch_fn: Callable[[FetchPartition], pd.DataFrame], partition: FetchPartition, raw_fp: str) -> None:
     started = time.perf_counter()
     try:
         data = fetch_fn(partition)
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
         if df.empty:
-            queue.put(
-                {
-                    "status": "empty",
-                    "rows": 0,
-                    "n_columns": len(df.columns),
-                    "columns": list(map(str, df.columns)),
-                    "path": raw_fp,
-                    "elapsed_seconds": time.perf_counter() - started,
-                }
-            )
+            queue.put({"status": "empty", "rows": 0, "n_columns": len(df.columns), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
             return
         fp = Path(raw_fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(fp, index=False)
-        queue.put(
-            {
-                "status": "fetched",
-                "rows": int(len(df)),
-                "n_columns": int(len(df.columns)),
-                "columns": list(map(str, df.columns)),
-                "path": raw_fp,
-                "elapsed_seconds": time.perf_counter() - started,
-            }
-        )
+        queue.put({"status": "fetched", "rows": int(len(df)), "n_columns": int(len(df.columns)), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
     except Exception as exc:  # pragma: no cover
-        queue.put(
-            {
-                "status": "failed",
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-                "traceback_tail": _tail_traceback(exc),
-                "path": raw_fp,
-                "elapsed_seconds": time.perf_counter() - started,
-            }
-        )
+        queue.put({"status": "failed", "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": _tail_traceback(exc), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
 
 
-def run_fetch_write_with_hard_timeout(
-    fetch_fn: Callable[[FetchPartition], pd.DataFrame], partition: FetchPartition, raw_fp: Path, timeout_seconds: float
-) -> dict[str, Any]:
+def run_fetch_write_with_hard_timeout(fetch_fn: Callable[[FetchPartition], pd.DataFrame], partition: FetchPartition, raw_fp: Path, timeout_seconds: float) -> dict[str, Any]:
     q: mp.Queue[Any] = mp.Queue()
     proc = mp.Process(target=_fetch_write_worker, args=(q, fetch_fn, partition, str(raw_fp)))
     proc.start()
@@ -95,6 +71,7 @@ class RawWarehouseRunner:
     request_sleep: float = 0.1
     show_progress: bool = False
     progress_every: int = 20
+    include_disabled: bool = False
 
     def run(self, **fetch_plan_kwargs: Any) -> dict[str, Path]:
         started = time.perf_counter()
@@ -106,6 +83,8 @@ class RawWarehouseRunner:
         failed: list[dict[str, Any]] = []
         timed_out: list[dict[str, Any]] = []
         empty: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
         warnings: list[str] = []
         cache_hits = cache_misses = 0
         network_attempts = network_failed = 0
@@ -114,6 +93,14 @@ class RawWarehouseRunner:
         for i, p in enumerate(partitions, 1):
             raw_fp = self.source_spec.build_raw_partition_path(Path(self.raw_root), p)
             base = {k: p.values[k] for k in self.source_spec.partition_keys}
+            events.append({"event": "partition_started", "timestamp": _utc_now_iso(), "partition": base})
+            if self._should_skip_for_acquisition_policy():
+                rec = self._skipped_record(base, raw_fp)
+                skipped.append(rec)
+                inventory.append(rec)
+                events.append({"event": "partition_skipped", "timestamp": _utc_now_iso(), "partition": base, "reason": rec["disabled_reason"] or "acquisition policy"})
+                continue
+
             cache_exists_before = raw_fp.exists()
             if cache_exists_before and not self.overwrite_cache:
                 rec = {
@@ -122,12 +109,18 @@ class RawWarehouseRunner:
                     "path": str(raw_fp),
                     "cache_exists_before": True,
                     "attempts": 0,
+                    "started_at": _utc_now_iso(),
+                    "finished_at": _utc_now_iso(),
                     "elapsed_seconds": 0.0,
                     "rows": None,
                     "n_columns": None,
                     "error_type": "",
                     "error_message": "",
                     "traceback_tail": "",
+                    "timeout_seconds": None,
+                    "acquisition_status": self.source_spec.acquisition_status,
+                    "manual_review_required": self.source_spec.manual_review_required,
+                    "disabled_reason": self.source_spec.disabled_reason or "",
                 }
                 cache_hits += 1
             else:
@@ -140,34 +133,28 @@ class RawWarehouseRunner:
                 if rec["status"] == "empty":
                     empty.append(rec)
             inventory.append(rec)
+            events.append({"event": "partition_finished", "timestamp": _utc_now_iso(), "partition": base, "status": rec["status"]})
             if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
                 print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
 
-        self._write_artifacts(run_dir, inventory, failed, timed_out, empty)
+        self._write_artifacts(run_dir, inventory, failed, timed_out, empty, skipped)
+        (run_dir / "operation_events.jsonl").write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events), encoding="utf-8")
         status_counts = pd.DataFrame(inventory)["status"].value_counts().to_dict() if inventory else {}
-        n_fetched = int(status_counts.get("fetched", 0))
-        n_failed = int(status_counts.get("failed", 0))
-        n_timed_out = int(status_counts.get("timed_out", 0))
-        n_empty = int(status_counts.get("empty", 0))
 
-        if n_failed:
-            warnings.append(f"Failed partitions: {n_failed}")
-            warnings.extend([f"- {r['path']} [{r['error_type']}] {r['error_message']}" for r in failed[:5]])
-        if n_timed_out:
-            warnings.append(f"Timed-out partitions: {n_timed_out}")
-            warnings.append("Consider increasing --request-timeout if many partitions timed out.")
-        if n_empty:
-            warnings.append(f"Empty partitions: {n_empty}")
-        if n_fetched == 0:
-            warnings.append("Zero fetched partitions in this run.")
+        if int(status_counts.get("failed", 0)):
+            warnings.append(f"Failed partitions: {int(status_counts.get('failed', 0))}")
+        if int(status_counts.get("timed_out", 0)):
+            warnings.append(f"Timed-out partitions: {int(status_counts.get('timed_out', 0))}")
+        if int(status_counts.get("empty", 0)):
+            warnings.append(f"Empty partitions: {int(status_counts.get('empty', 0))}")
+        if int(status_counts.get("skipped", 0)):
+            warnings.append(f"Skipped partitions: {int(status_counts.get('skipped', 0))}")
 
         manifest = {
             "source": self.source_spec.source_name,
             "source_version": self.source_spec.source_version,
             "fetch_mode": self.source_spec.fetch_mode,
             "run_name": self.run_name,
-            "start_date": fetch_plan_kwargs.get("start_date"),
-            "end_date": fetch_plan_kwargs.get("end_date"),
             "raw_root": str(self.raw_root),
             "output_dir": str(run_dir),
             "partition_keys": list(self.source_spec.partition_keys),
@@ -176,10 +163,11 @@ class RawWarehouseRunner:
             "cache_hits": cache_hits,
             "cache_misses": cache_misses,
             "status_counts": status_counts,
-            "n_fetched": n_fetched,
-            "n_failed": n_failed,
-            "n_timed_out": n_timed_out,
-            "n_empty": n_empty,
+            "n_fetched": int(status_counts.get("fetched", 0)),
+            "n_failed": int(status_counts.get("failed", 0)),
+            "n_timed_out": int(status_counts.get("timed_out", 0)),
+            "n_empty": int(status_counts.get("empty", 0)),
+            "n_skipped": int(status_counts.get("skipped", 0)),
             "network_requests_attempted": network_attempts,
             "network_requests_failed": network_failed,
             "request_timeout": self.request_timeout,
@@ -188,34 +176,52 @@ class RawWarehouseRunner:
             "retry_wait": self.retry_wait,
             "request_sleep": self.request_sleep,
             "overwrite_cache": self.overwrite_cache,
-            "include_calendar_days": bool(fetch_plan_kwargs.get("include_calendar_days", False)),
+            "include_disabled": self.include_disabled,
+            "acquisition_status": self.source_spec.acquisition_status,
+            "manual_review_required": self.source_spec.manual_review_required,
+            "disabled_reason": self.source_spec.disabled_reason,
             "elapsed_seconds": time.perf_counter() - started,
-            "assumptions": ["child process performs fetch+write; parent only receives metadata"],
         }
         (run_dir / "warehouse_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         write_warnings(run_dir, warnings)
         return {"run_dir": run_dir}
 
+    def _should_skip_for_acquisition_policy(self) -> bool:
+        return (self.source_spec.acquisition_status in {"disabled", "manual_review", "excluded"}) and not self.include_disabled
+
+    def _skipped_record(self, base: dict[str, Any], raw_fp: Path) -> dict[str, Any]:
+        now = _utc_now_iso()
+        return {
+            **base,
+            "status": "skipped",
+            "path": str(raw_fp),
+            "cache_exists_before": raw_fp.exists(),
+            "attempts": 0,
+            "started_at": now,
+            "finished_at": now,
+            "elapsed_seconds": 0.0,
+            "rows": None,
+            "n_columns": None,
+            "error_type": "",
+            "error_message": "",
+            "traceback_tail": "",
+            "timeout_seconds": None,
+            "acquisition_status": self.source_spec.acquisition_status,
+            "manual_review_required": self.source_spec.manual_review_required,
+            "disabled_reason": self.source_spec.disabled_reason or "",
+        }
+
     def _fetch_with_retries(self, p: FetchPartition, raw_fp: Path, cache_exists_before: bool) -> dict[str, Any]:
         max_attempts = self.retries + 1
         for attempt in range(1, max_attempts + 1):
             t0 = time.perf_counter()
+            started_at = _utc_now_iso()
             try:
                 meta = run_fetch_write_with_hard_timeout(self.source_spec.fetch_partition, p, raw_fp, self.request_timeout)
-                rec = {
-                    **p.values,
-                    "status": meta.get("status", "failed"),
-                    "path": str(raw_fp),
-                    "cache_exists_before": cache_exists_before,
-                    "attempts": attempt,
-                    "elapsed_seconds": meta.get("elapsed_seconds", time.perf_counter() - t0),
-                    "rows": meta.get("rows"),
-                    "n_columns": meta.get("n_columns"),
-                    "error_type": meta.get("error_type", ""),
-                    "error_message": meta.get("error_message", ""),
-                    "traceback_tail": meta.get("traceback_tail", ""),
-                    "timeout_seconds": None,
-                }
+                rec = {**p.values, "status": meta.get("status", "failed"), "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt,
+                       "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": meta.get("elapsed_seconds", time.perf_counter() - t0), "rows": meta.get("rows"), "n_columns": meta.get("n_columns"),
+                       "error_type": meta.get("error_type", ""), "error_message": meta.get("error_message", ""), "traceback_tail": meta.get("traceback_tail", ""), "timeout_seconds": None,
+                       "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
                 if rec["status"] in {"fetched", "empty"}:
                     if rec["status"] == "fetched" and self.request_sleep > 0:
                         time.sleep(self.request_sleep)
@@ -225,47 +231,23 @@ class RawWarehouseRunner:
                     return rec
             except FetchTimeoutError as exc:
                 if attempt >= max_attempts:
-                    return {
-                        **p.values,
-                        "status": "timed_out",
-                        "path": str(raw_fp),
-                        "cache_exists_before": cache_exists_before,
-                        "attempts": attempt,
-                        "elapsed_seconds": time.perf_counter() - t0,
-                        "rows": None,
-                        "n_columns": None,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "traceback_tail": "",
-                        "timeout_seconds": self.request_timeout,
-                    }
+                    return {**p.values, "status": "timed_out", "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt, "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": time.perf_counter() - t0,
+                            "rows": None, "n_columns": None, "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": "", "timeout_seconds": self.request_timeout,
+                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
             except Exception as exc:
                 if attempt >= max_attempts:
-                    return {
-                        **p.values,
-                        "status": "failed",
-                        "path": str(raw_fp),
-                        "cache_exists_before": cache_exists_before,
-                        "attempts": attempt,
-                        "elapsed_seconds": time.perf_counter() - t0,
-                        "rows": None,
-                        "n_columns": None,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                        "traceback_tail": _tail_traceback(exc),
-                        "timeout_seconds": None,
-                    }
+                    return {**p.values, "status": "failed", "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt, "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": time.perf_counter() - t0,
+                            "rows": None, "n_columns": None, "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": _tail_traceback(exc), "timeout_seconds": None,
+                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
             if self.retry_wait > 0:
                 time.sleep(self.retry_wait)
         raise RuntimeError("unreachable")
 
-    def _write_artifacts(self, run_dir: Path, inventory: list[dict[str, Any]], failed: list[dict[str, Any]], timed_out: list[dict[str, Any]], empty: list[dict[str, Any]]) -> None:
+    def _write_artifacts(self, run_dir: Path, inventory: list[dict[str, Any]], failed: list[dict[str, Any]], timed_out: list[dict[str, Any]], empty: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> None:
         pk = list(self.source_spec.partition_keys)
-        inv_cols = pk + ["status", "path", "cache_exists_before", "attempts", "elapsed_seconds", "rows", "n_columns", "error_type", "error_message", "traceback_tail"]
-        failed_cols = pk + ["status", "path", "cache_exists_before", "attempts", "elapsed_seconds", "error_type", "error_message", "traceback_tail"]
-        timeout_cols = pk + ["status", "path", "cache_exists_before", "attempts", "timeout_seconds", "elapsed_seconds", "error_type", "error_message", "traceback_tail"]
-        empty_cols = pk + ["status", "path", "cache_exists_before", "attempts", "elapsed_seconds", "rows", "n_columns"]
-        pd.DataFrame(inventory, columns=inv_cols).to_csv(run_dir / "cache_inventory.csv", index=False)
-        pd.DataFrame(failed, columns=failed_cols).to_csv(run_dir / "failed_partitions.csv", index=False)
-        pd.DataFrame(timed_out, columns=timeout_cols).to_csv(run_dir / "timeout_partitions.csv", index=False)
-        pd.DataFrame(empty, columns=empty_cols).to_csv(run_dir / "empty_partitions.csv", index=False)
+        common = ["status", "path", "cache_exists_before", "attempts", "started_at", "finished_at", "elapsed_seconds", "rows", "n_columns", "error_type", "error_message", "traceback_tail", "timeout_seconds", "acquisition_status", "manual_review_required", "disabled_reason"]
+        pd.DataFrame(inventory, columns=pk + common).to_csv(run_dir / "cache_inventory.csv", index=False)
+        pd.DataFrame(failed, columns=pk + common).to_csv(run_dir / "failed_partitions.csv", index=False)
+        pd.DataFrame(timed_out, columns=pk + common).to_csv(run_dir / "timeout_partitions.csv", index=False)
+        pd.DataFrame(empty, columns=pk + common).to_csv(run_dir / "empty_partitions.csv", index=False)
+        pd.DataFrame(skipped, columns=pk + common).to_csv(run_dir / "skipped_partitions.csv", index=False)
