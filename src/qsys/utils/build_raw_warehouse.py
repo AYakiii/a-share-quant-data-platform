@@ -11,6 +11,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--source", required=True)
     p.add_argument("--start-date", required=True)
     p.add_argument("--end-date", required=True)
+    p.add_argument("--symbols", default="")
     p.add_argument("--raw-root", default="data/raw")
     p.add_argument("--output-dir", default="outputs/raw_warehouse")
     p.add_argument("--run-name", default=None)
@@ -19,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--retries", type=int, default=1)
     p.add_argument("--retry-wait", type=float, default=0)
     p.add_argument("--request-sleep", type=float, default=0.1)
+    p.add_argument("--include-disabled", action="store_true")
     p.add_argument("--include-calendar-days", action="store_true")
     p.add_argument("--show-progress", action="store_true")
     p.add_argument("--progress-every", type=int, default=20)
@@ -42,13 +44,17 @@ def main() -> None:
         request_sleep=a.request_sleep,
         show_progress=a.show_progress,
         progress_every=a.progress_every,
+        include_disabled=a.include_disabled,
     )
-    out = runner.run(
-        start_date=a.start_date,
-        end_date=a.end_date,
-        include_calendar_days=a.include_calendar_days,
-        exchanges=a.exchanges,
-    )
+    kwargs = {
+        "start_date": a.start_date,
+        "end_date": a.end_date,
+        "include_calendar_days": a.include_calendar_days,
+        "exchanges": a.exchanges,
+    }
+    if a.source == "stock_zh_a_daily":
+        kwargs["symbols"] = a.symbols
+    out = runner.run(**kwargs)
     print({k: str(v) for k, v in out.items()})
 
 
