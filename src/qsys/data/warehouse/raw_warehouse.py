@@ -3,8 +3,11 @@ from __future__ import annotations
 import csv
 import json
 import multiprocessing as mp
+import random
+import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -84,9 +87,33 @@ class RawWarehouseRunner:
     retries: int = 1
     retry_wait: float = 0.0
     request_sleep: float = 0.1
+    request_jitter: float = 0.0
+    max_workers: int = 2
     show_progress: bool = False
     progress_every: int = 20
     include_disabled: bool = False
+    heartbeat_sec: float = 30.0
+
+    def _print_progress_heartbeat(self, *, started: float, total: int, completed: int, running: int, counts: dict[str, int]) -> None:
+        elapsed = max(0.0, time.perf_counter() - started)
+        remaining = max(0, total - completed)
+        rate = (completed / elapsed) if elapsed > 0 else 0.0
+        eta = (remaining / rate) if rate > 0 else None
+        msg = (
+            f"[heartbeat] elapsed={elapsed:.1f}s total={total} completed={completed} running={running} remaining={remaining} "
+            f"fetched={counts.get('fetched',0)} cache_hit={counts.get('cache_hit',0)} failed={counts.get('failed',0)} "
+            f"empty={counts.get('empty',0)} timed_out={counts.get('timed_out',0)} skipped={counts.get('skipped',0)} "
+            f"rate={rate:.2f}/s eta={(f'{eta:.1f}s' if eta is not None else 'n/a')}"
+        )
+        print(msg, flush=True)
+
+    def _heartbeat_loop(self, *, started: float, total: int, lock: threading.Lock, shared: dict[str, Any], stop_evt: threading.Event) -> None:
+        while not stop_evt.wait(max(0.1, self.heartbeat_sec)):
+            with lock:
+                completed = int(shared.get('completed', 0))
+                running = int(shared.get('running', 0))
+                counts = dict(shared.get('counts', {}))
+            self._print_progress_heartbeat(started=started, total=total, completed=completed, running=running, counts=counts)
 
     def run(self, **fetch_plan_kwargs: Any) -> dict[str, Path]:
         started = time.perf_counter()
@@ -95,67 +122,71 @@ class RawWarehouseRunner:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         inventory: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        timed_out: list[dict[str, Any]] = []
-        empty: list[dict[str, Any]] = []
-        skipped: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
-        warnings: list[str] = []
-        cache_hits = cache_misses = 0
-        network_attempts = network_failed = 0
-
         step = max(1, self.progress_every)
-        for i, p in enumerate(partitions, 1):
-            raw_fp = self.source_spec.build_raw_partition_path(Path(self.raw_root), p)
-            base = {k: p.values[k] for k in self.source_spec.partition_keys}
-            events.append({"event": "partition_started", "timestamp": _utc_now_iso(), "partition": base})
-            if self._should_skip_for_acquisition_policy():
-                rec = self._skipped_record(base, raw_fp)
-                skipped.append(rec)
-                inventory.append(rec)
-                events.append({"event": "partition_skipped", "timestamp": _utc_now_iso(), "partition": base, "reason": rec["disabled_reason"] or "acquisition policy"})
-                continue
 
-            cache_exists_before = raw_fp.exists()
-            if cache_exists_before and not self.overwrite_cache:
-                rec = {
-                    **base,
-                    "status": "cache_hit",
-                    "path": str(raw_fp),
-                    "cache_exists_before": True,
-                    "attempts": 0,
-                    "started_at": _utc_now_iso(),
-                    "finished_at": _utc_now_iso(),
-                    "elapsed_seconds": 0.0,
-                    "rows": None,
-                    "n_columns": None,
-                    "error_type": "",
-                    "error_message": "",
-                    "traceback_tail": "",
-                    "timeout_seconds": None,
-                    "acquisition_status": self.source_spec.acquisition_status,
-                    "manual_review_required": self.source_spec.manual_review_required,
-                    "disabled_reason": self.source_spec.disabled_reason or "",
-                }
-                cache_hits += 1
+        workers = max(1, self.max_workers)
+        shared: dict[str, Any] = {"completed": 0, "running": 0, "counts": {}}
+        lock = threading.Lock()
+        stop_evt = threading.Event()
+        hb_thread: threading.Thread | None = None
+        if self.show_progress and workers > 1:
+            hb_thread = threading.Thread(target=self._heartbeat_loop, kwargs={"started": started, "total": len(partitions), "lock": lock, "shared": shared, "stop_evt": stop_evt}, daemon=True)
+            hb_thread.start()
+
+        try:
+            if workers == 1:
+                for i, p in enumerate(partitions, 1):
+                    rec, part_events = self._process_partition(p)
+                    inventory.append(rec)
+                    events.extend(part_events)
+                    with lock:
+                        shared["completed"] = i
+                        counts = dict(shared.get("counts", {}))
+                        counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
+                        shared["counts"] = counts
+                    if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
+                        print(f"[{i}/{len(partitions)}] { {k: p.values[k] for k in self.source_spec.partition_keys} } -> {rec['status']}", flush=True)
             else:
-                cache_misses += 1
-                rec = self._fetch_with_retries(p, raw_fp, cache_exists_before)
-                network_attempts += int(rec["attempts"])
-                if rec["status"] in {"failed", "timed_out"}:
-                    network_failed += 1
-                    failed.append(rec) if rec["status"] == "failed" else timed_out.append(rec)
-                if rec["status"] == "empty":
-                    empty.append(rec)
-            inventory.append(rec)
-            events.append({"event": "partition_finished", "timestamp": _utc_now_iso(), "partition": base, "status": rec["status"]})
-            if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
-                print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = [ex.submit(self._process_partition, p) for p in partitions]
+                    with lock:
+                        shared["running"] = len(futs)
+                    for i, fut in enumerate(as_completed(futs), 1):
+                        rec, part_events = fut.result()
+                        inventory.append(rec)
+                        events.extend(part_events)
+                        with lock:
+                            shared["completed"] = i
+                            shared["running"] = max(0, int(shared.get("running", 0)) - 1)
+                            counts = dict(shared.get("counts", {}))
+                            counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
+                            shared["counts"] = counts
+                        if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
+                            base = {k: rec[k] for k in self.source_spec.partition_keys}
+                            print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
+        finally:
+            stop_evt.set()
+            if hb_thread is not None:
+                hb_thread.join(timeout=2)
 
-        self._write_artifacts(run_dir, inventory, failed, timed_out, empty, skipped)
+        pk = list(self.source_spec.partition_keys)
+        inventory_sorted = sorted(inventory, key=lambda r: tuple(str(r.get(k, "")) for k in pk))
+        failed = [r for r in inventory_sorted if r["status"] == "failed"]
+        timed_out = [r for r in inventory_sorted if r["status"] == "timed_out"]
+        empty = [r for r in inventory_sorted if r["status"] == "empty"]
+        skipped = [r for r in inventory_sorted if r["status"] == "skipped"]
+
+        self._write_artifacts(run_dir, inventory_sorted, failed, timed_out, empty, skipped)
         (run_dir / "operation_events.jsonl").write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in events), encoding="utf-8")
-        status_counts = pd.DataFrame(inventory)["status"].value_counts().to_dict() if inventory else {}
 
+        status_counts = pd.DataFrame(inventory_sorted)["status"].value_counts().to_dict() if inventory_sorted else {}
+        cache_hits = int(status_counts.get("cache_hit", 0))
+        cache_misses = len(inventory_sorted) - cache_hits - int(status_counts.get("skipped", 0))
+        network_attempts = int(sum(int(r.get("attempts", 0)) for r in inventory_sorted))
+        network_failed = int(status_counts.get("failed", 0) + status_counts.get("timed_out", 0))
+
+        warnings: list[str] = []
         if int(status_counts.get("failed", 0)):
             warnings.append(f"Failed partitions: {int(status_counts.get('failed', 0))}")
         if int(status_counts.get("timed_out", 0)):
@@ -172,7 +203,7 @@ class RawWarehouseRunner:
             "run_name": self.run_name,
             "raw_root": str(self.raw_root),
             "output_dir": str(run_dir),
-            "partition_keys": list(self.source_spec.partition_keys),
+            "partition_keys": pk,
             "n_partitions": len(partitions),
             "planned_partitions": len(partitions),
             "cache_hits": cache_hits,
@@ -190,6 +221,8 @@ class RawWarehouseRunner:
             "max_attempts": self.retries + 1,
             "retry_wait": self.retry_wait,
             "request_sleep": self.request_sleep,
+            "request_jitter": self.request_jitter,
+            "max_workers": workers,
             "overwrite_cache": self.overwrite_cache,
             "include_disabled": self.include_disabled,
             "acquisition_status": self.source_spec.acquisition_status,
@@ -200,6 +233,42 @@ class RawWarehouseRunner:
         (run_dir / "warehouse_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         write_warnings(run_dir, warnings)
         return {"run_dir": run_dir}
+
+    def _process_partition(self, p: FetchPartition) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        raw_fp = self.source_spec.build_raw_partition_path(Path(self.raw_root), p)
+        base = {k: p.values[k] for k in self.source_spec.partition_keys}
+        part_events: list[dict[str, Any]] = [{"event": "partition_started", "timestamp": _utc_now_iso(), "partition": base}]
+
+        if self._should_skip_for_acquisition_policy():
+            rec = self._skipped_record(base, raw_fp)
+            part_events.append({"event": "partition_skipped", "timestamp": _utc_now_iso(), "partition": base, "reason": rec["disabled_reason"] or "acquisition policy"})
+            return rec, part_events
+
+        cache_exists_before = raw_fp.exists()
+        if cache_exists_before and not self.overwrite_cache:
+            rec = {
+                **base,
+                "status": "cache_hit",
+                "path": str(raw_fp),
+                "cache_exists_before": True,
+                "attempts": 0,
+                "started_at": _utc_now_iso(),
+                "finished_at": _utc_now_iso(),
+                "elapsed_seconds": 0.0,
+                "rows": None,
+                "n_columns": None,
+                "error_type": "",
+                "error_message": "",
+                "traceback_tail": "",
+                "timeout_seconds": None,
+                "acquisition_status": self.source_spec.acquisition_status,
+                "manual_review_required": self.source_spec.manual_review_required,
+                "disabled_reason": self.source_spec.disabled_reason or "",
+            }
+        else:
+            rec = self._fetch_with_retries(p, raw_fp, cache_exists_before)
+        part_events.append({"event": "partition_finished", "timestamp": _utc_now_iso(), "partition": base, "status": rec["status"]})
+        return rec, part_events
 
     def _should_skip_for_acquisition_policy(self) -> bool:
         return (self.source_spec.acquisition_status in {"disabled", "manual_review", "excluded"}) and not self.include_disabled
@@ -232,14 +301,14 @@ class RawWarehouseRunner:
             t0 = time.perf_counter()
             started_at = _utc_now_iso()
             try:
+                if self.request_sleep > 0 or self.request_jitter > 0:
+                    time.sleep(self.request_sleep + (random.uniform(0.0, self.request_jitter) if self.request_jitter > 0 else 0.0))
                 meta = run_fetch_write_with_hard_timeout(self.source_spec.fetch_partition, p, raw_fp, self.request_timeout)
                 rec = {**p.values, "status": meta.get("status", "failed"), "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt,
                        "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": meta.get("elapsed_seconds", time.perf_counter() - t0), "rows": meta.get("rows"), "n_columns": meta.get("n_columns"),
                        "error_type": meta.get("error_type", ""), "error_message": meta.get("error_message", ""), "traceback_tail": meta.get("traceback_tail", ""), "timeout_seconds": None,
                        "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
                 if rec["status"] in {"fetched", "empty"}:
-                    if rec["status"] == "fetched" and self.request_sleep > 0:
-                        time.sleep(self.request_sleep)
                     return rec
                 if attempt >= max_attempts:
                     rec["status"] = "failed" if rec["status"] != "timed_out" else "timed_out"
