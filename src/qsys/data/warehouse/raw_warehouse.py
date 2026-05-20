@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import multiprocessing as mp
 import time
@@ -26,6 +27,20 @@ def _tail_traceback(err: BaseException, limit: int = 5) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _serialize_partition_value(key: str, value: Any) -> Any:
+    if isinstance(value, str) and value.isdigit() and key in {"symbol", "code", "ts_code"}:
+        return f"'{value}"
+    return value
+
+
+def _serialize_record_partition_keys(record: dict[str, Any], partition_keys: list[str]) -> dict[str, Any]:
+    out = dict(record)
+    for key in partition_keys:
+        if key in out:
+            out[key] = _serialize_partition_value(key, out[key])
+    return out
 
 
 def _fetch_write_worker(queue: mp.Queue[Any], fetch_fn: Callable[[FetchPartition], pd.DataFrame], partition: FetchPartition, raw_fp: str) -> None:
@@ -246,8 +261,13 @@ class RawWarehouseRunner:
     def _write_artifacts(self, run_dir: Path, inventory: list[dict[str, Any]], failed: list[dict[str, Any]], timed_out: list[dict[str, Any]], empty: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> None:
         pk = list(self.source_spec.partition_keys)
         common = ["status", "path", "cache_exists_before", "attempts", "started_at", "finished_at", "elapsed_seconds", "rows", "n_columns", "error_type", "error_message", "traceback_tail", "timeout_seconds", "acquisition_status", "manual_review_required", "disabled_reason"]
-        pd.DataFrame(inventory, columns=pk + common).to_csv(run_dir / "cache_inventory.csv", index=False)
-        pd.DataFrame(failed, columns=pk + common).to_csv(run_dir / "failed_partitions.csv", index=False)
-        pd.DataFrame(timed_out, columns=pk + common).to_csv(run_dir / "timeout_partitions.csv", index=False)
-        pd.DataFrame(empty, columns=pk + common).to_csv(run_dir / "empty_partitions.csv", index=False)
-        pd.DataFrame(skipped, columns=pk + common).to_csv(run_dir / "skipped_partitions.csv", index=False)
+        inventory_rows = [_serialize_record_partition_keys(r, pk) for r in inventory]
+        failed_rows = [_serialize_record_partition_keys(r, pk) for r in failed]
+        timeout_rows = [_serialize_record_partition_keys(r, pk) for r in timed_out]
+        empty_rows = [_serialize_record_partition_keys(r, pk) for r in empty]
+        skipped_rows = [_serialize_record_partition_keys(r, pk) for r in skipped]
+        pd.DataFrame(inventory_rows, columns=pk + common).to_csv(run_dir / "cache_inventory.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(failed_rows, columns=pk + common).to_csv(run_dir / "failed_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(timeout_rows, columns=pk + common).to_csv(run_dir / "timeout_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(empty_rows, columns=pk + common).to_csv(run_dir / "empty_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)
+        pd.DataFrame(skipped_rows, columns=pk + common).to_csv(run_dir / "skipped_partitions.csv", index=False, quoting=csv.QUOTE_MINIMAL)

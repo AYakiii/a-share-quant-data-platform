@@ -111,3 +111,17 @@ def test_stock_like_spec_partition_keys_supported(tmp_path, monkeypatch):
     out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "stock", retries=0).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
     inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
     assert set(["symbol", "start_date", "end_date"]).issubset(inv.columns)
+
+
+def test_stock_inventory_symbol_preserves_leading_zero_after_read_csv(tmp_path, monkeypatch):
+    def _plan(**kwargs):
+        return [FetchPartition(values={"symbol": "000001", "start_date": "2026-01-01", "end_date": "2026-01-10"})]
+
+    def _path(raw_root, p):
+        return raw_root / "stock_zh_a_daily" / "v1" / f"symbol={p.values['symbol']}" / f"start_date={p.values['start_date']}_end_date={p.values['end_date']}" / "data.parquet"
+
+    spec = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", _plan, _fetch_ok, _path, {})
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 2, "n_columns": 1, "elapsed_seconds": 0.01})
+    out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "stock_zero", retries=0).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
+    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
+    assert inv.loc[0, "symbol"] == "'000001"
