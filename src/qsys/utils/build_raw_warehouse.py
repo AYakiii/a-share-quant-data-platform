@@ -46,6 +46,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--request-jitter", type=float, default=0.0)
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--heartbeat-sec", type=float, default=30)
+    p.add_argument("--partition-batch-size", type=int, default=0)
+    p.add_argument("--batch-timeout-sec", type=float, default=0)
     p.add_argument("--include-disabled", action="store_true")
     p.add_argument("--include-calendar-days", action="store_true")
     p.add_argument("--show-progress", action="store_true")
@@ -71,6 +73,8 @@ def main() -> None:
         request_jitter=a.request_jitter,
         max_workers=max(1, a.max_workers),
         heartbeat_sec=max(0.1, a.heartbeat_sec),
+        partition_batch_size=max(0, a.partition_batch_size),
+        batch_timeout_sec=max(0.0, a.batch_timeout_sec),
         show_progress=a.show_progress,
         progress_every=a.progress_every,
         include_disabled=a.include_disabled,

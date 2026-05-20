@@ -7,7 +7,7 @@ import random
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,14 +50,18 @@ def _fetch_write_worker(queue: mp.Queue[Any], fetch_fn: Callable[[FetchPartition
     started = time.perf_counter()
     try:
         data = fetch_fn(partition)
+        extra = {}
+        if isinstance(data, dict) and "data" in data:
+            extra = {k: v for k, v in data.items() if k != "data"}
+            data = data["data"]
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
         if df.empty:
-            queue.put({"status": "empty", "rows": 0, "n_columns": len(df.columns), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
+            queue.put({"status": "empty", "rows": 0, "n_columns": len(df.columns), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started, **extra})
             return
         fp = Path(raw_fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(fp, index=False)
-        queue.put({"status": "fetched", "rows": int(len(df)), "n_columns": int(len(df.columns)), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
+        queue.put({"status": "fetched", "rows": int(len(df)), "n_columns": int(len(df.columns)), "columns": list(map(str, df.columns)), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started, **extra})
     except Exception as exc:  # pragma: no cover
         queue.put({"status": "failed", "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": _tail_traceback(exc), "path": raw_fp, "elapsed_seconds": time.perf_counter() - started})
 
@@ -93,14 +97,16 @@ class RawWarehouseRunner:
     progress_every: int = 20
     include_disabled: bool = False
     heartbeat_sec: float = 30.0
+    partition_batch_size: int = 0
+    batch_timeout_sec: float = 0.0
 
-    def _print_progress_heartbeat(self, *, started: float, total: int, completed: int, running: int, counts: dict[str, int]) -> None:
+    def _print_progress_heartbeat(self, *, started: float, total: int, completed: int, running: int, queued: int, counts: dict[str, int]) -> None:
         elapsed = max(0.0, time.perf_counter() - started)
         remaining = max(0, total - completed)
         rate = (completed / elapsed) if elapsed > 0 else 0.0
         eta = (remaining / rate) if rate > 0 else None
         msg = (
-            f"[heartbeat] elapsed={elapsed:.1f}s total={total} completed={completed} running={running} remaining={remaining} "
+            f"[heartbeat] elapsed={elapsed:.1f}s total={total} completed={completed} running={running} queued={queued} remaining={remaining} "
             f"fetched={counts.get('fetched',0)} cache_hit={counts.get('cache_hit',0)} failed={counts.get('failed',0)} "
             f"empty={counts.get('empty',0)} timed_out={counts.get('timed_out',0)} skipped={counts.get('skipped',0)} "
             f"rate={rate:.2f}/s eta={(f'{eta:.1f}s' if eta is not None else 'n/a')}"
@@ -112,8 +118,9 @@ class RawWarehouseRunner:
             with lock:
                 completed = int(shared.get('completed', 0))
                 running = int(shared.get('running', 0))
+                queued = int(shared.get('queued', 0))
                 counts = dict(shared.get('counts', {}))
-            self._print_progress_heartbeat(started=started, total=total, completed=completed, running=running, counts=counts)
+            self._print_progress_heartbeat(started=started, total=total, completed=completed, running=running, queued=queued, counts=counts)
 
     def run(self, **fetch_plan_kwargs: Any) -> dict[str, Path]:
         started = time.perf_counter()
@@ -126,7 +133,9 @@ class RawWarehouseRunner:
         step = max(1, self.progress_every)
 
         workers = max(1, self.max_workers)
-        shared: dict[str, Any] = {"completed": 0, "running": 0, "counts": {}}
+        batch_size = self.partition_batch_size if self.partition_batch_size and self.partition_batch_size > 0 else len(partitions)
+        batches = [partitions[i:i + batch_size] for i in range(0, len(partitions), batch_size)]
+        shared: dict[str, Any] = {"completed": 0, "running": 0, "counts": {}, "queued": len(partitions)}
         lock = threading.Lock()
         stop_evt = threading.Event()
         hb_thread: threading.Thread | None = None
@@ -135,41 +144,53 @@ class RawWarehouseRunner:
             hb_thread.start()
 
         try:
-            if workers == 1:
-                for i, p in enumerate(partitions, 1):
-                    rec, part_events = self._process_partition(p)
-                    inventory.append(rec)
-                    events.extend(part_events)
-                    with lock:
-                        shared["completed"] = i
-                        counts = dict(shared.get("counts", {}))
-                        counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
-                        shared["counts"] = counts
-                    if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
-                        print(f"[{i}/{len(partitions)}] { {k: p.values[k] for k in self.source_spec.partition_keys} } -> {rec['status']}", flush=True)
-            else:
-                with ThreadPoolExecutor(max_workers=workers) as ex:
-                    futs = [ex.submit(self._process_partition, p) for p in partitions]
-                    with lock:
-                        shared["running"] = len(futs)
-                    for i, fut in enumerate(as_completed(futs), 1):
-                        rec, part_events = fut.result()
+            completed_total = 0
+            for batch_id, batch in enumerate(batches, 1):
+                batch_start = time.perf_counter()
+                if workers == 1:
+                    for p in batch:
+                        rec, part_events = self._process_partition(p)
+                        rec.update({"batch_id": batch_id, "batch_start_index": completed_total, "batch_end_index": completed_total + len(batch) - 1, "batch_elapsed_seconds": time.perf_counter() - batch_start})
                         inventory.append(rec)
                         events.extend(part_events)
+                        completed_total += 1
                         with lock:
-                            shared["completed"] = i
-                            shared["running"] = max(0, int(shared.get("running", 0)) - 1)
-                            counts = dict(shared.get("counts", {}))
-                            counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1
-                            shared["counts"] = counts
-                        if self.show_progress and (i == 1 or i == len(partitions) or i % step == 0):
-                            base = {k: rec[k] for k in self.source_spec.partition_keys}
-                            print(f"[{i}/{len(partitions)}] {base} -> {rec['status']}", flush=True)
+                            shared["completed"] = completed_total
+                            shared["queued"] = max(0, len(partitions) - completed_total - int(shared.get("running",0)))
+                            counts = dict(shared.get("counts", {})); counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1; shared["counts"] = counts
+                else:
+                    with ThreadPoolExecutor(max_workers=workers) as ex:
+                        pending = {ex.submit(self._process_partition, p) for p in batch}
+                        deadline = (time.perf_counter() + self.batch_timeout_sec) if self.batch_timeout_sec and self.batch_timeout_sec > 0 else None
+                        while pending:
+                            timeout = 0.1
+                            if deadline is not None:
+                                timeout = max(0.0, min(0.1, deadline - time.perf_counter()))
+                            done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                            with lock:
+                                shared["running"] = min(workers, len(pending) + len(done))
+                                shared["queued"] = max(0, len(partitions) - completed_total - shared["running"])
+                            if deadline is not None and time.perf_counter() >= deadline:
+                                for fut in list(pending):
+                                    fut.cancel()
+                                for _ in pending:
+                                    completed_total += 1
+                                    rec = {"status": "timed_out", "path": "", "cache_exists_before": False, "attempts": 1, "started_at": _utc_now_iso(), "finished_at": _utc_now_iso(), "elapsed_seconds": 0.0, "rows": None, "n_columns": None, "error_type": "BatchTimeout", "error_message": "batch timeout exceeded", "traceback_tail": "", "timeout_seconds": self.batch_timeout_sec, "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "batch_id": batch_id, "batch_start_index": completed_total - 1, "batch_end_index": completed_total - 1, "batch_elapsed_seconds": time.perf_counter() - batch_start}
+                                    inventory.append(rec)
+                                break
+                            for fut in done:
+                                rec, part_events = fut.result()
+                                rec.update({"batch_id": batch_id, "batch_start_index": completed_total, "batch_end_index": completed_total + len(batch) - 1, "batch_elapsed_seconds": time.perf_counter() - batch_start})
+                                inventory.append(rec); events.extend(part_events); completed_total += 1
+                                with lock:
+                                    counts = dict(shared.get("counts", {})); counts[rec["status"]] = int(counts.get(rec["status"], 0)) + 1; shared["counts"] = counts
+                                    shared["running"] = min(workers, len(pending))
+                                    shared["completed"] = completed_total
+                                    shared["queued"] = max(0, len(partitions) - completed_total - shared["running"])
         finally:
             stop_evt.set()
             if hb_thread is not None:
                 hb_thread.join(timeout=2)
-
         pk = list(self.source_spec.partition_keys)
         inventory_sorted = sorted(inventory, key=lambda r: tuple(str(r.get(k, "")) for k in pk))
         failed = [r for r in inventory_sorted if r["status"] == "failed"]
@@ -223,6 +244,8 @@ class RawWarehouseRunner:
             "request_sleep": self.request_sleep,
             "request_jitter": self.request_jitter,
             "max_workers": workers,
+            "partition_batch_size": self.partition_batch_size,
+            "batch_timeout_sec": self.batch_timeout_sec,
             "overwrite_cache": self.overwrite_cache,
             "include_disabled": self.include_disabled,
             "acquisition_status": self.source_spec.acquisition_status,
@@ -300,6 +323,7 @@ class RawWarehouseRunner:
         for attempt in range(1, max_attempts + 1):
             t0 = time.perf_counter()
             started_at = _utc_now_iso()
+            meta: dict[str, Any] = {}
             try:
                 if self.request_sleep > 0 or self.request_jitter > 0:
                     time.sleep(self.request_sleep + (random.uniform(0.0, self.request_jitter) if self.request_jitter > 0 else 0.0))
@@ -307,7 +331,7 @@ class RawWarehouseRunner:
                 rec = {**p.values, "status": meta.get("status", "failed"), "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt,
                        "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": meta.get("elapsed_seconds", time.perf_counter() - t0), "rows": meta.get("rows"), "n_columns": meta.get("n_columns"),
                        "error_type": meta.get("error_type", ""), "error_message": meta.get("error_message", ""), "traceback_tail": meta.get("traceback_tail", ""), "timeout_seconds": None,
-                       "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
+                       "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "requested_api_name": meta.get("requested_api_name", ""), "actual_api_name": meta.get("actual_api_name", ""), "fallback_from": meta.get("fallback_from", ""), "primary_error": meta.get("primary_error", ""), "fallback_error": meta.get("fallback_error", ""), "original_symbol": meta.get("original_symbol", ""), "akshare_symbol": meta.get("akshare_symbol", ""), "rows_before_filter": meta.get("rows_before_filter"), "rows_after_filter": meta.get("rows_after_filter"), "min_date_before": meta.get("min_date_before"), "max_date_before": meta.get("max_date_before"), "min_date_after": meta.get("min_date_after"), "max_date_after": meta.get("max_date_after")}
                 if rec["status"] in {"fetched", "empty"}:
                     return rec
                 if attempt >= max_attempts:
@@ -317,12 +341,12 @@ class RawWarehouseRunner:
                 if attempt >= max_attempts:
                     return {**p.values, "status": "timed_out", "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt, "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": time.perf_counter() - t0,
                             "rows": None, "n_columns": None, "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": "", "timeout_seconds": self.request_timeout,
-                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
+                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "requested_api_name": meta.get("requested_api_name", ""), "actual_api_name": meta.get("actual_api_name", ""), "fallback_from": meta.get("fallback_from", ""), "primary_error": meta.get("primary_error", ""), "fallback_error": meta.get("fallback_error", ""), "original_symbol": meta.get("original_symbol", ""), "akshare_symbol": meta.get("akshare_symbol", ""), "rows_before_filter": meta.get("rows_before_filter"), "rows_after_filter": meta.get("rows_after_filter"), "min_date_before": meta.get("min_date_before"), "max_date_before": meta.get("max_date_before"), "min_date_after": meta.get("min_date_after"), "max_date_after": meta.get("max_date_after")}
             except Exception as exc:
                 if attempt >= max_attempts:
                     return {**p.values, "status": "failed", "path": str(raw_fp), "cache_exists_before": cache_exists_before, "attempts": attempt, "started_at": started_at, "finished_at": _utc_now_iso(), "elapsed_seconds": time.perf_counter() - t0,
                             "rows": None, "n_columns": None, "error_type": type(exc).__name__, "error_message": str(exc), "traceback_tail": _tail_traceback(exc), "timeout_seconds": None,
-                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or ""}
+                            "acquisition_status": self.source_spec.acquisition_status, "manual_review_required": self.source_spec.manual_review_required, "disabled_reason": self.source_spec.disabled_reason or "", "requested_api_name": meta.get("requested_api_name", ""), "actual_api_name": meta.get("actual_api_name", ""), "fallback_from": meta.get("fallback_from", ""), "primary_error": meta.get("primary_error", ""), "fallback_error": meta.get("fallback_error", ""), "original_symbol": meta.get("original_symbol", ""), "akshare_symbol": meta.get("akshare_symbol", ""), "rows_before_filter": meta.get("rows_before_filter"), "rows_after_filter": meta.get("rows_after_filter"), "min_date_before": meta.get("min_date_before"), "max_date_before": meta.get("max_date_before"), "min_date_after": meta.get("min_date_after"), "max_date_after": meta.get("max_date_after")}
             if self.retry_wait > 0:
                 time.sleep(self.retry_wait)
         raise RuntimeError("unreachable")
