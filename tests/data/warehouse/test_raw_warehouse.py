@@ -157,6 +157,7 @@ def test_heartbeat_not_printed_when_show_progress_false(tmp_path, monkeypatch, c
     plan = lambda **kwargs: [
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-02"}),
         FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-03"}),
+        FetchPartition(values={"exchange": "SSE", "trade_date": "2025-01-06"}),
     ]
     monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
     RawWarehouseRunner(_make_spec(_fetch_ok, plan=plan), tmp_path / "raw", tmp_path / "out", "hb_off", max_workers=2, heartbeat_sec=0.05, show_progress=False).run(
