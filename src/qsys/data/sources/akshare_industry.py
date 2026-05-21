@@ -2,9 +2,122 @@
 
 from __future__ import annotations
 
+import os
+import time
+from io import BytesIO
+from pathlib import Path
+
 import pandas as pd
+import requests
 
 from qsys.data.sources.base import SourceFetchResult, build_source_metadata
+
+
+SW_INDUSTRY_RESCUE_URL = "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
+
+
+
+
+_RETRYABLE_HTTP_CODES = {429, 508, 500, 502, 503, 504}
+_SW_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Referer": "https://www.swsresearch.com/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+
+
+def _download_with_retry(source_url: str, timeout: float, verify: bool, retries: int = 3, backoff_sec: float = 1.0) -> requests.Response:
+    last_exc: Exception | None = None
+    for idx in range(retries):
+        try:
+            resp = requests.get(source_url, timeout=timeout, verify=verify, headers=_SW_HEADERS)
+            status_code = getattr(resp, "status_code", 200)
+            if status_code in _RETRYABLE_HTTP_CODES:
+                raise requests.exceptions.HTTPError(f"{status_code} retryable", response=resp)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in _RETRYABLE_HTTP_CODES and idx < retries - 1:
+                time.sleep(backoff_sec * (2 ** idx))
+                last_exc = exc
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if idx < retries - 1:
+                time.sleep(backoff_sec * (2 ** idx))
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unreachable")
+def _normalize_sw_industry_history(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.rename(
+        columns={
+            "股票代码": "stock_code",
+            "计入日期": "effective_date",
+            "行业代码": "industry_code",
+            "更新日期": "source_update_time",
+        }
+    ).copy()
+    out["stock_code"] = out["stock_code"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(6)
+    out["effective_date"] = pd.to_datetime(out["effective_date"], errors="coerce")
+    out["source_update_time"] = pd.to_datetime(out["source_update_time"], errors="coerce")
+    out["industry_code"] = out["industry_code"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(6)
+    out["industry_l1_code"] = out["industry_code"].str[:2]
+    out["industry_l2_code"] = out["industry_code"].str[:4]
+    out["industry_l3_code"] = out["industry_code"].str[:6]
+    return out
+
+
+def fetch_sw_industry_membership_rescue(source_url: str = SW_INDUSTRY_RESCUE_URL, timeout: float = 30.0, local_file: str | Path | None = None) -> SourceFetchResult:
+    ssl_verify = True
+    manual_review_required = False
+    rescue_reason = ""
+    source_mode = "remote_download"
+    local_file_path = ""
+    local_candidate = Path(local_file) if local_file else (Path(os.environ["QSYS_SW_INDUSTRY_MEMBERSHIP_XLS"]) if os.environ.get("QSYS_SW_INDUSTRY_MEMBERSHIP_XLS") else None)
+    try:
+        resp = _download_with_retry(source_url=source_url, timeout=timeout, verify=True)
+    except requests.exceptions.SSLError:
+        resp = _download_with_retry(source_url=source_url, timeout=timeout, verify=False)
+        raw = pd.read_excel(BytesIO(resp.content))
+        ssl_verify = False
+        manual_review_required = True
+        rescue_reason = "SSL certificate verification failed in Colab"
+    except Exception:
+        if local_candidate is None:
+            raise
+        raw = pd.read_excel(local_candidate)
+        source_mode = "local_file_fallback"
+        local_file_path = str(local_candidate)
+        manual_review_required = True
+        rescue_reason = "Remote SW Excel download failed; local file fallback used"
+    else:
+        raw = pd.read_excel(BytesIO(resp.content))
+    normalized = _normalize_sw_industry_history(raw)
+    meta = build_source_metadata(
+        api_name="sw_industry_membership_rescue",
+        source_family="industry",
+        request_params={"source_url": source_url},
+        raw=normalized,
+        notes="Direct SW Excel rescue path; source_update_time is metadata-only and PIT risk is medium.",
+    )
+    meta.update(
+        {
+            "ssl_verify": ssl_verify,
+            "manual_review_required": manual_review_required,
+            "rescue_reason": rescue_reason,
+            "source_url": source_url,
+            "pit_risk": "medium",
+            "metadata_only_fields": ["source_update_time"],
+            "source_mode": source_mode,
+            "local_file_path": local_file_path,
+        }
+    )
+    return SourceFetchResult("sw_industry_membership_rescue", "industry", normalized, meta)
 
 
 def _to_df(raw: object) -> pd.DataFrame:

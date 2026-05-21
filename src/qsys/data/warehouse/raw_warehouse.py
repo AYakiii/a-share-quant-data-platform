@@ -33,8 +33,6 @@ def _utc_now_iso() -> str:
 
 
 def _serialize_partition_value(key: str, value: Any) -> Any:
-    if isinstance(value, str) and value.isdigit() and key in {"symbol", "code", "ts_code"}:
-        return f"'{value}"
     return value
 
 

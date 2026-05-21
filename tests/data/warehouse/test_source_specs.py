@@ -21,6 +21,8 @@ def test_list_source_specs_contains_margin_and_stock_daily() -> None:
     names = list_source_specs()
     assert "margin_detail" in names
     assert "stock_zh_a_daily" in names
+    assert "sw_industry_membership_rescue" in names
+    assert "tradability_mask_v0" in names
 
 
 def test_margin_detail_fetch_plan_stable_shape() -> None:
@@ -39,4 +41,9 @@ def test_stock_daily_plan_and_deterministic_path(tmp_path) -> None:
 
 
 def test_source_specs_exact_keys() -> None:
-    assert set(SOURCE_SPECS.keys()) == {"margin_detail", "stock_zh_a_daily"}
+    assert {"margin_detail", "stock_zh_a_daily", "sw_industry_membership_rescue", "tradability_mask_v0"}.issubset(set(SOURCE_SPECS.keys()))
+
+
+def test_stock_daily_symbol_normalization() -> None:
+    parts = list(STOCK_ZH_A_DAILY_SPEC.build_fetch_plan(symbols="'000001, 600519", start_date="2026-01-01", end_date="2026-01-10"))
+    assert [p.values["symbol"] for p in parts] == ["000001", "600519"]

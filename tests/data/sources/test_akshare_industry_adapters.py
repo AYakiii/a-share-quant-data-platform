@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import pandas as pd
 
@@ -95,3 +96,103 @@ def test_concept_summary_preserves_columns(monkeypatch) -> None:
     r = fetch_stock_board_concept_summary_ths()
     _assert_result(r, "stock_board_concept_summary_ths", "theme_event")
     assert {"日期", "概念名称", "驱动事件", "成分股数量"}.issubset(r.raw.columns)
+
+
+def test_sw_rescue_normalization_and_metadata(monkeypatch) -> None:
+    import qsys.data.sources.akshare_industry as mod
+
+    class _Resp:
+        content = b"dummy"
+
+        def raise_for_status(self):
+            return None
+
+    def _get(*args, **kwargs):
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    monkeypatch.setattr(mod.pd, "read_excel", lambda _content: pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [1234], "更新日期": ["2026-01-02"]}))
+    r = mod.fetch_sw_industry_membership_rescue()
+    assert r.raw.loc[0, "stock_code"] == "000001"
+    assert str(r.raw.loc[0, "effective_date"].date()) == "2026-01-01"
+    assert r.raw.loc[0, "industry_l1_code"] == "00"
+    assert r.raw.loc[0, "industry_l2_code"] == "0012"
+    assert r.raw.loc[0, "industry_l3_code"] == "001234"
+    assert "source_update_time" in r.metadata["metadata_only_fields"]
+
+
+def test_sw_rescue_ssl_fallback_local_only(monkeypatch) -> None:
+    import requests
+    import qsys.data.sources.akshare_industry as mod
+
+    calls = []
+
+    class _Resp:
+        content = b"dummy"
+
+        def raise_for_status(self):
+            return None
+
+    def _get(*args, **kwargs):
+        calls.append(kwargs.get("verify", None))
+        if kwargs.get("verify", True):
+            raise requests.exceptions.SSLError("ssl")
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    monkeypatch.setattr(mod.pd, "read_excel", lambda _content: pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [123456], "更新日期": ["2026-01-02"]}))
+    r = mod.fetch_sw_industry_membership_rescue()
+    assert calls[:3] == [True, True, True]
+    assert calls[-1] is False
+    assert r.metadata["ssl_verify"] is False
+    assert r.metadata["manual_review_required"] is True
+    assert r.metadata["rescue_reason"]
+    assert int(r.raw.duplicated(subset=["stock_code", "effective_date", "industry_code"]).sum()) == 0
+
+
+def test_sw_rescue_headers_and_http_retry(monkeypatch) -> None:
+    import requests
+    import qsys.data.sources.akshare_industry as mod
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+            self.content = b"dummy"
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.exceptions.HTTPError("bad", response=self)
+
+    seq = iter([_Resp(508), _Resp(200)])
+
+    def _get(url, **kwargs):
+        calls.append(kwargs)
+        return next(seq)
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(mod.pd, "read_excel", lambda _content: pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [123456], "更新日期": ["2026-01-02"]}))
+    r = mod.fetch_sw_industry_membership_rescue()
+    assert len(calls) == 2
+    assert calls[0]["headers"]["Referer"] == "https://www.swsresearch.com/"
+    assert "User-Agent" in calls[0]["headers"]
+    assert r.metadata["source_mode"] == "remote_download"
+
+
+def test_sw_rescue_local_file_fallback(monkeypatch, tmp_path) -> None:
+    import qsys.data.sources.akshare_industry as mod
+
+    xls = tmp_path / "sw.xls"
+    pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [123456], "更新日期": ["2026-01-02"]}).to_excel(xls, index=False)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("remote down")
+
+    monkeypatch.setattr(mod.requests, "get", _boom)
+    r = mod.fetch_sw_industry_membership_rescue(local_file=xls)
+    assert r.metadata["source_mode"] == "local_file_fallback"
+    assert r.metadata["manual_review_required"] is True
+    assert "fallback" in r.metadata["rescue_reason"].lower()
+    assert r.metadata["local_file_path"] == str(xls)

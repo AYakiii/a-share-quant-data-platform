@@ -6,9 +6,15 @@ from pathlib import Path
 from qsys.data.warehouse import RawWarehouseRunner, get_source_spec
 
 
+def _normalize_symbol(sym: str) -> str:
+    cleaned = sym.strip().lstrip("'")
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return digits.zfill(6) if digits else cleaned
+
+
 def _load_symbols_file(path: str) -> list[str]:
     rows = Path(path).read_text(encoding="utf-8").splitlines()
-    return [line.strip() for line in rows if line.strip() and not line.strip().startswith("#")]
+    return [_normalize_symbol(line) for line in rows if line.strip() and not line.strip().startswith("#")]
 
 
 def _merge_symbols(symbols_csv: str, symbols_file: str) -> list[str]:
@@ -16,13 +22,13 @@ def _merge_symbols(symbols_csv: str, symbols_file: str) -> list[str]:
     seen: set[str] = set()
     if symbols_csv:
         for sym in symbols_csv.split(","):
-            item = sym.strip()
+            item = _normalize_symbol(sym)
             if item and item not in seen:
                 seen.add(item)
                 out.append(item)
     if symbols_file:
         for item in _load_symbols_file(symbols_file):
-            if item not in seen:
+            if item and item not in seen:
                 seen.add(item)
                 out.append(item)
     return out
@@ -88,6 +94,8 @@ def main() -> None:
     if a.source == "stock_zh_a_daily":
         merged = _merge_symbols(a.symbols, a.symbols_file)
         kwargs["symbols"] = merged
+    if a.source == "tradability_mask_v0":
+        kwargs["raw_root"] = str(Path(a.raw_root))
     out = runner.run(**kwargs)
     print({k: str(v) for k, v in out.items()})
 

@@ -8,6 +8,8 @@ import pandas as pd
 
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
+from qsys.data.sources.akshare_industry import fetch_sw_industry_membership_rescue
+from qsys.data.sources.tradability import build_tradability_mask_v0_from_daily
 
 
 @dataclass(frozen=True)
@@ -49,9 +51,16 @@ def build_margin_detail_fetch_plan(*, start_date: str, end_date: str, include_ca
     return [FetchPartition(values={"exchange": ex, "trade_date": d.strftime("%Y-%m-%d")}) for ex in used for d in dates]
 
 
+
+
+def _normalize_symbol(symbol: str) -> str:
+    cleaned = symbol.strip().lstrip("'")
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return digits.zfill(6) if digits else cleaned
+
 def build_stock_zh_a_daily_fetch_plan(*, symbols: str | list[str], start_date: str, end_date: str, **_: Any) -> list[FetchPartition]:
     symbol_list = symbols.split(",") if isinstance(symbols, str) else symbols
-    cleaned = [s.strip() for s in symbol_list if s and s.strip()]
+    cleaned = [_normalize_symbol(s) for s in symbol_list if s and s.strip()]
     if not cleaned:
         raise ValueError("--symbols is required for stock_zh_a_daily")
     return [FetchPartition(values={"symbol": symbol, "start_date": start_date, "end_date": end_date}) for symbol in cleaned]
@@ -130,6 +139,35 @@ def _fetch_stock_zh_a_daily_partition(partition: FetchPartition) -> dict[str, An
     }
 
 
+
+
+def _fetch_sw_industry_membership_rescue_partition(_partition: FetchPartition) -> pd.DataFrame:
+    return fetch_sw_industry_membership_rescue().raw
+
+
+def _single_partition_plan(**_: Any) -> list[FetchPartition]:
+    return [FetchPartition(values={"dataset": "full"})]
+
+
+def _sw_industry_membership_rescue_path(raw_root: Path, _partition: FetchPartition) -> Path:
+    return raw_root / "sw_industry_membership_rescue" / "v1" / "dataset=full" / "data.parquet"
+
+
+def _fetch_tradability_mask_v0_partition(partition: FetchPartition) -> pd.DataFrame:
+    raw_root = Path(partition.values["raw_root"])
+    return build_tradability_mask_v0_from_daily(raw_root)
+
+
+def _tradability_mask_v0_plan(**kwargs: Any) -> list[FetchPartition]:
+    raw_root = kwargs.get("raw_root")
+    if not raw_root:
+        raise ValueError("raw_root is required for tradability_mask_v0")
+    return [FetchPartition(values={"dataset": "full", "raw_root": str(raw_root)})]
+
+
+def _tradability_mask_v0_path(raw_root: Path, _partition: FetchPartition) -> Path:
+    return raw_root / "tradability_mask_v0" / "v1" / "dataset=full" / "data.parquet"
+
 def _margin_partition_path(raw_root: Path, partition: FetchPartition) -> Path:
     return raw_root / "margin_detail" / "v1" / f"exchange={partition.values['exchange']}" / f"trade_date={partition.values['trade_date']}" / "data.parquet"
 
@@ -142,7 +180,11 @@ MARGIN_DETAIL_SPEC = SourceSpec("margin_detail", "v1", ("exchange", "trade_date"
 
 STOCK_ZH_A_DAILY_SPEC = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", build_stock_zh_a_daily_fetch_plan, _fetch_stock_zh_a_daily_partition, _stock_zh_a_daily_partition_path, {"symbol": "category", "date": "date"}, False, "akshare", "market_price", "P0", "enabled", False, None, "warn", "asset-date daily bars")
 
-SOURCE_SPECS: dict[str, SourceSpec] = {MARGIN_DETAIL_SPEC.source_name: MARGIN_DETAIL_SPEC, STOCK_ZH_A_DAILY_SPEC.source_name: STOCK_ZH_A_DAILY_SPEC}
+SW_INDUSTRY_MEMBERSHIP_RESCUE_SPEC = SourceSpec("sw_industry_membership_rescue", "v1", ("dataset",), "snapshot", _single_partition_plan, _fetch_sw_industry_membership_rescue_partition, _sw_industry_membership_rescue_path, {"stock_code": "category", "effective_date": "date", "industry_code": "category"}, False, "swsresearch", "industry", "P0", "enabled", True, None, "fail", "stock-effective_date-industry membership")
+
+TRADABILITY_MASK_V0_SPEC = SourceSpec("tradability_mask_v0", "v1", ("dataset", "raw_root"), "derived_snapshot", _tradability_mask_v0_plan, _fetch_tradability_mask_v0_partition, _tradability_mask_v0_path, {"trade_date": "date", "stock_code": "category"}, False, "derived", "trading_event", "P0", "enabled", True, None, "fail", "asset-date tradability proxy")
+
+SOURCE_SPECS: dict[str, SourceSpec] = {MARGIN_DETAIL_SPEC.source_name: MARGIN_DETAIL_SPEC, STOCK_ZH_A_DAILY_SPEC.source_name: STOCK_ZH_A_DAILY_SPEC, SW_INDUSTRY_MEMBERSHIP_RESCUE_SPEC.source_name: SW_INDUSTRY_MEMBERSHIP_RESCUE_SPEC, TRADABILITY_MASK_V0_SPEC.source_name: TRADABILITY_MASK_V0_SPEC}
 
 def get_source_spec(source_name: str) -> SourceSpec:
     try:
