@@ -88,6 +88,8 @@ def main() -> None:
     if a.source == "stock_zh_a_daily":
         merged = _merge_symbols(a.symbols, a.symbols_file)
         kwargs["symbols"] = merged
+    if a.source == "tradability_mask_v0":
+        kwargs["raw_root"] = str(Path(a.raw_root))
     out = runner.run(**kwargs)
     print({k: str(v) for k, v in out.items()})
 

@@ -95,3 +95,54 @@ def test_concept_summary_preserves_columns(monkeypatch) -> None:
     r = fetch_stock_board_concept_summary_ths()
     _assert_result(r, "stock_board_concept_summary_ths", "theme_event")
     assert {"日期", "概念名称", "驱动事件", "成分股数量"}.issubset(r.raw.columns)
+
+
+def test_sw_rescue_normalization_and_metadata(monkeypatch) -> None:
+    import qsys.data.sources.akshare_industry as mod
+
+    class _Resp:
+        content = b"dummy"
+
+        def raise_for_status(self):
+            return None
+
+    def _get(*args, **kwargs):
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    monkeypatch.setattr(mod.pd, "read_excel", lambda _content: pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [1234], "更新日期": ["2026-01-02"]}))
+    r = mod.fetch_sw_industry_membership_rescue()
+    assert r.raw.loc[0, "stock_code"] == "000001"
+    assert str(r.raw.loc[0, "effective_date"].date()) == "2026-01-01"
+    assert r.raw.loc[0, "industry_l1_code"] == "00"
+    assert r.raw.loc[0, "industry_l2_code"] == "0012"
+    assert r.raw.loc[0, "industry_l3_code"] == "001234"
+    assert "source_update_time" in r.metadata["metadata_only_fields"]
+
+
+def test_sw_rescue_ssl_fallback_local_only(monkeypatch) -> None:
+    import requests
+    import qsys.data.sources.akshare_industry as mod
+
+    calls = []
+
+    class _Resp:
+        content = b"dummy"
+
+        def raise_for_status(self):
+            return None
+
+    def _get(*args, **kwargs):
+        calls.append(kwargs.get("verify", None))
+        if kwargs.get("verify", True):
+            raise requests.exceptions.SSLError("ssl")
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", _get)
+    monkeypatch.setattr(mod.pd, "read_excel", lambda _content: pd.DataFrame({"股票代码": [1], "计入日期": ["2026-01-01"], "行业代码": [123456], "更新日期": ["2026-01-02"]}))
+    r = mod.fetch_sw_industry_membership_rescue()
+    assert calls == [True, False]
+    assert r.metadata["ssl_verify"] is False
+    assert r.metadata["manual_review_required"] is True
+    assert r.metadata["rescue_reason"]
+    assert int(r.raw.duplicated(subset=["stock_code", "effective_date", "industry_code"]).sum()) == 0

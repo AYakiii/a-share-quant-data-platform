@@ -3,8 +3,67 @@
 from __future__ import annotations
 
 import pandas as pd
+import requests
+from io import BytesIO
 
 from qsys.data.sources.base import SourceFetchResult, build_source_metadata
+
+
+SW_INDUSTRY_RESCUE_URL = "https://www.swsresearch.com/swindex/pdf/SwClass2021/StockClassifyUse_stock.xls"
+
+
+def _normalize_sw_industry_history(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.rename(
+        columns={
+            "股票代码": "stock_code",
+            "计入日期": "effective_date",
+            "行业代码": "industry_code",
+            "更新日期": "source_update_time",
+        }
+    ).copy()
+    out["stock_code"] = out["stock_code"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(6)
+    out["effective_date"] = pd.to_datetime(out["effective_date"], errors="coerce")
+    out["source_update_time"] = pd.to_datetime(out["source_update_time"], errors="coerce")
+    out["industry_code"] = out["industry_code"].astype(str).str.extract(r"(\d+)", expand=False).fillna("").str.zfill(6)
+    out["industry_l1_code"] = out["industry_code"].str[:2]
+    out["industry_l2_code"] = out["industry_code"].str[:4]
+    out["industry_l3_code"] = out["industry_code"].str[:6]
+    return out
+
+
+def fetch_sw_industry_membership_rescue(source_url: str = SW_INDUSTRY_RESCUE_URL, timeout: float = 30.0) -> SourceFetchResult:
+    ssl_verify = True
+    manual_review_required = False
+    rescue_reason = ""
+    try:
+        resp = requests.get(source_url, timeout=timeout, verify=True)
+        resp.raise_for_status()
+    except requests.exceptions.SSLError:
+        resp = requests.get(source_url, timeout=timeout, verify=False)
+        resp.raise_for_status()
+        ssl_verify = False
+        manual_review_required = True
+        rescue_reason = "SSL certificate verification failed in Colab"
+    raw = pd.read_excel(BytesIO(resp.content))
+    normalized = _normalize_sw_industry_history(raw)
+    meta = build_source_metadata(
+        api_name="sw_industry_membership_rescue",
+        source_family="industry",
+        request_params={"source_url": source_url},
+        raw=normalized,
+        notes="Direct SW Excel rescue path; source_update_time is metadata-only and PIT risk is medium.",
+    )
+    meta.update(
+        {
+            "ssl_verify": ssl_verify,
+            "manual_review_required": manual_review_required,
+            "rescue_reason": rescue_reason,
+            "source_url": source_url,
+            "pit_risk": "medium",
+            "metadata_only_fields": ["source_update_time"],
+        }
+    )
+    return SourceFetchResult("sw_industry_membership_rescue", "industry", normalized, meta)
 
 
 def _to_df(raw: object) -> pd.DataFrame:
