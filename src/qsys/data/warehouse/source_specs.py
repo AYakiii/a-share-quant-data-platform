@@ -51,9 +51,16 @@ def build_margin_detail_fetch_plan(*, start_date: str, end_date: str, include_ca
     return [FetchPartition(values={"exchange": ex, "trade_date": d.strftime("%Y-%m-%d")}) for ex in used for d in dates]
 
 
+
+
+def _normalize_symbol(symbol: str) -> str:
+    cleaned = symbol.strip().lstrip("'")
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    return digits.zfill(6) if digits else cleaned
+
 def build_stock_zh_a_daily_fetch_plan(*, symbols: str | list[str], start_date: str, end_date: str, **_: Any) -> list[FetchPartition]:
     symbol_list = symbols.split(",") if isinstance(symbols, str) else symbols
-    cleaned = [s.strip() for s in symbol_list if s and s.strip()]
+    cleaned = [_normalize_symbol(s) for s in symbol_list if s and s.strip()]
     if not cleaned:
         raise ValueError("--symbols is required for stock_zh_a_daily")
     return [FetchPartition(values={"symbol": symbol, "start_date": start_date, "end_date": end_date}) for symbol in cleaned]

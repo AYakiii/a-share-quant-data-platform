@@ -150,8 +150,8 @@ def test_stock_inventory_symbol_preserves_leading_zero_after_read_csv(tmp_path, 
     spec = SourceSpec("stock_zh_a_daily", "v1", ("symbol", "start_date", "end_date"), "symbol_date_range", _plan, _fetch_ok, _path, {})
     monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 2, "n_columns": 1, "elapsed_seconds": 0.01})
     out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "stock_zero", retries=0).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
-    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv")
-    assert inv.loc[0, "symbol"] == "'000001"
+    inv = pd.read_csv(out["run_dir"] / "cache_inventory.csv", dtype={"symbol": str})
+    assert inv.loc[0, "symbol"] == "000001"
 
 
 def test_merge_symbols_file_and_cli_deduplicate_and_keep_order(tmp_path):
@@ -251,7 +251,14 @@ def test_batch_timeout_rows_preserve_partition_keys(tmp_path, monkeypatch):
         import time; time.sleep(0.2); return {"status":"fetched","rows":1,"n_columns":1,"elapsed_seconds":0.2}
     monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", _slow)
     out = RawWarehouseRunner(spec, tmp_path/"raw", tmp_path/"out", "bt_keys", max_workers=2, partition_batch_size=1, batch_timeout_sec=0.05).run(start_date="2026-01-01", end_date="2026-01-10", symbols="000001")
-    inv = pd.read_csv(out["run_dir"]/"cache_inventory.csv")
+    inv = pd.read_csv(out["run_dir"]/"cache_inventory.csv", dtype={"symbol": str})
     row = inv.iloc[0]
-    assert str(row["symbol"]).endswith("000001")
+    assert row["symbol"] == "000001"
     assert row["start_date"] == "2026-01-01" and row["end_date"] == "2026-01-10"
+
+
+def test_merge_symbols_normalize_apostrophe(tmp_path):
+    fp = tmp_path / "symbols.txt"
+    fp.write_text("'000001\n600519\n", encoding="utf-8")
+    out = _merge_symbols("'000001, 600519", str(fp))
+    assert out == ["000001", "600519"]
