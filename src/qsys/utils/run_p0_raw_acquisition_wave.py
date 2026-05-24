@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import akshare as ak
 import pandas as pd
 
 from qsys.data.factor_lake.raw_ingest import run_raw_ingest_official
@@ -26,7 +26,9 @@ P0_GROUPS: dict[str, dict[str, Any]] = {
         "api_names": ["sw_index_first_info", "sw_index_second_info", "sw_index_third_info", "index_component_sw", "index_hist_sw"],
     },
     "rescue_sources": {
-        "source_specs": ["sw_industry_membership_rescue", "tradability_mask_v0"],
+        # NOTE: tradability_mask_v0 is intentionally excluded from the default P0 raw wave.
+        # It is a derived dataset built from stock_zh_a_daily after daily raw data is available.
+        "source_specs": ["sw_industry_membership_rescue"],
     },
 }
 
@@ -39,7 +41,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--request-sleep", type=float, default=0.0)
+    p.add_argument("--task-timeout-sec", type=float, default=None)
+    p.add_argument("--task-retry-attempts", type=int, default=0)
+    p.add_argument("--task-retry-sleep-sec", type=float, default=0.0)
+    p.add_argument("--task-retry-backoff", type=float, default=1.0)
+    p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
+    p.add_argument("--symbols", default="")
+    p.add_argument("--symbols-file", default="")
+    p.add_argument("--index-symbols", default="")
+    p.add_argument("--trade-dates", default="")
+    p.add_argument("--report-dates", default="")
+    p.add_argument("--industry-names", default="")
+    p.add_argument("--concept-names", default="")
+    p.add_argument("--universe-root", default="config/factor_sources/acquisition_universe")
+    p.add_argument("--include-disabled", action="store_true")
+    p.add_argument("--resume", action="store_true")
     return p.parse_args(argv)
+
+
+def _split_csv(v: str) -> list[str]:
+    return [x.strip() for x in str(v or "").split(",") if x.strip()]
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _load_symbols_file(path_text: str) -> list[str]:
+    if not path_text:
+        return []
+    rows = Path(path_text).read_text(encoding="utf-8").splitlines()
+    items = [line.strip() for line in rows if line.strip() and not line.strip().startswith("#")]
+    return _dedupe_keep_order(items)
 
 
 def _validate_local_output_root(output_root: str) -> None:
@@ -51,6 +92,45 @@ def _validate_local_output_root(output_root: str) -> None:
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str) and not value.strip():
+            return default
+        if pd.isna(value):
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str) and not value.strip():
+            return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.lower() in {"nan", "none", "null"}:
+            return ""
+        return cleaned
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
 
 
 def _run_rescue_source(
@@ -75,7 +155,25 @@ def _run_rescue_source(
     if source_name == "tradability_mask_v0":
         kwargs["raw_root"] = str(raw_root)
     out = runner.run(**kwargs)
-    inv = pd.read_csv(out["inventory_csv"]) if Path(out["inventory_csv"]).exists() else pd.DataFrame()
+    rescue_run_dir = Path(str(out.get("run_dir") or (run_dir / source_name)))
+    inventory_path = rescue_run_dir / "cache_inventory.csv"
+    if not inventory_path.exists():
+        return [{
+            "source_group": "rescue_sources",
+            "source_family": "trading_event" if source_name == "tradability_mask_v0" else "industry",
+            "source_spec": source_name,
+            "api_name": source_name,
+            "status": "failed",
+            "rows": 0,
+            "output_path": "",
+            "metadata_path": "",
+            "error_type": "MissingArtifactError",
+            "error_message": f"Expected rescue inventory not found: {inventory_path}",
+            "started_at": started.isoformat(),
+            "finished_at": _utc_now(),
+            "elapsed_sec": max((datetime.now(UTC) - started).total_seconds(), 0.0),
+        }]
+    inv = pd.read_csv(inventory_path)
     if inv.empty:
         return [{
             "source_group": "rescue_sources",
@@ -100,14 +198,14 @@ def _run_rescue_source(
             "source_spec": source_name,
             "api_name": str(rec.get("actual_api_name") or rec.get("requested_api_name") or source_name),
             "status": str(rec.get("status", "failed")),
-            "rows": int(rec.get("rows", 0) or 0),
+            "rows": _safe_int(rec.get("rows", 0), default=0),
             "output_path": str(rec.get("path", "")),
             "metadata_path": "",
             "error_type": str(rec.get("error_type", "") or ""),
             "error_message": str(rec.get("error_message", "") or ""),
             "started_at": str(rec.get("started_at", started.isoformat())),
             "finished_at": str(rec.get("finished_at", _utc_now())),
-            "elapsed_sec": float(rec.get("elapsed_seconds", 0.0) or 0.0),
+            "elapsed_sec": _safe_float(rec.get("elapsed_seconds", 0.0), default=0.0),
         })
     return rows
 
@@ -119,6 +217,13 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
     run_dir = output_root / f"p0_wave_{started.strftime('%Y%m%dT%H%M%SZ')}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    symbols = _dedupe_keep_order(_split_csv(args.symbols) + _load_symbols_file(args.symbols_file))
+    index_symbols = _dedupe_keep_order(_split_csv(args.index_symbols))
+    trade_dates = _dedupe_keep_order(_split_csv(args.trade_dates))
+    report_dates = _dedupe_keep_order(_split_csv(args.report_dates))
+    industry_names = _dedupe_keep_order(_split_csv(args.industry_names))
+    concept_names = _dedupe_keep_order(_split_csv(args.concept_names))
+
     all_rows: list[dict[str, Any]] = []
 
     for group_name in ("index_market_data", "sw_industry_data"):
@@ -126,14 +231,34 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         result = ingest_fn(
             output_root=str(run_dir),
             families=[group["source_family"]],
+            symbols=symbols,
+            index_symbols=index_symbols,
+            trade_dates=trade_dates,
+            report_dates=report_dates,
+            industry_names=industry_names,
+            concept_names=concept_names,
             start_date=args.start_date,
             end_date=args.end_date,
             max_workers=max(1, args.max_workers),
             continue_on_error=args.continue_on_error,
-            show_progress=args.show_progress,
             selected_api_names=group["api_names"],
+            universe_root=args.universe_root,
+            include_disabled=args.include_disabled,
+            resume=args.resume,
+            ak_module=ak,
+            request_sleep=args.request_sleep,
+            task_timeout_sec=args.task_timeout_sec,
+            task_retry_attempts=args.task_retry_attempts,
+            task_retry_sleep_sec=args.task_retry_sleep_sec,
+            task_retry_backoff=args.task_retry_backoff,
+            task_retry_jitter_sec=args.task_retry_jitter_sec,
         )
-        frame = pd.read_csv(result["catalog_csv"]) if Path(result["catalog_csv"]).exists() else pd.DataFrame(result.get("task_records", []))
+        catalog_path = str(result.get("catalog_csv") or result.get("catalog_path") or "")
+        if not catalog_path:
+            fallback_catalog = run_dir / "raw_ingest_catalog.csv"
+            if fallback_catalog.exists():
+                catalog_path = str(fallback_catalog)
+        frame = pd.read_csv(catalog_path) if catalog_path and Path(catalog_path).exists() else pd.DataFrame(result.get("task_records", []))
         for _, rec in frame.iterrows():
             all_rows.append({
                 "source_group": group_name,
@@ -162,6 +287,15 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
             catalog[col] = "" if col not in {"rows", "elapsed_sec"} else 0
 
     counts = Counter(catalog["status"].tolist()) if not catalog.empty else Counter()
+    failed_sources: list[str] = []
+    if not catalog.empty:
+        failed_catalog = catalog[catalog["status"] == "failed"]
+        for _, rec in failed_catalog.iterrows():
+            api_name = _safe_text(rec.get("api_name"))
+            source_spec = _safe_text(rec.get("source_spec"))
+            label = api_name or source_spec
+            if label:
+                failed_sources.append(label)
     summary = {
         "total_tasks": int(len(catalog)),
         "success_count": int(counts.get("success", 0)),
@@ -169,7 +303,7 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         "empty_count": int(counts.get("empty", 0)),
         "skipped_count": int(counts.get("skipped", 0)),
         "rows_by_source_group": {k: int(v) for k, v in catalog.groupby("source_group")["rows"].sum().to_dict().items()} if not catalog.empty else {},
-        "failed_sources": sorted(set((catalog[catalog["status"] == "failed"]["api_name"].fillna("") + catalog[catalog["status"] == "failed"]["source_spec"].fillna("")).tolist())),
+        "failed_sources": sorted(set(failed_sources)),
     }
 
     finished = datetime.now(UTC)
