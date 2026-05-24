@@ -306,3 +306,66 @@ def test_accepts_catalog_path_result_key(tmp_path: Path, monkeypatch: pytest.Mon
     assert Path(out["catalog_csv"]).exists()
     assert Path(out["summary_json"]).exists()
     assert Path(out["manifest_json"]).exists()
+
+
+def test_run_rescue_source_uses_run_dir_cache_inventory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    rescue_dir = tmp_path / "rescue_output"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+    inv_fp = rescue_dir / "cache_inventory.csv"
+    pd.DataFrame([{
+        "actual_api_name": "sw_industry_membership_rescue",
+        "status": "success",
+        "rows": 5,
+        "path": str(rescue_dir / "x.parquet"),
+        "elapsed_seconds": 1.2,
+    }]).to_csv(inv_fp, index=False)
+
+    class _FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"run_dir": str(rescue_dir)}
+
+    monkeypatch.setattr(mod, "RawWarehouseRunner", _FakeRunner)
+    monkeypatch.setattr(mod, "get_source_spec", lambda _x: object())
+    rows = mod._run_rescue_source(
+        "sw_industry_membership_rescue",
+        raw_root=tmp_path / "raw",
+        run_dir=tmp_path,
+        start_date="20260105",
+        end_date="20260109",
+        max_workers=2,
+        show_progress=False,
+    )
+    assert len(rows) == 1
+    assert rows[0]["status"] == "success"
+    assert rows[0]["rows"] == 5
+
+
+def test_run_rescue_source_missing_cache_inventory_is_visible_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    rescue_dir = tmp_path / "rescue_missing"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+
+    class _FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"run_dir": str(rescue_dir)}
+
+    monkeypatch.setattr(mod, "RawWarehouseRunner", _FakeRunner)
+    monkeypatch.setattr(mod, "get_source_spec", lambda _x: object())
+    rows = mod._run_rescue_source(
+        "tradability_mask_v0",
+        raw_root=tmp_path / "raw",
+        run_dir=tmp_path,
+        start_date="20260105",
+        end_date="20260109",
+        max_workers=2,
+        show_progress=True,
+    )
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["error_type"] == "MissingArtifactError"
+    assert "cache_inventory.csv" in rows[0]["error_message"]

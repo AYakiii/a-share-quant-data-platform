@@ -114,7 +114,25 @@ def _run_rescue_source(
     if source_name == "tradability_mask_v0":
         kwargs["raw_root"] = str(raw_root)
     out = runner.run(**kwargs)
-    inv = pd.read_csv(out["inventory_csv"]) if Path(out["inventory_csv"]).exists() else pd.DataFrame()
+    rescue_run_dir = Path(str(out.get("run_dir") or (run_dir / source_name)))
+    inventory_path = rescue_run_dir / "cache_inventory.csv"
+    if not inventory_path.exists():
+        return [{
+            "source_group": "rescue_sources",
+            "source_family": "trading_event" if source_name == "tradability_mask_v0" else "industry",
+            "source_spec": source_name,
+            "api_name": source_name,
+            "status": "failed",
+            "rows": 0,
+            "output_path": "",
+            "metadata_path": "",
+            "error_type": "MissingArtifactError",
+            "error_message": f"Expected rescue inventory not found: {inventory_path}",
+            "started_at": started.isoformat(),
+            "finished_at": _utc_now(),
+            "elapsed_sec": max((datetime.now(UTC) - started).total_seconds(), 0.0),
+        }]
+    inv = pd.read_csv(inventory_path)
     if inv.empty:
         return [{
             "source_group": "rescue_sources",
