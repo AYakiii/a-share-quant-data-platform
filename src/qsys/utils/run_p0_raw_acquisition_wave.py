@@ -39,6 +39,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--request-sleep", type=float, default=0.0)
+    p.add_argument("--task-timeout-sec", type=float, default=None)
+    p.add_argument("--task-retry-attempts", type=int, default=0)
+    p.add_argument("--task-retry-sleep-sec", type=float, default=0.0)
+    p.add_argument("--task-retry-backoff", type=float, default=1.0)
+    p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
     return p.parse_args(argv)
 
 
@@ -130,8 +136,13 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
             end_date=args.end_date,
             max_workers=max(1, args.max_workers),
             continue_on_error=args.continue_on_error,
-            show_progress=args.show_progress,
             selected_api_names=group["api_names"],
+            request_sleep=args.request_sleep,
+            task_timeout_sec=args.task_timeout_sec,
+            task_retry_attempts=args.task_retry_attempts,
+            task_retry_sleep_sec=args.task_retry_sleep_sec,
+            task_retry_backoff=args.task_retry_backoff,
+            task_retry_jitter_sec=args.task_retry_jitter_sec,
         )
         frame = pd.read_csv(result["catalog_csv"]) if Path(result["catalog_csv"]).exists() else pd.DataFrame(result.get("task_records", []))
         for _, rec in frame.iterrows():
