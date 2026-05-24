@@ -82,6 +82,12 @@ def test_parse_args_defaults_workers():
     assert args.max_workers == 2
 
 
+def test_default_rescue_sources_excludes_tradability():
+    source_specs = mod.P0_GROUPS["rescue_sources"]["source_specs"]
+    assert "sw_industry_membership_rescue" in source_specs
+    assert "tradability_mask_v0" not in source_specs
+
+
 @pytest.mark.parametrize("bad", ["/content/drive", "/content/gdrive", "/tmp/MyDrive/x", "/content/drive/MyDrive/a_share_quant_cache"])
 def test_reject_drive_paths(bad: str):
     with pytest.raises(ValueError):
@@ -132,6 +138,7 @@ def test_run_writes_manifest_catalog_summary(tmp_path: Path, monkeypatch: pytest
     needed = {"source_group", "source_family", "api_name", "source_spec", "status", "rows", "output_path", "metadata_path", "error_type", "error_message", "started_at", "finished_at", "elapsed_sec"}
     assert needed.issubset(set(catalog.columns))
     assert (catalog["status"] == "failed").any()
+    assert not (catalog["source_spec"] == "tradability_mask_v0").any()
 
     summary = json.loads(Path(out["summary_json"]).read_text(encoding="utf-8"))
     assert summary["total_tasks"] == len(catalog)

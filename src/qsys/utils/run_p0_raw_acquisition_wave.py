@@ -26,7 +26,9 @@ P0_GROUPS: dict[str, dict[str, Any]] = {
         "api_names": ["sw_index_first_info", "sw_index_second_info", "sw_index_third_info", "index_component_sw", "index_hist_sw"],
     },
     "rescue_sources": {
-        "source_specs": ["sw_industry_membership_rescue", "tradability_mask_v0"],
+        # NOTE: tradability_mask_v0 is intentionally excluded from the default P0 raw wave.
+        # It is a derived dataset built from stock_zh_a_daily after daily raw data is available.
+        "source_specs": ["sw_industry_membership_rescue"],
     },
 }
 
