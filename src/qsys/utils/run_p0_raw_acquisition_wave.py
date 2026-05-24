@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import akshare as ak
 import pandas as pd
 
 from qsys.data.factor_lake.raw_ingest import run_raw_ingest_official
@@ -39,7 +39,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--request-sleep", type=float, default=0.0)
+    p.add_argument("--task-timeout-sec", type=float, default=None)
+    p.add_argument("--task-retry-attempts", type=int, default=0)
+    p.add_argument("--task-retry-sleep-sec", type=float, default=0.0)
+    p.add_argument("--task-retry-backoff", type=float, default=1.0)
+    p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
+    p.add_argument("--symbols", default="")
+    p.add_argument("--symbols-file", default="")
+    p.add_argument("--index-symbols", default="")
+    p.add_argument("--trade-dates", default="")
+    p.add_argument("--report-dates", default="")
+    p.add_argument("--industry-names", default="")
+    p.add_argument("--concept-names", default="")
+    p.add_argument("--universe-root", default="config/factor_sources/acquisition_universe")
+    p.add_argument("--include-disabled", action="store_true")
+    p.add_argument("--resume", action="store_true")
     return p.parse_args(argv)
+
+
+def _split_csv(v: str) -> list[str]:
+    return [x.strip() for x in str(v or "").split(",") if x.strip()]
+
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _load_symbols_file(path_text: str) -> list[str]:
+    if not path_text:
+        return []
+    rows = Path(path_text).read_text(encoding="utf-8").splitlines()
+    items = [line.strip() for line in rows if line.strip() and not line.strip().startswith("#")]
+    return _dedupe_keep_order(items)
 
 
 def _validate_local_output_root(output_root: str) -> None:
@@ -119,6 +158,13 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
     run_dir = output_root / f"p0_wave_{started.strftime('%Y%m%dT%H%M%SZ')}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    symbols = _dedupe_keep_order(_split_csv(args.symbols) + _load_symbols_file(args.symbols_file))
+    index_symbols = _dedupe_keep_order(_split_csv(args.index_symbols))
+    trade_dates = _dedupe_keep_order(_split_csv(args.trade_dates))
+    report_dates = _dedupe_keep_order(_split_csv(args.report_dates))
+    industry_names = _dedupe_keep_order(_split_csv(args.industry_names))
+    concept_names = _dedupe_keep_order(_split_csv(args.concept_names))
+
     all_rows: list[dict[str, Any]] = []
 
     for group_name in ("index_market_data", "sw_industry_data"):
@@ -126,14 +172,34 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         result = ingest_fn(
             output_root=str(run_dir),
             families=[group["source_family"]],
+            symbols=symbols,
+            index_symbols=index_symbols,
+            trade_dates=trade_dates,
+            report_dates=report_dates,
+            industry_names=industry_names,
+            concept_names=concept_names,
             start_date=args.start_date,
             end_date=args.end_date,
             max_workers=max(1, args.max_workers),
             continue_on_error=args.continue_on_error,
-            show_progress=args.show_progress,
             selected_api_names=group["api_names"],
+            universe_root=args.universe_root,
+            include_disabled=args.include_disabled,
+            resume=args.resume,
+            ak_module=ak,
+            request_sleep=args.request_sleep,
+            task_timeout_sec=args.task_timeout_sec,
+            task_retry_attempts=args.task_retry_attempts,
+            task_retry_sleep_sec=args.task_retry_sleep_sec,
+            task_retry_backoff=args.task_retry_backoff,
+            task_retry_jitter_sec=args.task_retry_jitter_sec,
         )
-        frame = pd.read_csv(result["catalog_csv"]) if Path(result["catalog_csv"]).exists() else pd.DataFrame(result.get("task_records", []))
+        catalog_path = str(result.get("catalog_csv") or result.get("catalog_path") or "")
+        if not catalog_path:
+            fallback_catalog = run_dir / "raw_ingest_catalog.csv"
+            if fallback_catalog.exists():
+                catalog_path = str(fallback_catalog)
+        frame = pd.read_csv(catalog_path) if catalog_path and Path(catalog_path).exists() else pd.DataFrame(result.get("task_records", []))
         for _, rec in frame.iterrows():
             all_rows.append({
                 "source_group": group_name,
