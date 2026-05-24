@@ -10,14 +10,29 @@ import pytest
 from qsys.utils import run_p0_raw_acquisition_wave as mod
 
 
-def _fake_ingest(**kwargs):
-    out_root = Path(kwargs["output_root"])
-    api_names = kwargs["selected_api_names"]
+def _strict_fake_ingest(
+    *,
+    output_root,
+    families,
+    start_date,
+    end_date,
+    max_workers,
+    continue_on_error,
+    selected_api_names,
+    request_sleep=0.0,
+    task_timeout_sec=None,
+    task_retry_attempts=0,
+    task_retry_sleep_sec=0.0,
+    task_retry_backoff=1.0,
+    task_retry_jitter_sec=0.0,
+):
+    out_root = Path(output_root)
+    api_names = selected_api_names
     rows = []
     for api in api_names:
         status = "failed" if api == "index_hist_sw" else "success"
         rows.append({
-            "source_family": kwargs["families"][0],
+            "source_family": families[0],
             "api_name": api,
             "status": status,
             "rows": 0 if status == "failed" else 2,
@@ -53,7 +68,7 @@ def _fake_rescue(*_args, **_kwargs):
 
 
 def test_parse_args_defaults_workers():
-    args = mod.parse_args(["--start-date", "2026-01-05", "--end-date", "2026-01-09", "--output-root", "/tmp/p0"])
+    args = mod.parse_args(["--start-date", "20260105", "--end-date", "20260109", "--output-root", "/tmp/p0"])
     assert args.max_workers == 2
 
 
@@ -69,13 +84,26 @@ def test_accept_local_path():
 
 def test_run_writes_manifest_catalog_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
-    args = Namespace(start_date="2026-01-05", end_date="2026-01-09", output_root=str(tmp_path), max_workers=2, continue_on_error=True, show_progress=False)
-    out = mod.run_p0_wave(args, ingest_fn=_fake_ingest)
+    args = Namespace(
+        start_date="20260105",
+        end_date="20260109",
+        output_root=str(tmp_path),
+        max_workers=2,
+        continue_on_error=True,
+        show_progress=False,
+        request_sleep=0.0,
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+    )
+    out = mod.run_p0_wave(args, ingest_fn=_strict_fake_ingest)
 
     manifest = json.loads(Path(out["manifest_json"]).read_text(encoding="utf-8"))
     assert manifest["stage"] == "U1-M5 Step 3"
     assert "local staging only" in manifest["note"]
-    assert manifest["start_date"] == "2026-01-05"
+    assert manifest["start_date"] == "20260105"
     assert manifest["max_workers"] == 2
     assert "started_at" in manifest and "finished_at" in manifest and "elapsed_sec" in manifest
     assert isinstance(manifest["status_counts"], dict)
@@ -88,3 +116,61 @@ def test_run_writes_manifest_catalog_summary(tmp_path: Path, monkeypatch: pytest
     summary = json.loads(Path(out["summary_json"]).read_text(encoding="utf-8"))
     assert summary["total_tasks"] == len(catalog)
     assert summary["failed_count"] >= 1
+
+
+def test_passes_raw_coverage_retry_params_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
+    captured: dict[str, object] = {}
+
+    def _capturing_ingest(**kwargs):
+        captured.update(kwargs)
+        return _strict_fake_ingest(**kwargs)
+
+    args = Namespace(
+        start_date="20260105",
+        end_date="20260109",
+        output_root=str(tmp_path),
+        max_workers=2,
+        continue_on_error=True,
+        show_progress=True,
+        request_sleep=0.3,
+        task_timeout_sec=15.0,
+        task_retry_attempts=2,
+        task_retry_sleep_sec=0.4,
+        task_retry_backoff=1.5,
+        task_retry_jitter_sec=0.2,
+    )
+    mod.run_p0_wave(args, ingest_fn=_capturing_ingest)
+    assert "show_progress" not in captured
+    assert captured["request_sleep"] == 0.3
+    assert captured["task_timeout_sec"] == 15.0
+    assert captured["task_retry_attempts"] == 2
+    assert captured["task_retry_sleep_sec"] == 0.4
+    assert captured["task_retry_backoff"] == 1.5
+    assert captured["task_retry_jitter_sec"] == 0.2
+
+
+def test_show_progress_still_used_for_rescue_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    seen: dict[str, object] = {}
+
+    def _capture_rescue(source_name, raw_root, run_dir, start_date, end_date, max_workers, show_progress):
+        seen["show_progress"] = show_progress
+        return _fake_rescue()
+
+    monkeypatch.setattr(mod, "_run_rescue_source", _capture_rescue)
+    args = Namespace(
+        start_date="20260105",
+        end_date="20260109",
+        output_root=str(tmp_path),
+        max_workers=2,
+        continue_on_error=True,
+        show_progress=True,
+        request_sleep=0.0,
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+    )
+    mod.run_p0_wave(args, ingest_fn=_strict_fake_ingest)
+    assert seen["show_progress"] is True
