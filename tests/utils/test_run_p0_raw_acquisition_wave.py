@@ -369,3 +369,123 @@ def test_run_rescue_source_missing_cache_inventory_is_visible_failure(tmp_path: 
     assert rows[0]["status"] == "failed"
     assert rows[0]["error_type"] == "MissingArtifactError"
     assert "cache_inventory.csv" in rows[0]["error_message"]
+
+
+def test_run_rescue_source_nan_rows_and_elapsed_are_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    rescue_dir = tmp_path / "rescue_nan"
+    rescue_dir.mkdir(parents=True, exist_ok=True)
+    inv_fp = rescue_dir / "cache_inventory.csv"
+    pd.DataFrame([
+        {
+            "actual_api_name": "sw_industry_membership_rescue",
+            "status": "failed",
+            "rows": float("nan"),
+            "path": "",
+            "error_message": "upstream failure",
+            "elapsed_seconds": float("nan"),
+        },
+        {
+            "actual_api_name": "sw_industry_membership_rescue",
+            "status": "skipped",
+            "rows": "",
+            "path": "",
+            "error_message": "already exists",
+            "elapsed_seconds": "",
+        },
+    ]).to_csv(inv_fp, index=False)
+
+    class _FakeRunner:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self, **_kwargs):
+            return {"run_dir": str(rescue_dir)}
+
+    monkeypatch.setattr(mod, "RawWarehouseRunner", _FakeRunner)
+    monkeypatch.setattr(mod, "get_source_spec", lambda _x: object())
+    rows = mod._run_rescue_source(
+        "sw_industry_membership_rescue",
+        raw_root=tmp_path / "raw",
+        run_dir=tmp_path,
+        start_date="20260105",
+        end_date="20260109",
+        max_workers=2,
+        show_progress=False,
+    )
+    assert len(rows) == 2
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["rows"] == 0
+    assert rows[0]["elapsed_sec"] == 0.0
+    assert rows[0]["error_message"] == "upstream failure"
+    assert rows[1]["status"] == "skipped"
+    assert rows[1]["rows"] == 0
+    assert rows[1]["elapsed_sec"] == 0.0
+    assert rows[1]["error_message"] == "already exists"
+
+
+def test_failed_sources_ignores_nan_api_name_and_uses_source_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def _failed_rescue(*_args, **_kwargs):
+        return [{
+            "source_group": "rescue_sources",
+            "source_family": "trading_event",
+            "source_spec": "tradability_mask_v0",
+            "api_name": float("nan"),
+            "status": "failed",
+            "rows": 0,
+            "output_path": "",
+            "metadata_path": "",
+            "error_type": "RuntimeError",
+            "error_message": "x",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:01+00:00",
+            "elapsed_sec": 1.0,
+        }]
+
+    monkeypatch.setattr(mod, "_run_rescue_source", _failed_rescue)
+
+    def _ingest_with_nan_failed_api(**kwargs):
+        out_root = Path(kwargs["output_root"])
+        fp = out_root / "fake_catalog.csv"
+        pd.DataFrame([{
+            "source_family": kwargs["families"][0],
+            "api_name": "ok_api",
+            "status": "success",
+            "rows": 1,
+            "output_path": "",
+            "metadata_path": "",
+            "error_type": "",
+            "error_message": "",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:01+00:00",
+            "elapsed_sec": 1.0,
+        }]).to_csv(fp, index=False)
+        return {"catalog_csv": str(fp)}
+
+    args = Namespace(
+        start_date="20260105",
+        end_date="20260109",
+        output_root=str(tmp_path),
+        max_workers=2,
+        continue_on_error=True,
+        show_progress=False,
+        request_sleep=0.0,
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+        symbols="",
+        symbols_file="",
+        index_symbols="",
+        trade_dates="",
+        report_dates="",
+        industry_names="",
+        concept_names="",
+        universe_root="config/factor_sources/acquisition_universe",
+        include_disabled=False,
+        resume=False,
+    )
+    out = mod.run_p0_wave(args, ingest_fn=_ingest_with_nan_failed_api)
+    summary = json.loads(Path(out["summary_json"]).read_text(encoding="utf-8"))
+    assert "nantradability_mask_v0" not in summary["failed_sources"]
+    assert "tradability_mask_v0" in summary["failed_sources"]
