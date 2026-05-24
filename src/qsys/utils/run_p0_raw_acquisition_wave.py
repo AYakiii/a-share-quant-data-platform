@@ -118,6 +118,19 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.lower() in {"nan", "none", "null"}:
+            return ""
+        return cleaned
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 def _run_rescue_source(
     source_name: str,
     raw_root: Path,
@@ -272,6 +285,15 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
             catalog[col] = "" if col not in {"rows", "elapsed_sec"} else 0
 
     counts = Counter(catalog["status"].tolist()) if not catalog.empty else Counter()
+    failed_sources: list[str] = []
+    if not catalog.empty:
+        failed_catalog = catalog[catalog["status"] == "failed"]
+        for _, rec in failed_catalog.iterrows():
+            api_name = _safe_text(rec.get("api_name"))
+            source_spec = _safe_text(rec.get("source_spec"))
+            label = api_name or source_spec
+            if label:
+                failed_sources.append(label)
     summary = {
         "total_tasks": int(len(catalog)),
         "success_count": int(counts.get("success", 0)),
@@ -279,7 +301,7 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         "empty_count": int(counts.get("empty", 0)),
         "skipped_count": int(counts.get("skipped", 0)),
         "rows_by_source_group": {k: int(v) for k, v in catalog.groupby("source_group")["rows"].sum().to_dict().items()} if not catalog.empty else {},
-        "failed_sources": sorted(set((catalog[catalog["status"] == "failed"]["api_name"].fillna("") + catalog[catalog["status"] == "failed"]["source_spec"].fillna("")).tolist())),
+        "failed_sources": sorted(set(failed_sources)),
     }
 
     finished = datetime.now(UTC)
