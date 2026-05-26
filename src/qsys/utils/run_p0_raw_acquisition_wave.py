@@ -343,6 +343,15 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         recoverable = failed_rows[failed_rows["source_group"].isin(["index_market_data", "sw_industry_data"])] if not failed_rows.empty else pd.DataFrame()
 
         recovery_rows: list[dict[str, Any]] = []
+        all_failed_keys: list[tuple[str, str]] = []
+        if not failed_rows.empty:
+            for _, rec in failed_rows.iterrows():
+                source_family = _safe_text(rec.get("source_family"))
+                api_name = _safe_text(rec.get("api_name"))
+                source_spec = _safe_text(rec.get("source_spec"))
+                key_api = api_name or source_spec
+                if source_family and key_api:
+                    all_failed_keys.append((source_family, key_api))
         attempted_keys: list[tuple[str, str]] = []
         if not recoverable.empty:
             recoverable_pairs = (
@@ -413,7 +422,7 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
                 recovered_keys.add(pair)
 
         unresolved = []
-        for pair in sorted(set(attempted_keys)):
+        for pair in sorted(set(all_failed_keys)):
             if pair not in recovered_keys:
                 unresolved.append({"source_family": pair[0], "api_name": pair[1]})
 

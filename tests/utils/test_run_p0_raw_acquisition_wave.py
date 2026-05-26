@@ -529,3 +529,42 @@ def test_auto_recovery_mixed_status_same_pair_is_unresolved(tmp_path: Path, monk
     assert report["final_status"] == "failed"
     assert report["unresolved_failed_count"] == 1
     assert any(x.get("api_name") == "sw_index_second_info" for x in report["unresolved_failed_sources"])
+
+
+def test_auto_recovery_non_recoverable_main_failure_stays_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def _failed_rescue(*_args, **_kwargs):
+        return [{
+            "source_group": "rescue_sources",
+            "source_family": "industry",
+            "source_spec": "sw_industry_membership_rescue",
+            "api_name": "sw_industry_membership_rescue",
+            "status": "failed",
+            "rows": 0,
+            "output_path": "",
+            "metadata_path": "",
+            "error_type": "RuntimeError",
+            "error_message": "rescue failed",
+            "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:01+00:00",
+            "elapsed_sec": 1.0,
+        }]
+
+    monkeypatch.setattr(mod, "_run_rescue_source", _failed_rescue)
+
+    def _ingest_success(**kwargs):
+        out_root = Path(kwargs["output_root"])
+        fp = out_root / f"catalog_non_recoverable_{kwargs['families'][0]}.csv"
+        pd.DataFrame([{
+            "source_family": kwargs["families"][0],
+            "api_name": kwargs["selected_api_names"][0],
+            "status": "success",
+            "rows": 1,
+        }]).to_csv(fp, index=False)
+        return {"catalog_csv": str(fp)}
+
+    args = _with_defaults(output_root=str(tmp_path), auto_recover_failed=True)
+    out = mod.run_p0_wave(args, ingest_fn=_ingest_success)
+    report = json.loads((Path(out["run_dir"]) / "p0_final_acceptance_report.json").read_text(encoding="utf-8"))
+    assert report["final_status"] == "failed"
+    assert report["unresolved_failed_count"] == 1
+    assert any(x.get("api_name") == "sw_industry_membership_rescue" for x in report["unresolved_failed_sources"])
