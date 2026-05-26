@@ -343,7 +343,6 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         recoverable = failed_rows[failed_rows["source_group"].isin(["index_market_data", "sw_industry_data"])] if not failed_rows.empty else pd.DataFrame()
 
         recovery_rows: list[dict[str, Any]] = []
-        recovered_keys: set[tuple[str, str]] = set()
         attempted_keys: list[tuple[str, str]] = []
         if not recoverable.empty:
             recoverable_pairs = (
@@ -400,8 +399,18 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
                         "finished_at": str(rec.get("finished_at", _utc_now())),
                         "elapsed_sec": float(rec.get("elapsed_sec", 0.0) or 0.0),
                     })
-                    if status == "success":
-                        recovered_keys.add((str(rec.get("source_family", source_family)), rec_api_name))
+        recovery_status_by_pair: dict[tuple[str, str], set[str]] = {}
+        for rec in recovery_rows:
+            key = (str(rec.get("source_family", "")), str(rec.get("api_name", "")))
+            recovery_status_by_pair.setdefault(key, set()).add(str(rec.get("status", "")))
+
+        recovered_keys: set[tuple[str, str]] = set()
+        for pair in sorted(set(attempted_keys)):
+            statuses = recovery_status_by_pair.get(pair, set())
+            has_success = "success" in statuses
+            has_failed_or_timeout = ("failed" in statuses) or ("timeout" in statuses)
+            if has_success and not has_failed_or_timeout:
+                recovered_keys.add(pair)
 
         unresolved = []
         for pair in sorted(set(attempted_keys)):

@@ -481,3 +481,51 @@ def test_auto_recovery_failure_unresolved_failed(tmp_path: Path, monkeypatch: py
     report = json.loads((Path(out["run_dir"]) / "p0_final_acceptance_report.json").read_text(encoding="utf-8"))
     assert report["final_status"] == "failed"
     assert report["unresolved_failed_count"] == 1
+
+
+def test_auto_recovery_mixed_status_same_pair_is_unresolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
+    calls = {"n": 0}
+
+    def _ingest(**kwargs):
+        calls["n"] += 1
+        out_root = Path(kwargs["output_root"])
+        fp = out_root / f"catalog_mixed_{calls['n']}.csv"
+        if calls["n"] == 1:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": "sw_index_second_info",
+                "status": "failed",
+                "rows": 0,
+            }]
+        elif calls["n"] == 2:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": "ok_api",
+                "status": "success",
+                "rows": 1,
+            }]
+        else:
+            rows = [
+                {
+                    "source_family": kwargs["families"][0],
+                    "api_name": "sw_index_second_info",
+                    "status": "success",
+                    "rows": 131,
+                },
+                {
+                    "source_family": kwargs["families"][0],
+                    "api_name": "sw_index_second_info",
+                    "status": "failed",
+                    "rows": 0,
+                },
+            ]
+        pd.DataFrame(rows).to_csv(fp, index=False)
+        return {"catalog_csv": str(fp)}
+
+    args = _with_defaults(output_root=str(tmp_path), auto_recover_failed=True)
+    out = mod.run_p0_wave(args, ingest_fn=_ingest)
+    report = json.loads((Path(out["run_dir"]) / "p0_final_acceptance_report.json").read_text(encoding="utf-8"))
+    assert report["final_status"] == "failed"
+    assert report["unresolved_failed_count"] == 1
+    assert any(x.get("api_name") == "sw_index_second_info" for x in report["unresolved_failed_sources"])
