@@ -35,6 +35,7 @@ def _strict_fake_ingest(
     task_retry_sleep_sec=0.0,
     task_retry_backoff=1.0,
     task_retry_jitter_sec=0.0,
+    heartbeat_sec=None,
 ):
     out_root = Path(output_root)
     api_names = selected_api_names
@@ -58,6 +59,34 @@ def _strict_fake_ingest(
     pd.DataFrame(rows).to_csv(fp, index=False)
     return {"catalog_csv": fp}
 
+def _with_defaults(**overrides):
+    base = dict(
+        start_date="20260105",
+        end_date="20260109",
+        max_workers=2,
+        continue_on_error=True,
+        show_progress=False,
+        request_sleep=0.0,
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+        heartbeat_sec=30.0,
+        symbols="",
+        symbols_file="",
+        index_symbols="",
+        trade_dates="",
+        report_dates="",
+        industry_names="",
+        concept_names="",
+        universe_root="config/factor_sources/acquisition_universe",
+        include_disabled=False,
+        resume=False,
+    )
+    base.update(overrides)
+    return Namespace(**base)
+
 
 def _fake_rescue(*_args, **_kwargs):
     return [{
@@ -80,6 +109,7 @@ def _fake_rescue(*_args, **_kwargs):
 def test_parse_args_defaults_workers():
     args = mod.parse_args(["--start-date", "20260105", "--end-date", "20260109", "--output-root", "/tmp/p0"])
     assert args.max_workers == 2
+    assert args.heartbeat_sec == 30.0
 
 
 def test_default_rescue_sources_excludes_tradability():
@@ -100,30 +130,7 @@ def test_accept_local_path():
 
 def test_run_writes_manifest_catalog_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
-        output_root=str(tmp_path),
-        max_workers=2,
-        continue_on_error=True,
-        show_progress=False,
-        request_sleep=0.0,
-        task_timeout_sec=None,
-        task_retry_attempts=0,
-        task_retry_sleep_sec=0.0,
-        task_retry_backoff=1.0,
-        task_retry_jitter_sec=0.0,
-        symbols="",
-        symbols_file="",
-        index_symbols="",
-        trade_dates="",
-        report_dates="",
-        industry_names="",
-        concept_names="",
-        universe_root="config/factor_sources/acquisition_universe",
-        include_disabled=False,
-        resume=False,
-    )
+    args = _with_defaults(output_root=str(tmp_path))
     out = mod.run_p0_wave(args, ingest_fn=_strict_fake_ingest)
 
     manifest = json.loads(Path(out["manifest_json"]).read_text(encoding="utf-8"))
@@ -153,12 +160,8 @@ def test_passes_raw_coverage_retry_params_only(tmp_path: Path, monkeypatch: pyte
         captured.update(kwargs)
         return _strict_fake_ingest(**kwargs)
 
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
+    args = _with_defaults(
         output_root=str(tmp_path),
-        max_workers=2,
-        continue_on_error=True,
         show_progress=True,
         request_sleep=0.3,
         task_timeout_sec=15.0,
@@ -166,16 +169,6 @@ def test_passes_raw_coverage_retry_params_only(tmp_path: Path, monkeypatch: pyte
         task_retry_sleep_sec=0.4,
         task_retry_backoff=1.5,
         task_retry_jitter_sec=0.2,
-        symbols="",
-        symbols_file="",
-        index_symbols="",
-        trade_dates="",
-        report_dates="",
-        industry_names="",
-        concept_names="",
-        universe_root="config/factor_sources/acquisition_universe",
-        include_disabled=False,
-        resume=False,
     )
     mod.run_p0_wave(args, ingest_fn=_capturing_ingest)
     assert "show_progress" not in captured
@@ -185,7 +178,21 @@ def test_passes_raw_coverage_retry_params_only(tmp_path: Path, monkeypatch: pyte
     assert captured["task_retry_sleep_sec"] == 0.4
     assert captured["task_retry_backoff"] == 1.5
     assert captured["task_retry_jitter_sec"] == 0.2
+    assert captured["heartbeat_sec"] == 30.0
     assert captured["ak_module"] is not None
+
+
+def test_default_without_show_progress_keeps_heartbeat_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
+    captured: dict[str, object] = {}
+
+    def _capturing_ingest(**kwargs):
+        captured.update(kwargs)
+        return _strict_fake_ingest(**kwargs)
+
+    args = _with_defaults(output_root=str(tmp_path), show_progress=False)
+    mod.run_p0_wave(args, ingest_fn=_capturing_ingest)
+    assert captured["heartbeat_sec"] is None
 
 
 def test_show_progress_still_used_for_rescue_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -196,30 +203,7 @@ def test_show_progress_still_used_for_rescue_path(tmp_path: Path, monkeypatch: p
         return _fake_rescue()
 
     monkeypatch.setattr(mod, "_run_rescue_source", _capture_rescue)
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
-        output_root=str(tmp_path),
-        max_workers=2,
-        continue_on_error=True,
-        show_progress=True,
-        request_sleep=0.0,
-        task_timeout_sec=None,
-        task_retry_attempts=0,
-        task_retry_sleep_sec=0.0,
-        task_retry_backoff=1.0,
-        task_retry_jitter_sec=0.0,
-        symbols="",
-        symbols_file="",
-        index_symbols="",
-        trade_dates="",
-        report_dates="",
-        industry_names="",
-        concept_names="",
-        universe_root="config/factor_sources/acquisition_universe",
-        include_disabled=False,
-        resume=False,
-    )
+    args = _with_defaults(output_root=str(tmp_path), show_progress=True)
     mod.run_p0_wave(args, ingest_fn=_strict_fake_ingest)
     assert seen["show_progress"] is True
 
@@ -234,19 +218,8 @@ def test_symbols_file_and_index_symbols_kept_separate(tmp_path: Path, monkeypatc
         captured.update(kwargs)
         return _strict_fake_ingest(**kwargs)
 
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
+    args = _with_defaults(
         output_root=str(tmp_path / "out"),
-        max_workers=2,
-        continue_on_error=True,
-        show_progress=False,
-        request_sleep=0.0,
-        task_timeout_sec=None,
-        task_retry_attempts=0,
-        task_retry_sleep_sec=0.0,
-        task_retry_backoff=1.0,
-        task_retry_jitter_sec=0.0,
         symbols="000002",
         symbols_file=str(symbols_file),
         index_symbols="000300,000905,000300",
@@ -285,30 +258,7 @@ def test_accepts_catalog_path_result_key(tmp_path: Path, monkeypatch: pytest.Mon
         }]).to_csv(fp, index=False)
         return {"catalog_path": str(fp)}
 
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
-        output_root=str(tmp_path),
-        max_workers=2,
-        continue_on_error=True,
-        show_progress=False,
-        request_sleep=0.0,
-        task_timeout_sec=None,
-        task_retry_attempts=0,
-        task_retry_sleep_sec=0.0,
-        task_retry_backoff=1.0,
-        task_retry_jitter_sec=0.0,
-        symbols="",
-        symbols_file="",
-        index_symbols="",
-        trade_dates="",
-        report_dates="",
-        industry_names="",
-        concept_names="",
-        universe_root="config/factor_sources/acquisition_universe",
-        include_disabled=False,
-        resume=False,
-    )
+    args = _with_defaults(output_root=str(tmp_path))
     out = mod.run_p0_wave(args, ingest_fn=_catalog_path_ingest)
     assert Path(out["catalog_csv"]).exists()
     assert Path(out["summary_json"]).exists()
@@ -468,31 +418,9 @@ def test_failed_sources_ignores_nan_api_name_and_uses_source_spec(tmp_path: Path
         }]).to_csv(fp, index=False)
         return {"catalog_csv": str(fp)}
 
-    args = Namespace(
-        start_date="20260105",
-        end_date="20260109",
-        output_root=str(tmp_path),
-        max_workers=2,
-        continue_on_error=True,
-        show_progress=False,
-        request_sleep=0.0,
-        task_timeout_sec=None,
-        task_retry_attempts=0,
-        task_retry_sleep_sec=0.0,
-        task_retry_backoff=1.0,
-        task_retry_jitter_sec=0.0,
-        symbols="",
-        symbols_file="",
-        index_symbols="",
-        trade_dates="",
-        report_dates="",
-        industry_names="",
-        concept_names="",
-        universe_root="config/factor_sources/acquisition_universe",
-        include_disabled=False,
-        resume=False,
-    )
+    args = _with_defaults(output_root=str(tmp_path))
     out = mod.run_p0_wave(args, ingest_fn=_ingest_with_nan_failed_api)
     summary = json.loads(Path(out["summary_json"]).read_text(encoding="utf-8"))
     assert "nantradability_mask_v0" not in summary["failed_sources"]
     assert "tradability_mask_v0" in summary["failed_sources"]
+
