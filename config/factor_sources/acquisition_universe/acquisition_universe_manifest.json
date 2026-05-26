@@ -1,0 +1,14 @@
+{
+  "artifact": "trading_calendar.csv",
+  "scope": "operation_support_file",
+  "is_raw_data": false,
+  "source": "akshare.tool_trade_date_hist_sina",
+  "start": "20220101",
+  "end": "20261231",
+  "rows": 1211,
+  "min_trade_date": "20220104",
+  "max_trade_date": "20261231",
+  "columns": [
+    "trade_date"
+  ]
+}
