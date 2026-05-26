@@ -888,7 +888,7 @@ def _run_task_in_subprocess_with_timeout(
         }]
     return []
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
+def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -931,6 +931,26 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
     heartbeat_enabled = heartbeat_every_sec > 0
     heartbeat_start = time.time()
+    completed_tasks = 0
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
+    completed_tasks = 0
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
+    completed_tasks = 0
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
+    completed_tasks = 0
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
+    completed_tasks = 0
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
     last_heartbeat_at = heartbeat_start
     total_tasks = 0
     completed_tasks = 0
@@ -968,7 +988,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         }
 
     def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
-        nonlocal completed_tasks, last_heartbeat_at
+        nonlocal completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
             rows.append(row)
@@ -1602,7 +1622,7 @@ def _run_task_in_subprocess_with_timeout(
         }]
     return []
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -1642,6 +1662,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         task_events_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    heartbeat_start = time.time()
+    completed_tasks = 0
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
@@ -1675,6 +1699,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         }
 
     def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
+        nonlocal completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
             rows.append(row)
@@ -1682,6 +1707,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         with open(task_events_path, "a", encoding="utf-8") as ef:
             ef.write(json.dumps(event, ensure_ascii=False) + "\n")
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
+        completed_tasks += 1
 
     task_attempt_records: list[dict[str, object]] = []
 
@@ -1753,11 +1779,35 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             for family, api_name, params in tasks:
                 print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
                 futures.append(ex.submit(_execute_task, family, api_name, params))
-            for fut in futures:
-                task_rows = fut.result()
-                _record_task_rows(task_rows)
-                if request_sleep > 0:
-                    time.sleep(request_sleep)
+            if not heartbeat_enabled:
+                for fut in futures:
+                    task_rows = fut.result()
+                    _record_task_rows(task_rows)
+                    if request_sleep > 0:
+                        time.sleep(request_sleep)
+            else:
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(pending, timeout=heartbeat_every_sec, return_when=FIRST_COMPLETED)
+                    if not done:
+                        now = time.time()
+                        status_counts = Counter(str(r.get("status", "")) for r in rows)
+                        pending_or_running_tasks = max(len(tasks) - completed_tasks, 0)
+                        elapsed_sec = max(now - heartbeat_start, 0.0)
+                        print(
+                            "[heartbeat] "
+                            f"elapsed_sec={elapsed_sec:.1f} "
+                            f"total_tasks={len(tasks)} "
+                            f"completed_tasks={completed_tasks} "
+                            f"pending_or_running_tasks={pending_or_running_tasks} "
+                            f"status_counts={dict(status_counts)}"
+                        )
+                        continue
+                    for fut in done:
+                        task_rows = fut.result()
+                        _record_task_rows(task_rows)
+                        if request_sleep > 0:
+                            time.sleep(request_sleep)
 
     out = Path(output_root)
     out.mkdir(parents=True, exist_ok=True)

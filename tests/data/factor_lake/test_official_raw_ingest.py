@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pandas as pd
 import json
+import inspect
 
+from qsys.data.factor_lake import raw_ingest
 from qsys.data.factor_lake.raw_ingest import _to_akshare_daily_symbol, run_raw_ingest_official
 
 
@@ -27,6 +29,27 @@ def test_official_catalog_contract(tmp_path):
     df = pd.read_csv(out["catalog_path"])
     required = {"run_id","dataset_name","source_family","api_name","partition_json","params_json","status","rows","error_type","error_message","output_path","metadata_path","started_at","finished_at","elapsed_sec"}
     assert required.issubset(df.columns)
+
+
+def test_run_raw_coverage_ingest_signature_has_heartbeat_sec():
+    sig = inspect.signature(raw_ingest.run_raw_coverage_ingest)
+    assert "heartbeat_sec" in sig.parameters
+
+
+def test_run_raw_ingest_official_accepts_heartbeat_sec(tmp_path):
+    out = run_raw_ingest_official(
+        output_root=str(tmp_path),
+        families=["market_price"],
+        symbols=["000001"],
+        trade_dates=["20100104"],
+        start_date="20100101",
+        end_date="20100131",
+        adapter_map={"stock_zh_a_hist": lambda **kwargs: _Result(pd.DataFrame({"x": [1]}))},
+        include_disabled=True,
+        heartbeat_sec=0.01,
+    )
+    assert (tmp_path / "raw_ingest_catalog.csv").exists()
+    assert out["catalog_path"]
 
 
 def _write_universe(root, *, stock=True, index=False, industry=False, concept=False, calendar=True):
