@@ -41,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--heartbeat-sec", type=float, default=30.0)
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--task-timeout-sec", type=float, default=None)
     p.add_argument("--task-retry-attempts", type=int, default=0)
@@ -57,6 +58,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--universe-root", default="config/factor_sources/acquisition_universe")
     p.add_argument("--include-disabled", action="store_true")
     p.add_argument("--resume", action="store_true")
+    p.add_argument("--auto-recover-failed", action="store_true")
+    p.add_argument("--recovery-max-workers", type=int, default=1)
+    p.add_argument("--recovery-request-sleep", type=float, default=0.5)
+    p.add_argument("--recovery-task-timeout-sec", type=float, default=120.0)
+    p.add_argument("--recovery-task-retry-attempts", type=int, default=2)
+    p.add_argument("--recovery-task-retry-sleep-sec", type=float, default=1.0)
+    p.add_argument("--recovery-task-retry-backoff", type=float, default=1.5)
+    p.add_argument("--recovery-task-retry-jitter-sec", type=float, default=0.2)
     return p.parse_args(argv)
 
 
@@ -252,6 +261,7 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
             task_retry_sleep_sec=args.task_retry_sleep_sec,
             task_retry_backoff=args.task_retry_backoff,
             task_retry_jitter_sec=args.task_retry_jitter_sec,
+            heartbeat_sec=float(args.heartbeat_sec) if args.show_progress else None,
         )
         catalog_path = str(result.get("catalog_csv") or result.get("catalog_path") or "")
         if not catalog_path:
@@ -328,6 +338,111 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
     catalog.to_csv(catalog_fp, index=False)
     summary_fp.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest_fp.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if bool(getattr(args, "auto_recover_failed", False)):
+        failed_mask = catalog["status"].astype(str).isin(["failed", "timeout"]) if not catalog.empty else pd.Series([], dtype=bool)
+        failed_rows = catalog[failed_mask].copy() if not catalog.empty else pd.DataFrame()
+        recoverable = failed_rows[failed_rows["source_group"].isin(["index_market_data", "sw_industry_data"])] if not failed_rows.empty else pd.DataFrame()
+
+        recovery_rows: list[dict[str, Any]] = []
+        all_failed_keys: list[tuple[str, str]] = []
+        if not failed_rows.empty:
+            for _, rec in failed_rows.iterrows():
+                source_family = _safe_text(rec.get("source_family"))
+                api_name = _safe_text(rec.get("api_name"))
+                source_spec = _safe_text(rec.get("source_spec"))
+                key_api = api_name or source_spec
+                if source_family and key_api:
+                    all_failed_keys.append((source_family, key_api))
+        attempted_keys: list[tuple[str, str]] = []
+        if not recoverable.empty:
+            recoverable_pairs = (
+                recoverable[["source_family", "api_name"]]
+                .dropna()
+                .assign(
+                    source_family=lambda d: d["source_family"].astype(str),
+                    api_name=lambda d: d["api_name"].astype(str),
+                )
+            )
+            for source_family, api_name in recoverable_pairs.itertuples(index=False):
+                attempted_keys.append((source_family, api_name))
+            for source_family, api_names in recoverable_pairs.groupby("source_family")["api_name"]:
+                result = ingest_fn(
+                    output_root=str(run_dir),
+                    families=[str(source_family)],
+                    symbols=symbols,
+                    index_symbols=index_symbols,
+                    trade_dates=trade_dates,
+                    report_dates=report_dates,
+                    industry_names=industry_names,
+                    concept_names=concept_names,
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    max_workers=max(1, int(getattr(args, "recovery_max_workers", 1))),
+                    continue_on_error=True,
+                    selected_api_names=[str(x) for x in api_names.tolist()],
+                    universe_root=args.universe_root,
+                    include_disabled=args.include_disabled,
+                    resume=args.resume,
+                    ak_module=ak,
+                    request_sleep=float(getattr(args, "recovery_request_sleep", 0.5)),
+                    task_timeout_sec=getattr(args, "recovery_task_timeout_sec", 120.0),
+                    task_retry_attempts=int(getattr(args, "recovery_task_retry_attempts", 2)),
+                    task_retry_sleep_sec=float(getattr(args, "recovery_task_retry_sleep_sec", 1.0)),
+                    task_retry_backoff=float(getattr(args, "recovery_task_retry_backoff", 1.5)),
+                    task_retry_jitter_sec=float(getattr(args, "recovery_task_retry_jitter_sec", 0.2)),
+                )
+                catalog_path = str(result.get("catalog_csv") or result.get("catalog_path") or "")
+                frame = pd.read_csv(catalog_path) if catalog_path and Path(catalog_path).exists() else pd.DataFrame(result.get("task_records", []))
+                for _, rec in frame.iterrows():
+                    rec_api_name = str(rec.get("api_name", ""))
+                    status = str(rec.get("status", "failed"))
+                    recovery_rows.append({
+                        "source_family": str(rec.get("source_family", source_family)),
+                        "api_name": rec_api_name,
+                        "status": status,
+                        "rows": int(rec.get("rows", 0) or 0),
+                        "output_path": str(rec.get("output_path", "")),
+                        "metadata_path": str(rec.get("metadata_path", "")),
+                        "error_type": str(rec.get("error_type", "") or ""),
+                        "error_message": str(rec.get("error_message", "") or ""),
+                        "started_at": str(rec.get("started_at", _utc_now())),
+                        "finished_at": str(rec.get("finished_at", _utc_now())),
+                        "elapsed_sec": float(rec.get("elapsed_sec", 0.0) or 0.0),
+                    })
+        recovery_status_by_pair: dict[tuple[str, str], set[str]] = {}
+        for rec in recovery_rows:
+            key = (str(rec.get("source_family", "")), str(rec.get("api_name", "")))
+            recovery_status_by_pair.setdefault(key, set()).add(str(rec.get("status", "")))
+
+        recovered_keys: set[tuple[str, str]] = set()
+        for pair in sorted(set(attempted_keys)):
+            statuses = recovery_status_by_pair.get(pair, set())
+            has_success = "success" in statuses
+            has_failed_or_timeout = ("failed" in statuses) or ("timeout" in statuses)
+            if has_success and not has_failed_or_timeout:
+                recovered_keys.add(pair)
+
+        unresolved = []
+        for pair in sorted(set(all_failed_keys)):
+            if pair not in recovered_keys:
+                unresolved.append({"source_family": pair[0], "api_name": pair[1]})
+
+        recovery_catalog_fp = run_dir / "p0_recovery_catalog.csv"
+        pd.DataFrame(recovery_rows).to_csv(recovery_catalog_fp, index=False)
+        report = {
+            "main_total_tasks": int(len(catalog)),
+            "main_failed_count": int((catalog["status"] == "failed").sum()) if not catalog.empty else 0,
+            "main_timeout_count": int((catalog["status"] == "timeout").sum()) if not catalog.empty else 0,
+            "recovery_attempted_count": int(len(set(attempted_keys))),
+            "recovered_count": int(len(recovered_keys)),
+            "recovery_failed_count": int(len(unresolved)),
+            "unresolved_failed_count": int(len(unresolved)),
+            "unresolved_failed_sources": unresolved,
+            "final_status": "accepted" if len(unresolved) == 0 else "failed",
+            "note": LOCAL_ONLY_NOTE,
+        }
+        (run_dir / "p0_final_acceptance_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if counts.get("failed", 0) and not args.continue_on_error:
         raise RuntimeError("P0 wave completed with failures and --continue-on-error is not set")
