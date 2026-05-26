@@ -41,6 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=2)
     p.add_argument("--continue-on-error", action="store_true")
     p.add_argument("--show-progress", action="store_true")
+    p.add_argument("--heartbeat-sec", type=float, default=30.0)
     p.add_argument("--request-sleep", type=float, default=0.0)
     p.add_argument("--task-timeout-sec", type=float, default=None)
     p.add_argument("--task-retry-attempts", type=int, default=0)
@@ -260,6 +261,7 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
             task_retry_sleep_sec=args.task_retry_sleep_sec,
             task_retry_backoff=args.task_retry_backoff,
             task_retry_jitter_sec=args.task_retry_jitter_sec,
+            heartbeat_sec=float(args.heartbeat_sec) if args.show_progress else None,
         )
         catalog_path = str(result.get("catalog_csv") or result.get("catalog_path") or "")
         if not catalog_path:
