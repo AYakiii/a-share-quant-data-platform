@@ -8,7 +8,7 @@ import uuid
 from collections import Counter
 import multiprocessing as mp
 import signal
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1059,15 +1059,33 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 time.sleep(request_sleep)
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = []
+            pending: set[object] = set()
             for family, api_name, params in tasks:
                 print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
-                futures.append(ex.submit(_execute_task, family, api_name, params))
-            for fut in futures:
-                task_rows = fut.result()
-                _record_task_rows(task_rows)
-                if request_sleep > 0:
-                    time.sleep(request_sleep)
+                pending.add(ex.submit(_execute_task, family, api_name, params))
+            while pending:
+                wait_timeout = heartbeat_every_sec if heartbeat_enabled else None
+                done, pending = wait(pending, timeout=wait_timeout, return_when=FIRST_COMPLETED)
+                if not done:
+                    now = time.time()
+                    status_counts = Counter(str(r.get("status", "")) for r in rows)
+                    pending_or_running_tasks = max(total_tasks - completed_tasks, 0)
+                    elapsed_sec = max(now - heartbeat_start, 0.0)
+                    print(
+                        "[heartbeat] "
+                        f"elapsed_sec={elapsed_sec:.1f} "
+                        f"total_tasks={total_tasks} "
+                        f"completed_tasks={completed_tasks} "
+                        f"pending_or_running_tasks={pending_or_running_tasks} "
+                        f"status_counts={dict(status_counts)}"
+                    )
+                    last_heartbeat_at = now
+                    continue
+                for fut in done:
+                    task_rows = fut.result()
+                    _record_task_rows(task_rows)
+                    if request_sleep > 0:
+                        time.sleep(request_sleep)
     out = Path(output_root) / "raw" / family / api_name
     out.mkdir(parents=True, exist_ok=True)
     data_path = out / "fallback.csv"
