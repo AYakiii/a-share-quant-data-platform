@@ -419,8 +419,13 @@ def run_p0_wave(args: argparse.Namespace, ingest_fn: Callable[..., dict[str, Any
         for pair in sorted(set(attempted_keys)):
             statuses = recovery_status_by_pair.get(pair, set())
             has_success = "success" in statuses
+            has_already_exists_with_rows = any(
+                str(rec.get("status", "")) == "already_exists" and _safe_int(rec.get("rows", 0), default=0) > 0
+                for rec in recovery_rows
+                if (str(rec.get("source_family", "")), str(rec.get("api_name", ""))) == pair
+            )
             has_failed_or_timeout = ("failed" in statuses) or ("timeout" in statuses)
-            if has_success and not has_failed_or_timeout:
+            if (has_success or has_already_exists_with_rows) and not has_failed_or_timeout:
                 recovered_keys.add(pair)
 
         unresolved = []

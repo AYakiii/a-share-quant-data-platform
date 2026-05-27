@@ -424,3 +424,76 @@ def test_failed_sources_ignores_nan_api_name_and_uses_source_spec(tmp_path: Path
     assert "nantradability_mask_v0" not in summary["failed_sources"]
     assert "tradability_mask_v0" in summary["failed_sources"]
 
+
+def test_final_acceptance_accepts_recovery_already_exists_with_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
+    calls = {"count": 0}
+
+    def _ingest_main_and_recovery(**kwargs):
+        calls["count"] += 1
+        out_root = Path(kwargs["output_root"])
+        fp = out_root / f"catalog_{calls['count']}.csv"
+        is_recovery = kwargs["continue_on_error"] is True and kwargs["selected_api_names"] == ["sw_index_first_info"]
+        if is_recovery:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": "sw_index_first_info",
+                "status": "already_exists",
+                "rows": 31,
+                "output_path": "data/raw/industry_concept/sw_index_first_info/data.parquet",
+                "metadata_path": "data/raw/industry_concept/sw_index_first_info/metadata.json",
+            }]
+        else:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": api_name,
+                "status": "timeout" if api_name == "sw_index_first_info" else "success",
+                "rows": 0 if api_name == "sw_index_first_info" else 1,
+                "output_path": "",
+                "metadata_path": "",
+            } for api_name in kwargs["selected_api_names"]]
+        pd.DataFrame(rows).to_csv(fp, index=False)
+        return {"catalog_csv": str(fp)}
+
+    args = _with_defaults(output_root=str(tmp_path), auto_recover_failed=True)
+    mod.run_p0_wave(args, ingest_fn=_ingest_main_and_recovery)
+    report = json.loads((next(tmp_path.glob("p0_wave_*/p0_final_acceptance_report.json"))).read_text(encoding="utf-8"))
+    assert report["final_status"] == "accepted"
+    assert report["unresolved_failed_count"] == 0
+
+
+def test_final_acceptance_rejects_recovery_already_exists_with_zero_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(mod, "_run_rescue_source", _fake_rescue)
+    calls = {"count": 0}
+
+    def _ingest_main_and_recovery(**kwargs):
+        calls["count"] += 1
+        out_root = Path(kwargs["output_root"])
+        fp = out_root / f"catalog_{calls['count']}.csv"
+        is_recovery = kwargs["continue_on_error"] is True and kwargs["selected_api_names"] == ["sw_index_first_info"]
+        if is_recovery:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": "sw_index_first_info",
+                "status": "already_exists",
+                "rows": 0,
+                "output_path": "",
+                "metadata_path": "",
+            }]
+        else:
+            rows = [{
+                "source_family": kwargs["families"][0],
+                "api_name": api_name,
+                "status": "timeout" if api_name == "sw_index_first_info" else "success",
+                "rows": 0 if api_name == "sw_index_first_info" else 1,
+                "output_path": "",
+                "metadata_path": "",
+            } for api_name in kwargs["selected_api_names"]]
+        pd.DataFrame(rows).to_csv(fp, index=False)
+        return {"catalog_csv": str(fp)}
+
+    args = _with_defaults(output_root=str(tmp_path), auto_recover_failed=True)
+    mod.run_p0_wave(args, ingest_fn=_ingest_main_and_recovery)
+    report = json.loads((next(tmp_path.glob("p0_wave_*/p0_final_acceptance_report.json"))).read_text(encoding="utf-8"))
+    assert report["final_status"] == "failed"
+    assert report["unresolved_failed_count"] == 1
