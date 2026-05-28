@@ -30,3 +30,37 @@ PYTHONPATH=src python -m qsys.utils.run_raw_acquisition_pipeline qa --profile p0
 ## Future profiles
 
 Add `p1` / `p2` by extending `acquisition_profiles.py`; keep existing raw ingest and runner implementations unchanged.
+
+## Fresh Colab / Proven Notebook-Compatible P0 Pull
+
+Use mature selector passthrough arguments from the existing P0 runner (instead of manually creating per-API universe CSV files):
+https://github.com/AYakiii/a-share-quant-data-platform/pull/112/conflict?name=src%252Fqsys%252Futils%252Frun_raw_acquisition_pipeline.py&base_oid=494904ff0ab54dece142fb42841c6a5fd6550b5c&head_oid=7af9db336de0d9e8db0d3758c4e7ebd8303c7397
+```bash
+PYTHONPATH=src python -m qsys.utils.run_raw_acquisition_pipeline pull \
+  --profile p0 \
+  --start-date 2010-01-01 \
+  --end-date 2010-01-10 \
+  --local-root /content/a-share-quant-data-platform/outputs/raw_acquisition_local \
+  --symbols-file /content/a-share-quant-data-platform/outputs/universe_pools/stock_universe_v1_symbols.txt \
+  --index-symbols 000300,000905,000852 \
+  --max-workers 2 \
+  --continue-on-error \
+  --show-progress \
+  --heartbeat-sec 30 \
+  --request-sleep 0.5 \
+  --task-timeout-sec 240 \
+  --task-retry-attempts 1 \
+  --task-retry-sleep-sec 1.0 \
+  --task-retry-backoff 1.5 \
+  --task-retry-jitter-sec 0.2 \
+  --auto-recover-failed \
+  --recovery-max-workers 1 \
+  --recovery-request-sleep 0.5 \
+  --recovery-task-timeout-sec 240 \
+  --recovery-task-retry-attempts 2 \
+  --recovery-task-retry-sleep-sec 1.0 \
+  --recovery-task-retry-backoff 1.5 \
+  --recovery-task-retry-jitter-sec 0.2
+```
+
+`acquisition_universe` CSV files are optional fallback configuration; they are not intended to be manually created per API. The preferred P0 Colab workflow can pass `--symbols-file` and `--index-symbols`, matching the proven notebook workflow.

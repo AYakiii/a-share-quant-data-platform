@@ -141,3 +141,65 @@ def test_drive_qa_works_after_compact_removed(tmp_path: Path):
     mod.main(["promote", "--profile", "p0", "--compact-root", str(compact), "--drive-root", str(drive), "--asset-name", "a1", "--promote-to-drive"])
     shutil.rmtree(compact)
     mod.main(["qa", "--profile", "p0", "--drive-root", str(drive), "--asset-name", "a1"])
+
+
+def test_pull_passes_through_selectors_and_retry_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    seen = {}
+
+    def _fake(ns):
+        seen["ns"] = ns
+        return {"run_dir": tmp_path}
+
+    monkeypatch.setattr(mod, "run_p0_wave", _fake)
+    mod.main([
+        "pull", "--profile", "p0", "--start-date", "20200101", "--end-date", "20200110", "--local-root", str(tmp_path),
+        "--symbols", "000001,600000",
+        "--symbols-file", "/tmp/symbols.txt",
+        "--index-symbols", "000300,000905,000852",
+        "--trade-dates", "20200102,20200103",
+        "--report-dates", "20191231",
+        "--industry-names", "银行",
+        "--concept-names", "芯片",
+        "--universe-root", "/tmp/u",
+        "--include-disabled",
+        "--resume",
+        "--task-retry-attempts", "1",
+        "--task-retry-sleep-sec", "1.0",
+        "--task-retry-backoff", "1.5",
+        "--task-retry-jitter-sec", "0.2",
+        "--recovery-task-retry-sleep-sec", "1.0",
+        "--recovery-task-retry-backoff", "1.5",
+        "--recovery-task-retry-jitter-sec", "0.2",
+    ])
+    ns = seen["ns"]
+    assert ns.symbols == "000001,600000"
+    assert ns.symbols_file == "/tmp/symbols.txt"
+    assert ns.index_symbols == "000300,000905,000852"
+    assert ns.trade_dates == "20200102,20200103"
+    assert ns.report_dates == "20191231"
+    assert ns.industry_names == "银行"
+    assert ns.concept_names == "芯片"
+    assert ns.universe_root == "/tmp/u"
+    assert ns.include_disabled is True
+    assert ns.resume is True
+    assert ns.task_retry_sleep_sec == 1.0
+    assert ns.task_retry_backoff == 1.5
+    assert ns.task_retry_jitter_sec == 0.2
+    assert ns.recovery_task_retry_sleep_sec == 1.0
+    assert ns.recovery_task_retry_backoff == 1.5
+    assert ns.recovery_task_retry_jitter_sec == 0.2
+
+
+def test_pull_explicit_index_symbols_regression(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    seen = {}
+
+    def _fake(ns):
+        seen["ns"] = ns
+        return {"run_dir": tmp_path}
+
+    monkeypatch.setattr(mod, "run_p0_wave", _fake)
+    mod.main([
+        "pull", "--profile", "p0", "--start-date", "20200101", "--end-date", "20200110", "--local-root", str(tmp_path),
+        "--index-symbols", "000300,000905,000852",
+    ])
+    assert seen["ns"].index_symbols == "000300,000905,000852"
