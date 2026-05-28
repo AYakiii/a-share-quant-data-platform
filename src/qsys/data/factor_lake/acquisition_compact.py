@@ -21,6 +21,11 @@ def _safe_text(value: object) -> str:
     return text
 
 
+def _safe_int(value: object) -> int:
+    val = pd.to_numeric(value, errors="coerce")
+    return int(val) if pd.notna(val) else 0
+
+
 def _rel_from_run(run_dir: Path, src: Path, source_family: str, api_name: str, fallback_name: str) -> Path:
     try:
         return src.relative_to(run_dir)
@@ -28,19 +33,58 @@ def _rel_from_run(run_dir: Path, src: Path, source_family: str, api_name: str, f
         return Path("data") / "raw" / "akshare" / source_family / api_name / fallback_name
 
 
+def _effective_catalog(run_dir: Path) -> pd.DataFrame:
+    main = pd.read_csv(run_dir / "p0_wave_catalog.csv")
+    has_fail_timeout = main["status"].fillna("").astype(str).isin(["failed", "timeout"]).any()
+    if not has_fail_timeout:
+        return main
+
+    acceptance_path = run_dir / "p0_final_acceptance_report.json"
+    if not acceptance_path.exists():
+        raise ValueError("final acceptance report is required when main catalog has failed/timeout rows")
+    acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    if acceptance.get("final_status") != "accepted":
+        raise ValueError("final acceptance status must be accepted when main catalog has failed/timeout rows")
+    if int(acceptance.get("unresolved_failed_count", 1)) != 0:
+        raise ValueError("unresolved_failed_count must be zero when main catalog has failed/timeout rows")
+
+    recovery_path = run_dir / "p0_recovery_catalog.csv"
+    if not recovery_path.exists():
+        raise ValueError("recovery catalog is required when main catalog has failed/timeout rows")
+    recovery = pd.read_csv(recovery_path)
+    if recovery.empty:
+        raise ValueError("recovery catalog is empty")
+
+    main_ok = main[~main["status"].fillna("").astype(str).isin(["failed", "timeout"])].copy()
+    recovery_status = recovery["status"].fillna("").astype(str)
+    recovery_rows_num = pd.to_numeric(recovery.get("rows", 0), errors="coerce").fillna(0)
+    recovery_ok = recovery[(recovery_status == "success") | ((recovery_status == "already_exists") & (recovery_rows_num > 0))].copy()
+
+    failed_sources = main[main["status"].fillna("").astype(str).isin(["failed", "timeout"])][["source_family", "api_name"]].fillna("").astype(str)
+    failed_pairs = set(tuple(x) for x in failed_sources.to_numpy())
+    recovered_pairs = set(tuple(x) for x in recovery_ok[["source_family", "api_name"]].fillna("").astype(str).to_numpy())
+    missing = sorted(failed_pairs - recovered_pairs)
+    if missing:
+        raise ValueError(f"some failed/timeout sources are not recovered: {missing}")
+
+    for col in main_ok.columns:
+        if col not in recovery_ok.columns:
+            recovery_ok[col] = ""
+    recovery_ok = recovery_ok[main_ok.columns]
+    return pd.concat([main_ok, recovery_ok], ignore_index=True)
+
+
 def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
     compact_root.mkdir(parents=True, exist_ok=True)
-    catalog = pd.read_csv(run_dir / "p0_wave_catalog.csv")
+    catalog = _effective_catalog(run_dir)
     rows: list[dict[str, object]] = []
     expected_non_empty = 0
     copied_non_empty = 0
     parquet_actual_rows = 0
     parquet_counted = 0
-    has_failed_or_timeout = False
 
     for _, rec in catalog.iterrows():
-        status = _safe_text(rec.get("status"))
-        row_count = int(pd.to_numeric(rec.get("rows", 0), errors="coerce") if pd.notna(pd.to_numeric(rec.get("rows", 0), errors="coerce")) else 0)
+        row_count = _safe_int(rec.get("rows", 0))
         source_family = _clean_label(rec.get("source_family"), "unknown_family")
         api_name = _clean_label(rec.get("api_name"), "unknown_api")
         output_text = _safe_text(rec.get("output_path"))
@@ -48,9 +92,6 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
 
         if "/nan/" in output_text.replace("\\", "/").lower() or "/nan/" in metadata_text.replace("\\", "/").lower():
             raise ValueError("/nan/ path is not allowed")
-
-        if status in {"failed", "timeout"}:
-            has_failed_or_timeout = True
 
         rel_out = ""
         rel_meta = ""
@@ -69,41 +110,31 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
         if row_count > 0:
             if not output_text:
                 raise ValueError("rows > 0 requires output_path")
+            if not metadata_text:
+                raise ValueError("rows > 0 requires metadata_path")
             output_path = Path(output_text)
+            metadata_path = Path(metadata_text)
             if not output_path.exists():
                 raise FileNotFoundError(f"rows > 0 source data file missing: {output_path}")
+            if not metadata_path.exists():
+                raise FileNotFoundError(f"metadata file missing for non-empty row: {metadata_path}")
+
             expected_non_empty += 1
-            assert dst_data is not None
+            assert dst_data is not None and dst_meta is not None
             dst_data.parent.mkdir(parents=True, exist_ok=True)
-            if dst_data.exists():
-                raise FileExistsError(f"compact destination already exists: {dst_data}")
+            dst_meta.parent.mkdir(parents=True, exist_ok=True)
+            if dst_data.exists() or dst_meta.exists():
+                raise FileExistsError("compact destination already exists")
             shutil.copy2(output_path, dst_data)
+            shutil.copy2(metadata_path, dst_meta)
             copied_non_empty += 1
+
             if dst_data.suffix.lower() == ".parquet":
                 try:
                     parquet_actual_rows += len(pd.read_parquet(dst_data))
                     parquet_counted += 1
                 except Exception:
                     pass
-
-            if metadata_text:
-                metadata_path = Path(metadata_text)
-                if not metadata_path.exists():
-                    raise FileNotFoundError(f"metadata file missing for non-empty row: {metadata_path}")
-                assert dst_meta is not None
-                dst_meta.parent.mkdir(parents=True, exist_ok=True)
-                if dst_meta.exists():
-                    raise FileExistsError(f"compact metadata destination already exists: {dst_meta}")
-                shutil.copy2(metadata_path, dst_meta)
-        else:
-            if output_text and Path(output_text).exists() and dst_data is not None:
-                dst_data.parent.mkdir(parents=True, exist_ok=True)
-                if not dst_data.exists():
-                    shutil.copy2(Path(output_text), dst_data)
-            if metadata_text and Path(metadata_text).exists() and dst_meta is not None:
-                dst_meta.parent.mkdir(parents=True, exist_ok=True)
-                if not dst_meta.exists():
-                    shutil.copy2(Path(metadata_text), dst_meta)
 
         new = rec.to_dict()
         new["source_family"] = source_family
@@ -112,8 +143,6 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
         new["relative_metadata_path"] = rel_meta
         rows.append(new)
 
-    if has_failed_or_timeout:
-        raise ValueError("compact cannot proceed with failed/timeout rows in catalog")
     if copied_non_empty != expected_non_empty:
         raise ValueError(f"copied non-empty data file count mismatch: {copied_non_empty} != {expected_non_empty}")
 
