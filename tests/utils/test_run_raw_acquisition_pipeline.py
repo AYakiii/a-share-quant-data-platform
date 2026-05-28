@@ -203,3 +203,79 @@ def test_pull_explicit_index_symbols_regression(monkeypatch: pytest.MonkeyPatch,
         "--index-symbols", "000300,000905,000852",
     ])
     assert seen["ns"].index_symbols == "000300,000905,000852"
+
+
+def test_compact_rescue_source_with_fetched_status_generates_metadata(tmp_path: Path):
+    run_root = tmp_path / "local"
+    d = run_root / "p0_wave_20260101T000000Z" / "data/raw/rescue/sw_industry_membership_rescue/data.parquet"
+    _data_file(d)
+    run = _make_run(
+        run_root,
+        "p0_wave_20260101T000000Z",
+        [{
+            "source_group": "rescue_sources",
+            "source_family": "industry",
+            "source_spec": "sw_industry_membership_rescue",
+            "api_name": "",
+            "status": "fetched",
+            "rows": 3,
+            "output_path": str(d),
+            "metadata_path": "",
+        }],
+        acceptance={"final_status": "accepted", "unresolved_failed_count": 0},
+    )
+    compact = tmp_path / "compact"
+    mod.main(["compact", "--profile", "p0", "--run-dir", str(run), "--local-root", str(run_root), "--compact-root", str(compact)])
+    cat = pd.read_csv(compact / "compact_catalog.csv")
+    assert not cat["relative_output_path"].astype(str).str.contains("/nan/", case=False).any()
+    assert not cat["relative_metadata_path"].astype(str).str.contains("/nan/", case=False).any()
+    meta_path = compact / str(cat.iloc[0]["relative_metadata_path"])
+    assert meta_path.exists()
+
+
+def test_compact_non_rescue_missing_metadata_still_fails(tmp_path: Path):
+    run_root = tmp_path / "local"
+    d = run_root / "p0_wave_20260101T000000Z" / "data/raw/akshare/index_market/a1/data.parquet"
+    _data_file(d)
+    run = _make_run(
+        run_root,
+        "p0_wave_20260101T000000Z",
+        [{
+            "source_group": "index_market_data",
+            "source_family": "index_market",
+            "api_name": "a1",
+            "status": "success",
+            "rows": 3,
+            "output_path": str(d),
+            "metadata_path": "",
+        }],
+        acceptance={"final_status": "accepted", "unresolved_failed_count": 0},
+    )
+    with pytest.raises(ValueError):
+        mod.main(["compact", "--profile", "p0", "--run-dir", str(run), "--local-root", str(run_root), "--compact-root", str(tmp_path / "compact")])
+
+
+def test_qa_passes_with_promoted_rescue_source_asset(tmp_path: Path):
+    run_root = tmp_path / "local"
+    d = run_root / "p0_wave_20260101T000000Z" / "data/raw/rescue/sw_industry_membership_rescue/data.parquet"
+    _data_file(d)
+    run = _make_run(
+        run_root,
+        "p0_wave_20260101T000000Z",
+        [{
+            "source_group": "rescue_sources",
+            "source_family": "industry",
+            "source_spec": "sw_industry_membership_rescue",
+            "api_name": "",
+            "status": "fetched",
+            "rows": 3,
+            "output_path": str(d),
+            "metadata_path": "",
+        }],
+        acceptance={"final_status": "accepted", "unresolved_failed_count": 0},
+    )
+    compact = tmp_path / "compact"
+    mod.main(["compact", "--profile", "p0", "--run-dir", str(run), "--local-root", str(run_root), "--compact-root", str(compact)])
+    drive = tmp_path / "drive"
+    mod.main(["promote", "--profile", "p0", "--compact-root", str(compact), "--drive-root", str(drive), "--asset-name", "rescue", "--promote-to-drive"])
+    mod.main(["qa", "--profile", "p0", "--drive-root", str(drive), "--asset-name", "rescue"])

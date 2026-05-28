@@ -26,11 +26,11 @@ def _safe_int(value: object) -> int:
     return int(val) if pd.notna(val) else 0
 
 
-def _rel_from_run(run_dir: Path, src: Path, source_family: str, api_name: str, fallback_name: str) -> Path:
+def _rel_from_run(run_dir: Path, src: Path, source_family: str, api_label: str, fallback_name: str) -> Path:
     try:
         return src.relative_to(run_dir)
     except ValueError:
-        return Path("data") / "raw" / "akshare" / source_family / api_name / fallback_name
+        return Path("data") / "raw" / "akshare" / source_family / api_label / fallback_name
 
 
 def _effective_catalog(run_dir: Path) -> pd.DataFrame:
@@ -85,8 +85,13 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
 
     for _, rec in catalog.iterrows():
         row_count = _safe_int(rec.get("rows", 0))
+        source_group = _safe_text(rec.get("source_group"))
+        is_rescue = source_group == "rescue_sources"
         source_family = _clean_label(rec.get("source_family"), "unknown_family")
-        api_name = _clean_label(rec.get("api_name"), "unknown_api")
+        api_name_raw = _safe_text(rec.get("api_name"))
+        source_spec = _safe_text(rec.get("source_spec"))
+        api_label = api_name_raw if api_name_raw else _clean_label(source_spec, "unknown_api")
+        status = _safe_text(rec.get("status"))
         output_text = _safe_text(rec.get("output_path"))
         metadata_text = _safe_text(rec.get("metadata_path"))
 
@@ -100,33 +105,58 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
 
         if output_text:
             output_path = Path(output_text)
-            rel_out = str(_rel_from_run(run_dir, output_path, source_family, api_name, output_path.name))
+            rel_out = str(_rel_from_run(run_dir, output_path, source_family, api_label, output_path.name))
             dst_data = compact_root / rel_out
         if metadata_text:
             metadata_path = Path(metadata_text)
-            rel_meta = str(_rel_from_run(run_dir, metadata_path, source_family, api_name, metadata_path.name))
+            rel_meta = str(_rel_from_run(run_dir, metadata_path, source_family, api_label, metadata_path.name))
             dst_meta = compact_root / rel_meta
 
         if row_count > 0:
             if not output_text:
                 raise ValueError("rows > 0 requires output_path")
-            if not metadata_text:
-                raise ValueError("rows > 0 requires metadata_path")
             output_path = Path(output_text)
-            metadata_path = Path(metadata_text)
             if not output_path.exists():
                 raise FileNotFoundError(f"rows > 0 source data file missing: {output_path}")
-            if not metadata_path.exists():
-                raise FileNotFoundError(f"metadata file missing for non-empty row: {metadata_path}")
+
+            if is_rescue and status == "fetched":
+                if not rel_meta:
+                    rel_meta = str(Path("metadata") / "synthetic" / source_family / f"{api_label}.json")
+                    dst_meta = compact_root / rel_meta
+                synth = {
+                    "source_group": source_group,
+                    "source_family": source_family,
+                    "source_spec": source_spec,
+                    "api_name": api_name_raw,
+                    "api_label": api_label,
+                    "status": status,
+                    "rows": row_count,
+                    "original_output_path": output_text,
+                    "generated_by": "acquisition_compact.synthetic_rescue_metadata",
+                }
+                assert dst_meta is not None
+                dst_meta.parent.mkdir(parents=True, exist_ok=True)
+                if dst_meta.exists():
+                    raise FileExistsError("compact destination already exists")
+                dst_meta.write_text(json.dumps(synth, ensure_ascii=False, indent=2), encoding="utf-8")
+            else:
+                if not metadata_text:
+                    raise ValueError("rows > 0 requires metadata_path")
+                metadata_path = Path(metadata_text)
+                if not metadata_path.exists():
+                    raise FileNotFoundError(f"metadata file missing for non-empty row: {metadata_path}")
+                assert dst_meta is not None
+                dst_meta.parent.mkdir(parents=True, exist_ok=True)
+                if dst_meta.exists():
+                    raise FileExistsError("compact destination already exists")
+                shutil.copy2(metadata_path, dst_meta)
 
             expected_non_empty += 1
-            assert dst_data is not None and dst_meta is not None
+            assert dst_data is not None
             dst_data.parent.mkdir(parents=True, exist_ok=True)
-            dst_meta.parent.mkdir(parents=True, exist_ok=True)
-            if dst_data.exists() or dst_meta.exists():
+            if dst_data.exists():
                 raise FileExistsError("compact destination already exists")
             shutil.copy2(output_path, dst_data)
-            shutil.copy2(metadata_path, dst_meta)
             copied_non_empty += 1
 
             if dst_data.suffix.lower() == ".parquet":
@@ -138,7 +168,8 @@ def compact_run(run_dir: Path, compact_root: Path) -> dict[str, object]:
 
         new = rec.to_dict()
         new["source_family"] = source_family
-        new["api_name"] = api_name
+        new["api_name"] = api_name_raw
+        new["api_label"] = api_label
         new["relative_output_path"] = rel_out
         new["relative_metadata_path"] = rel_meta
         rows.append(new)
