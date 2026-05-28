@@ -24,6 +24,7 @@ def promote_compact(compact_root: Path, drive_root: Path, asset_name: str, promo
     shutil.copytree(compact_root, target)
     report = {"status": "promoted", "copied": True, "target": str(target)}
     (compact_root / "promotion_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target / "promotion_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return report
 
 
@@ -31,20 +32,35 @@ def qa_promoted_asset(drive_root: Path, asset_name: str, compact_root: Path | No
     asset = drive_root / asset_name
     catalog = pd.read_csv(asset / "compact_catalog.csv")
     errs: list[str] = []
-    for c in ["output_path", "metadata_path", "api_name"]:
+    for c in ["relative_output_path", "relative_metadata_path", "api_name"]:
         if c not in catalog.columns:
             errs.append(f"missing column: {c}")
-    if not catalog.empty:
-        if catalog["output_path"].astype(str).str.contains("/nan/", case=False).any():
-            errs.append("/nan/ found in output path")
-        if catalog["metadata_path"].astype(str).str.contains("/nan/", case=False).any():
-            errs.append("/nan/ found in metadata path")
-        for p in catalog["output_path"].astype(str):
-            if not Path(p).exists() or Path(p).suffix != ".parquet":
-                errs.append(f"missing parquet: {p}")
-                break
 
     drive_rows = int(pd.to_numeric(catalog.get("rows", 0), errors="coerce").fillna(0).sum())
+    for _, rec in catalog.iterrows():
+        rel_out = str(rec.get("relative_output_path") or "")
+        rel_meta = str(rec.get("relative_metadata_path") or "")
+        rows_num = pd.to_numeric(rec.get("rows", 0), errors="coerce")
+        rows = int(rows_num) if pd.notna(rows_num) else 0
+        if "/nan/" in rel_out.lower() or "/nan/" in rel_meta.lower():
+            errs.append("/nan/ found in relative path")
+            break
+        if rows > 0:
+            if not rel_out:
+                errs.append("missing relative_output_path for non-empty row")
+                break
+            out_path = asset / rel_out
+            if not out_path.exists() or out_path.suffix != ".parquet":
+                errs.append(f"missing parquet: {out_path}")
+                break
+            if not rel_meta:
+                errs.append("missing relative_metadata_path for non-empty row")
+                break
+            meta_path = asset / rel_meta
+            if not meta_path.exists():
+                errs.append(f"missing metadata: {meta_path}")
+                break
+
     if drive_rows <= 0:
         errs.append("drive total rows must be > 0")
     if compact_root is not None:
@@ -52,6 +68,10 @@ def qa_promoted_asset(drive_root: Path, asset_name: str, compact_root: Path | No
         compact_rows = int(pd.to_numeric(compact_catalog.get("rows", 0), errors="coerce").fillna(0).sum())
         if compact_rows != drive_rows:
             errs.append("drive and compact row count mismatch")
+
+    for req in ["compact_manifest.json", "promotion_report.json"]:
+        if not (asset / req).exists():
+            errs.append(f"missing required artifact: {req}")
 
     report = {"asset": str(asset), "is_valid": len(errs) == 0, "errors": errs, "drive_rows": drive_rows}
     (asset / "drive_qa_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

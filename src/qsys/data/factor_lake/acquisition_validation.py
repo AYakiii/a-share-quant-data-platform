@@ -67,18 +67,15 @@ def validate_run(profile: AcquisitionProfile, run_dir: Path) -> dict[str, object
             errors.append("final acceptance report status is not accepted")
         if int(acceptance.get("unresolved_failed_count", 0)) != 0:
             errors.append("unresolved_failed_count is not zero")
+    elif not catalog.empty:
+        statuses = set(catalog["status"].fillna("").astype(str))
+        disallowed = sorted(s for s in statuses if s and s not in set(profile.accepted_statuses))
+        if disallowed:
+            errors.append(f"catalog has statuses not accepted by profile: {disallowed}")
 
-    report = {
-        "profile": profile.profile_name,
-        "run_dir": str(run_dir),
-        "is_valid": len(errors) == 0,
-        "error_count": len(errors),
-        "errors": errors,
-    }
+    report = {"profile": profile.profile_name, "run_dir": str(run_dir), "is_valid": len(errors) == 0, "error_count": len(errors), "errors": errors}
     (run_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    pd.DataFrame([{"check": "is_valid", "value": report["is_valid"]}, {"check": "error_count", "value": report["error_count"]}]).to_csv(
-        run_dir / "validation_summary.csv", index=False
-    )
+    pd.DataFrame([{"check": "is_valid", "value": report["is_valid"]}, {"check": "error_count", "value": report["error_count"]}]).to_csv(run_dir / "validation_summary.csv", index=False)
     if errors:
         raise ValueError("; ".join(errors))
     return report
