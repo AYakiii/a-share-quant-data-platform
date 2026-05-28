@@ -184,6 +184,50 @@ DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
 EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
 
 
+SNAPSHOT_RAW_PARTITION_APIS: set[tuple[str, str]] = {
+    ("corporate_action", "stock_history_dividend"),
+    ("trading_attention", "stock_dzjy_sctj"),
+    ("trading_attention", "stock_dzjy_hyyybtj"),
+}
+
+TRADE_DATE_RANGE_CALL_APIS: set[tuple[str, str]] = {
+    ("trading_attention", "stock_dzjy_mrtj"),
+    ("trading_attention", "stock_dzjy_mrmx"),
+}
+
+
+def _effective_param_mode(family: str, api_name: str, param_mode: str) -> str:
+    """Return the acquisition fan-out mode after raw partition collision repairs."""
+    if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
+        return "none"
+    return param_mode
+
+
+def _build_api_call_params(family: str, api_name: str, params: dict[str, str]) -> dict[str, str]:
+    """Build adapter call params without losing logical partition keys."""
+    call_params = dict(params)
+    if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
+        trade_date = str(params["date"])
+        call_params.pop("date", None)
+        call_params.setdefault("start_date", trade_date)
+        call_params.setdefault("end_date", trade_date)
+    return call_params
+
+
+def _build_raw_partition(family: str, api_name: str, params: dict[str, str], filtered: dict[str, str]) -> dict[str, str]:
+    """Build a stable raw partition that preserves the logical acquisition key."""
+    if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
+        return {"snapshot": "latest"}
+    if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
+        partition = {"trade_date": str(params["date"])}
+        if "symbol" in params:
+            partition["symbol"] = str(params["symbol"])
+        return partition
+    if filtered:
+        return dict(filtered)
+    return {"api_name": api_name}
+
+
 @dataclass
 class IngestRecord:
     dataset: str
@@ -635,20 +679,22 @@ def _run_single_coverage_task(
     akshare_symbol = ""
     primary_error = ""
     fallback_error = ""
+    partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
             status = "pending_adapter"
         else:
-            filtered = params
+            call_params = _build_api_call_params(family, api_name, params)
+            filtered = call_params
             try:
                 sig = inspect.signature(fn)
                 accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
                 if not accepts_kwargs:
                     allowed = set(sig.parameters.keys())
-                    filtered = {k: v for k, v in params.items() if k in allowed}
+                    filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
-                filtered = params
+                filtered = call_params
             if api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
@@ -677,7 +723,7 @@ def _run_single_coverage_task(
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = dict(filtered) if filtered else {"api_name": api_name}
+            partition = _build_raw_partition(family, api_name, params, filtered)
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
@@ -734,7 +780,7 @@ def _run_single_coverage_task(
     finished_at = datetime.now(UTC)
     return [{
         "dataset_name": "raw_source_api",
-        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": used_api_name,
@@ -898,7 +944,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
                 continue
             selected_specs.append(spec)
 
-    required_modes = {spec["param_mode"] for spec in selected_specs}
+    required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
     need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
@@ -959,7 +1005,8 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             api_name = spec["api_name"]
             if selected and api_name not in selected:
                 continue
-            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
                 if resume and (family, api_name, "success") in resume_keys:
                     continue
@@ -1029,6 +1076,8 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
+            if max_workers > 1 and float(task_timeout_sec) >= 5.0:
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
 
@@ -1369,20 +1418,22 @@ def _run_single_coverage_task(
     akshare_symbol = ""
     primary_error = ""
     fallback_error = ""
+    partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
             status = "pending_adapter"
         else:
-            filtered = params
+            call_params = _build_api_call_params(family, api_name, params)
+            filtered = call_params
             try:
                 sig = inspect.signature(fn)
                 accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
                 if not accepts_kwargs:
                     allowed = set(sig.parameters.keys())
-                    filtered = {k: v for k, v in params.items() if k in allowed}
+                    filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
-                filtered = params
+                filtered = call_params
             if api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
@@ -1411,7 +1462,7 @@ def _run_single_coverage_task(
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = dict(filtered) if filtered else {"api_name": api_name}
+            partition = _build_raw_partition(family, api_name, params, filtered)
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
@@ -1468,7 +1519,7 @@ def _run_single_coverage_task(
     finished_at = datetime.now(UTC)
     return [{
         "dataset_name": "raw_source_api",
-        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": used_api_name,
@@ -1632,7 +1683,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 continue
             selected_specs.append(spec)
 
-    required_modes = {spec["param_mode"] for spec in selected_specs}
+    required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
     need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
@@ -1671,7 +1722,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             api_name = spec["api_name"]
             if selected and api_name not in selected:
                 continue
-            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
                 if resume and (family, api_name, "success") in resume_keys:
                     continue
@@ -1725,6 +1777,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
+            if max_workers > 1 and float(task_timeout_sec) >= 5.0:
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
 
