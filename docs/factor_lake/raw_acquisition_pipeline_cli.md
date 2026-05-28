@@ -34,7 +34,7 @@ Add `p1` / `p2` by extending `acquisition_profiles.py`; keep existing raw ingest
 ## Fresh Colab / Proven Notebook-Compatible P0 Pull
 
 Use mature selector passthrough arguments from the existing P0 runner (instead of manually creating per-API universe CSV files):
-
+https://github.com/AYakiii/a-share-quant-data-platform/pull/112/conflict?name=src%252Fqsys%252Futils%252Frun_raw_acquisition_pipeline.py&base_oid=494904ff0ab54dece142fb42841c6a5fd6550b5c&head_oid=7af9db336de0d9e8db0d3758c4e7ebd8303c7397
 ```bash
 PYTHONPATH=src python -m qsys.utils.run_raw_acquisition_pipeline pull \
   --profile p0 \
