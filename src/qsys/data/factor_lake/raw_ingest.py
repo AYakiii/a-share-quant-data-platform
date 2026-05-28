@@ -138,12 +138,14 @@ DISABLED_API_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
 DISABLED_API_METADATA[("event_ownership", "stock_gdfx_free_holding_analyse_em")] = {
     "enabled": False,
     "manual_review_required": True,
-    "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
+    "disabled_category": "heavy_unstable_source",
+    "disabled_reason": "heavy_unstable_source: expensive and unstable in 10d recovery run; Response ended prematurely",
 }
 DISABLED_API_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")] = {
     "enabled": False,
     "manual_review_required": True,
-    "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
+    "disabled_category": "heavy_unstable_source",
+    "disabled_reason": "heavy_unstable_source: expensive and unstable in 10d recovery run; Response ended prematurely",
 }
 DISABLED_API_METADATA[("market_price", "stock_zh_a_hist")] = {
     "enabled": False,
@@ -163,12 +165,14 @@ DISABLED_API_METADATA[("margin_leverage", "stock_margin_detail_szse")] = {
 DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indicator")] = {
     "enabled": False,
     "manual_review_required": True,
-    "disabled_reason": "executes but currently returns empty for tested symbols; deferred manual review",
+    "disabled_category": "empty_review_source",
+    "disabled_reason": "empty_review_source: executes but currently returns empty for tested symbols; deferred manual review",
 }
 DISABLED_API_METADATA[("event_ownership", "stock_gpzy_pledge_ratio_detail_em")] = {
     "enabled": False,
     "manual_review_required": True,
-    "disabled_reason": "heavy_crawl detail_source; keep deferred by default to avoid blocking recovery run",
+    "disabled_category": "heavy_unstable_source",
+    "disabled_reason": "heavy_unstable_source: heavy_crawl detail_source; keep deferred by default to avoid blocking recovery run",
 }
 DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_tj_em")] = {
     "enabled": False,
@@ -182,6 +186,153 @@ DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
 }
 
 EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
+
+
+SNAPSHOT_RAW_PARTITION_APIS: set[tuple[str, str]] = {
+    ("corporate_action", "stock_history_dividend"),
+    ("trading_attention", "stock_dzjy_sctj"),
+    ("trading_attention", "stock_dzjy_hyyybtj"),
+}
+
+TRADE_DATE_RANGE_CALL_APIS: set[tuple[str, str]] = {
+    ("trading_attention", "stock_dzjy_mrtj"),
+    ("trading_attention", "stock_dzjy_mrmx"),
+}
+
+
+def _effective_param_mode(family: str, api_name: str, param_mode: str) -> str:
+    """Return the acquisition fan-out mode after raw partition collision repairs."""
+    if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
+        return "none"
+    return param_mode
+
+
+def _build_api_call_params(family: str, api_name: str, params: dict[str, str]) -> dict[str, str]:
+    """Build adapter call params without losing logical partition keys."""
+    call_params = dict(params)
+    if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
+        trade_date = str(params["date"])
+        call_params.pop("date", None)
+        call_params.setdefault("start_date", trade_date)
+        call_params.setdefault("end_date", trade_date)
+    return call_params
+
+
+def _build_raw_partition(family: str, api_name: str, params: dict[str, str], filtered: dict[str, str]) -> dict[str, str]:
+    """Build a stable raw partition that preserves the logical acquisition key."""
+    if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
+        return {"snapshot": "latest"}
+    if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
+        partition = {"trade_date": str(params["date"])}
+        if "symbol" in params:
+            partition["symbol"] = str(params["symbol"])
+        return partition
+    if filtered:
+        return dict(filtered)
+    return {"api_name": api_name}
+
+
+P2_DISCOVERY_API_ATTEMPTS: dict[str, list[dict[str, str]]] = {
+    "stock_market_fund_flow": [{}],
+    "stock_individual_fund_flow_rank": [{"indicator": "今日"}, {"indicator": "5日"}],
+    "stock_sector_fund_flow_rank": [
+        {"indicator": "今日", "sector_type": "行业资金流"},
+        {"indicator": "5日", "sector_type": "行业资金流"},
+    ],
+    "stock_sector_fund_flow_summary": [{"symbol": "电源设备", "indicator": "今日"}],
+    "futures_inventory_99": [{"symbol": "豆一"}],
+}
+
+
+def _classify_probe_failure(err: str) -> str:
+    """Classify P2 discovery/probe failures into auditable non-crashing buckets."""
+    low = err.lower()
+    if any(token in low for token in ["bad gateway", "502", "http 502"]):
+        return "bad_gateway"
+    if any(token in low for token in ["timeout", "remote", "connection", "read timed out", "max retries", "connectionerror"]):
+        return "network_unstable_retry"
+    if any(token in low for token in ["jsondecode", "expecting value", "empty response", "empty document"]):
+        return "json_empty_response"
+    if any(token in low for token in ["missing", "required positional", "required argument", "missing_required_param"]):
+        return "missing_required_param"
+    if any(token in low for token in ["none", "not subscriptable", "find_all", "keyerror", "indexerror", "attributeerror"]):
+        return "parser_empty_response"
+    return "unclassified_failure"
+
+
+def _filter_callable_params(fn: AdapterFn, params: dict[str, str]) -> dict[str, str]:
+    """Filter probe params to a callable signature while preserving kwargs callables."""
+    try:
+        sig = inspect.signature(fn)
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        if accepts_kwargs:
+            return dict(params)
+        return {k: v for k, v in params.items() if k in sig.parameters}
+    except (TypeError, ValueError):
+        return dict(params)
+
+
+def run_p2_discovery_probe(
+    api_names: list[str] | None = None,
+    adapter_map: dict[str, AdapterFn] | None = None,
+    ak_module: object | None = None,
+) -> dict[str, list[dict[str, object]]]:
+    """Probe P2 discovery candidates with explicit params and classified failures only.
+
+    This helper is intentionally not wired into official raw ingestion profiles; it is
+    for repair/probe diagnostics so P2 candidates can fail without crashing a run.
+    """
+    adapters = adapter_map or {}
+    selected = api_names or list(P2_DISCOVERY_API_ATTEMPTS)
+    rows: list[dict[str, object]] = []
+    for api_name in selected:
+        fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+        attempts = P2_DISCOVERY_API_ATTEMPTS.get(api_name, [{}])
+        if fn is None:
+            rows.append({
+                "api_name": api_name,
+                "attempt_no": 1,
+                "params_json": json.dumps(attempts[0], ensure_ascii=False, sort_keys=True),
+                "status": "failed",
+                "failure_class": "missing_required_param",
+                "error_type": "MissingAdapter",
+                "error_message": "missing_required_param: no adapter or AkShare function available",
+                "rows": 0,
+            })
+            continue
+        for attempt_no, params in enumerate(attempts, start=1):
+            filtered = _filter_callable_params(fn, params)
+            try:
+                ret = fn(**filtered)
+                if ret is None:
+                    raise ValueError("parser_empty_response: none_result_from_api")
+                raw = ret.raw if hasattr(ret, "raw") else ret
+                if not isinstance(raw, pd.DataFrame):
+                    raw = pd.DataFrame(raw)
+                rows.append({
+                    "api_name": api_name,
+                    "attempt_no": attempt_no,
+                    "params_json": json.dumps(filtered, ensure_ascii=False, sort_keys=True),
+                    "status": "empty" if raw.empty else "success",
+                    "failure_class": "parser_empty_response" if raw.empty else "",
+                    "error_type": "empty_response" if raw.empty else "",
+                    "error_message": "parser_empty_response: empty dataframe returned by discovery probe" if raw.empty else "",
+                    "rows": int(len(raw)),
+                })
+            except Exception as exc:  # noqa: BLE001
+                err = f"{type(exc).__name__}: {exc}"
+                failure_class = _classify_probe_failure(err)
+                rows.append({
+                    "api_name": api_name,
+                    "attempt_no": attempt_no,
+                    "params_json": json.dumps(filtered, ensure_ascii=False, sort_keys=True),
+                    "status": "failed",
+                    "failure_class": failure_class,
+                    "error_type": type(exc).__name__,
+                    "error_message": f"{failure_class}: {exc}",
+                    "rows": 0,
+                })
+    return {"rows": rows}
 
 
 @dataclass
@@ -400,6 +551,10 @@ def _normalize_error_message(api_name: str, err: str) -> str:
         return f"network_unstable_retry: {err}"
     if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
         return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["none", "not subscriptable", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and any(k in low for k in ["are in the [columns]", "keyerror", "missing", "none", "not subscriptable"]):
+        return f"defensive_shape_guard: schema_mismatch_empty_response: {err}"
     if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
         k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
@@ -413,9 +568,11 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
         return True
     if api_name == "stock_individual_info_em" and "expecting value" in low:
         return True
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["parser_empty_response", "none", "not subscriptable", "keyerror", "indexerror", "attributeerror"]):
+        return True
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
         return True
-    if api_name == "stock_zh_a_disclosure_relation_cninfo" and ("are in the [columns]" in low or "keyerror" in low):
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and any(k in low for k in ["schema_mismatch_empty_response", "are in the [columns]", "keyerror", "missing", "none", "not subscriptable"]):
         return True
     if api_name == "sw_index_third_info" and any(k in low for k in ["parser_empty_response", "find_all", "nonetype"]):
         return True
@@ -614,7 +771,10 @@ def _run_single_coverage_task(
             "api_name": api_name,
             "status": "skipped",
             "rows": 0,
+            "error_type": "deferred_manual_review",
             "error_message": f"disabled_reason: {disabled_reason}",
+            "manual_review_required": bool(DISABLED_API_METADATA.get((family, api_name), {}).get("manual_review_required", False)),
+            "disabled_category": str(DISABLED_API_METADATA.get((family, api_name), {}).get("disabled_category", "manual_review")),
             "output_path": "",
             "metadata_path": "",
             "started_at": started_at.isoformat(),
@@ -635,20 +795,22 @@ def _run_single_coverage_task(
     akshare_symbol = ""
     primary_error = ""
     fallback_error = ""
+    partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
             status = "pending_adapter"
         else:
-            filtered = params
+            call_params = _build_api_call_params(family, api_name, params)
+            filtered = call_params
             try:
                 sig = inspect.signature(fn)
                 accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
                 if not accepts_kwargs:
                     allowed = set(sig.parameters.keys())
-                    filtered = {k: v for k, v in params.items() if k in allowed}
+                    filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
-                filtered = params
+                filtered = call_params
             if api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
@@ -677,7 +839,10 @@ def _run_single_coverage_task(
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = dict(filtered) if filtered else {"api_name": api_name}
+            if status == "empty" and api_name == "stock_financial_analysis_indicator":
+                err_type = "empty_review_source"
+                err = "empty_review_source: AkShare returned an empty dataframe for the requested symbol; keep deferred for manual review"
+            partition = _build_raw_partition(family, api_name, params, filtered)
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
@@ -734,7 +899,7 @@ def _run_single_coverage_task(
     finished_at = datetime.now(UTC)
     return [{
         "dataset_name": "raw_source_api",
-        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": used_api_name,
@@ -776,7 +941,11 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        t0 = time.perf_counter()
+        rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        if time.perf_counter() - t0 > task_timeout_sec:
+            raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
+        return rows
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -898,7 +1067,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
                 continue
             selected_specs.append(spec)
 
-    required_modes = {spec["param_mode"] for spec in selected_specs}
+    required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
     need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
@@ -959,7 +1128,8 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             api_name = spec["api_name"]
             if selected and api_name not in selected:
                 continue
-            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
                 if resume and (family, api_name, "success") in resume_keys:
                     continue
@@ -1029,6 +1199,10 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
+            if max_workers <= 1 or float(task_timeout_sec) < 5.0:
+                return _run_task_with_signal_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+            if float(task_timeout_sec) >= 5.0:
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
 
@@ -1068,7 +1242,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1:
+    if max_workers <= 1 or (task_timeout_sec and task_timeout_sec > 0 and float(task_timeout_sec) < 5.0):
         for family, api_name, params in tasks:
             print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
             task_rows = _execute_task(family, api_name, params)
@@ -1134,6 +1308,10 @@ def _normalize_error_message(api_name: str, err: str) -> str:
         return f"network_unstable_retry: {err}"
     if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
         return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["none", "not subscriptable", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and any(k in low for k in ["are in the [columns]", "keyerror", "missing", "none", "not subscriptable"]):
+        return f"defensive_shape_guard: schema_mismatch_empty_response: {err}"
     if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
         k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
@@ -1147,9 +1325,11 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
         return True
     if api_name == "stock_individual_info_em" and "expecting value" in low:
         return True
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["parser_empty_response", "none", "not subscriptable", "keyerror", "indexerror", "attributeerror"]):
+        return True
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
         return True
-    if api_name == "stock_zh_a_disclosure_relation_cninfo" and ("are in the [columns]" in low or "keyerror" in low):
+    if api_name == "stock_zh_a_disclosure_relation_cninfo" and any(k in low for k in ["schema_mismatch_empty_response", "are in the [columns]", "keyerror", "missing", "none", "not subscriptable"]):
         return True
     if api_name == "sw_index_third_info" and any(k in low for k in ["parser_empty_response", "find_all", "nonetype"]):
         return True
@@ -1348,7 +1528,10 @@ def _run_single_coverage_task(
             "api_name": api_name,
             "status": "skipped",
             "rows": 0,
+            "error_type": "deferred_manual_review",
             "error_message": f"disabled_reason: {disabled_reason}",
+            "manual_review_required": bool(DISABLED_API_METADATA.get((family, api_name), {}).get("manual_review_required", False)),
+            "disabled_category": str(DISABLED_API_METADATA.get((family, api_name), {}).get("disabled_category", "manual_review")),
             "output_path": "",
             "metadata_path": "",
             "started_at": started_at.isoformat(),
@@ -1369,20 +1552,22 @@ def _run_single_coverage_task(
     akshare_symbol = ""
     primary_error = ""
     fallback_error = ""
+    partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None:
             status = "pending_adapter"
         else:
-            filtered = params
+            call_params = _build_api_call_params(family, api_name, params)
+            filtered = call_params
             try:
                 sig = inspect.signature(fn)
                 accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
                 if not accepts_kwargs:
                     allowed = set(sig.parameters.keys())
-                    filtered = {k: v for k, v in params.items() if k in allowed}
+                    filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
-                filtered = params
+                filtered = call_params
             if api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
@@ -1411,7 +1596,10 @@ def _run_single_coverage_task(
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
             status = "empty" if raw.empty else "success"
-            partition = dict(filtered) if filtered else {"api_name": api_name}
+            if status == "empty" and api_name == "stock_financial_analysis_indicator":
+                err_type = "empty_review_source"
+                err = "empty_review_source: AkShare returned an empty dataframe for the requested symbol; keep deferred for manual review"
+            partition = _build_raw_partition(family, api_name, params, filtered)
             if used_api_name == "stock_zh_a_daily":
                 partition = {"symbol": akshare_symbol, "adjust": ""}
             try:
@@ -1468,7 +1656,7 @@ def _run_single_coverage_task(
     finished_at = datetime.now(UTC)
     return [{
         "dataset_name": "raw_source_api",
-        "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
         "source_family": family,
         "api_name": used_api_name,
@@ -1510,7 +1698,11 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        t0 = time.perf_counter()
+        rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        if time.perf_counter() - t0 > task_timeout_sec:
+            raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
+        return rows
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -1632,7 +1824,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 continue
             selected_specs.append(spec)
 
-    required_modes = {spec["param_mode"] for spec in selected_specs}
+    required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
     need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
@@ -1671,7 +1863,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             api_name = spec["api_name"]
             if selected and api_name not in selected:
                 continue
-            params_list = _params_for_mode(spec["param_mode"], symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
                 if resume and (family, api_name, "success") in resume_keys:
                     continue
@@ -1725,6 +1918,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
+            if max_workers <= 1 or float(task_timeout_sec) < 5.0:
+                return _run_task_with_signal_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
+            if float(task_timeout_sec) >= 5.0:
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
 
@@ -1764,7 +1961,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1:
+    if max_workers <= 1 or (task_timeout_sec and task_timeout_sec > 0 and float(task_timeout_sec) < 5.0):
         for family, api_name, params in tasks:
             print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
             task_rows = _execute_task(family, api_name, params)
