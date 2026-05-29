@@ -142,7 +142,9 @@ DISABLED_API_METADATA[("event_ownership", "stock_gdfx_free_holding_analyse_em")]
 }
 DISABLED_API_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")] = {
     "enabled": False,
+    "default_enabled": False,
     "manual_review_required": True,
+    "disabled_category": "network_unstable_source",
     "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
 }
 DISABLED_API_METADATA[("market_price", "stock_zh_a_hist")] = {
@@ -162,7 +164,10 @@ DISABLED_API_METADATA[("margin_leverage", "stock_margin_detail_szse")] = {
 }
 DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indicator")] = {
     "enabled": False,
+    "default_enabled": False,
     "manual_review_required": True,
+    "disabled_category": "empty_review_source",
+    "review_category": "parameter_schema_review",
     "disabled_reason": "executes but currently returns empty for tested symbols; deferred manual review",
 }
 DISABLED_API_METADATA[("event_ownership", "stock_gpzy_pledge_ratio_detail_em")] = {
@@ -177,9 +182,37 @@ DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_tj_em")] = {
 }
 DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
     "enabled": False,
+    "default_enabled": False,
     "manual_review_required": True,
-    "disabled_reason": "heavy_crawl detail_source; deferred by default",
+    "importance": "high",
+    "acquisition_mode": "long_detail_run",
+    "disabled_category": "heavy_detail_source",
+    "disabled_reason": "high-importance heavy detail source; deferred by default because real runs fan out into long detail crawls",
 }
+
+API_POLICY_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
+    **DISABLED_API_METADATA,
+    ("disclosure_ir", "stock_zh_a_disclosure_relation_cninfo"): {
+        "enabled": True,
+        "default_enabled": True,
+        "manual_review_required": True,
+        "review_category": "schema_drift",
+        "disabled_category": "empty_review",
+        "disabled_reason": "schema/column drift can downgrade to auditable empty; keep under manual review",
+    },
+}
+
+
+def _api_policy_metadata(family: str, api_name: str) -> dict[str, str | bool]:
+    """Return acquisition policy metadata for sources with explicit review classifications."""
+    return dict(API_POLICY_METADATA.get((family, api_name), {}))
+
+
+def _attach_api_policy_metadata(row: dict[str, object], family: str, api_name: str) -> dict[str, object]:
+    """Attach explicit acquisition policy metadata to an ingest catalog row when available."""
+    for key, value in _api_policy_metadata(family, api_name).items():
+        row.setdefault(key, value)
+    return row
 
 EXCLUDED_APIS: set[tuple[str, str]] = {("market_price", "stock_zh_a_daily")}
 
@@ -657,18 +690,27 @@ def _run_single_coverage_task(
             )
         )
         finished_at = datetime.now(UTC)
-        return [{
+        return [_attach_api_policy_metadata({
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(_build_raw_partition(family, api_name, params, {}), ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "source_family": family,
             "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": str(params.get("symbol", "")),
+            "akshare_symbol": "",
             "status": "skipped",
             "rows": 0,
+            "error_type": "default_disabled",
             "error_message": f"disabled_reason: {disabled_reason}",
             "output_path": "",
             "metadata_path": "",
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
+        }, family, api_name)]
 
     used_api_name = api_name
     fallback_from = ""
@@ -782,7 +824,7 @@ def _run_single_coverage_task(
             status = "failed"
 
     finished_at = datetime.now(UTC)
-    return [{
+    return [_attach_api_policy_metadata({
         "dataset_name": "raw_source_api",
         "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
@@ -802,7 +844,7 @@ def _run_single_coverage_task(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-    }]
+    }, family, requested_api_name)]
 
 
 
@@ -1400,18 +1442,27 @@ def _run_single_coverage_task(
             )
         )
         finished_at = datetime.now(UTC)
-        return [{
+        return [_attach_api_policy_metadata({
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(_build_raw_partition(family, api_name, params, {}), ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "source_family": family,
             "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": str(params.get("symbol", "")),
+            "akshare_symbol": "",
             "status": "skipped",
             "rows": 0,
+            "error_type": "default_disabled",
             "error_message": f"disabled_reason: {disabled_reason}",
             "output_path": "",
             "metadata_path": "",
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
+        }, family, api_name)]
 
     used_api_name = api_name
     fallback_from = ""
@@ -1525,7 +1576,7 @@ def _run_single_coverage_task(
             status = "failed"
 
     finished_at = datetime.now(UTC)
-    return [{
+    return [_attach_api_policy_metadata({
         "dataset_name": "raw_source_api",
         "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
@@ -1545,7 +1596,7 @@ def _run_single_coverage_task(
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-    }]
+    }, family, requested_api_name)]
 
 
 
