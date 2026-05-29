@@ -444,6 +444,8 @@ def _normalize_error_message(api_name: str, err: str) -> str:
         return f"network_unstable_retry: {err}"
     if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
         return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["none", "not subscriptable", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
     if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
         k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
@@ -456,6 +458,8 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     if api_name in {"stock_yjyg_em", "stock_yysj_em"} and any(k in low for k in ["none", "not subscriptable", "expecting value"]):
         return True
     if api_name == "stock_individual_info_em" and "expecting value" in low:
+        return True
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["parser_empty_response", "none", "not subscriptable", "keyerror", "indexerror", "attributeerror"]):
         return True
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
         return True
@@ -1183,6 +1187,8 @@ def _normalize_error_message(api_name: str, err: str) -> str:
         return f"network_unstable_retry: {err}"
     if api_name == "sw_index_third_info" and any(k in low for k in ["find_all", "nonetype"]):
         return f"defensive_shape_guard: parser_empty_response: {err}"
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["none", "not subscriptable", "keyerror", "indexerror", "attributeerror", "json", "expecting value"]):
+        return f"defensive_shape_guard: parser_empty_response: {err}"
     if api_name in {"stock_yjyg_em", "stock_yysj_em", "stock_industry_change_cninfo", "stock_individual_info_em", "stock_zh_a_disclosure_relation_cninfo"} and any(
         k in low for k in ["none", "keyerror", "indexerror", "attributeerror", "json", "expecting value", "are in the [columns]"]
     ):
@@ -1195,6 +1201,8 @@ def _should_downgrade_to_empty(api_name: str, err: str) -> bool:
     if api_name in {"stock_yjyg_em", "stock_yysj_em"} and any(k in low for k in ["none", "not subscriptable", "expecting value"]):
         return True
     if api_name == "stock_individual_info_em" and "expecting value" in low:
+        return True
+    if api_name == "stock_jgdy_detail_em" and any(k in low for k in ["parser_empty_response", "none", "not subscriptable", "keyerror", "indexerror", "attributeerror"]):
         return True
     if api_name == "stock_industry_change_cninfo" and ("变更日期" in err or "keyerror" in low):
         return True
