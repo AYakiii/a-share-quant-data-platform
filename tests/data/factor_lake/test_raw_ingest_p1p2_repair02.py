@@ -110,6 +110,15 @@ def test_p2_discovery_failures_are_classified_without_crashing():
     assert all(row["params_json"] for row in out["rows"])
 
 
+def test_p2_discovery_missing_adapter_is_explicitly_classified():
+    out = run_p2_discovery_probe(api_names=["stock_market_fund_flow"], adapter_map={})
+
+    [row] = out["rows"]
+    assert row["status"] == "failed"
+    assert row["failure_class"] == "missing_adapter_or_function"
+    assert row["error_type"] == "MissingAdapter"
+
+
 def test_heavy_unstable_sources_remain_deferred_by_default(tmp_path):
     called = {"n": 0}
 

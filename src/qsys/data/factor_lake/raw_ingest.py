@@ -294,9 +294,9 @@ def run_p2_discovery_probe(
                 "attempt_no": 1,
                 "params_json": json.dumps(attempts[0], ensure_ascii=False, sort_keys=True),
                 "status": "failed",
-                "failure_class": "missing_required_param",
+                "failure_class": "missing_adapter_or_function",
                 "error_type": "MissingAdapter",
-                "error_message": "missing_required_param: no adapter or AkShare function available",
+                "error_message": "missing_adapter_or_function: no adapter or AkShare function available",
                 "rows": 0,
             })
             continue
@@ -941,11 +941,7 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        t0 = time.perf_counter()
-        rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-        if time.perf_counter() - t0 > task_timeout_sec:
-            raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
-        return rows
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -1199,9 +1195,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
-            if max_workers <= 1 or float(task_timeout_sec) < 5.0:
-                return _run_task_with_signal_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
-            if float(task_timeout_sec) >= 5.0:
+            if max_workers > 1 and float(task_timeout_sec) >= 5.0:
                 return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
@@ -1242,7 +1236,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1 or (task_timeout_sec and task_timeout_sec > 0 and float(task_timeout_sec) < 5.0):
+    if max_workers <= 1:
         for family, api_name, params in tasks:
             print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
             task_rows = _execute_task(family, api_name, params)
@@ -1698,11 +1692,7 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        t0 = time.perf_counter()
-        rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-        if time.perf_counter() - t0 > task_timeout_sec:
-            raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
-        return rows
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -1918,9 +1908,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
-            if max_workers <= 1 or float(task_timeout_sec) < 5.0:
-                return _run_task_with_signal_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
-            if float(task_timeout_sec) >= 5.0:
+            if max_workers > 1 and float(task_timeout_sec) >= 5.0:
                 return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
             return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
@@ -1961,7 +1949,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1 or (task_timeout_sec and task_timeout_sec > 0 and float(task_timeout_sec) < 5.0):
+    if max_workers <= 1:
         for family, api_name, params in tasks:
             print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
             task_rows = _execute_task(family, api_name, params)
