@@ -103,6 +103,18 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_dzjy_sctj", "param_mode": "trade_date"},
         {"api_name": "stock_dzjy_hyyybtj", "param_mode": "trade_date"},
     ],
+    "market_sentiment": [
+        {"api_name": "stock_fund_flow_concept", "param_mode": "none"},
+        {"api_name": "stock_fund_flow_industry", "param_mode": "none"},
+        {"api_name": "stock_hsgt_fund_flow_summary_em", "param_mode": "none"},
+    ],
+    "commodity_inventory": [
+        {"api_name": "futures_inventory_em", "param_mode": "none"},
+        {"api_name": "futures_comex_inventory", "param_mode": "none"},
+        {"api_name": "futures_gfex_warehouse_receipt", "param_mode": "trade_date", "exchange": "GFEX"},
+        {"api_name": "futures_shfe_warehouse_receipt", "param_mode": "trade_date", "exchange": "SHFE"},
+        {"api_name": "futures_warehouse_receipt_czce", "param_mode": "trade_date", "exchange": "CZCE"},
+    ],
 }
 
 PHASE_COVERAGE_FAMILIES: tuple[str, ...] = (
@@ -116,7 +128,101 @@ PHASE_COVERAGE_FAMILIES: tuple[str, ...] = (
     "trading_attention",
 )
 
+P15P2_WAVE1_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
+    ("market_sentiment", "stock_fund_flow_concept"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P1.5",
+        "data_theme": "concept_fund_flow",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("market_sentiment", "stock_fund_flow_industry"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P1.5",
+        "data_theme": "industry_fund_flow",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("market_sentiment", "stock_hsgt_fund_flow_summary_em"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P1.5",
+        "data_theme": "northbound_southbound_fund_flow",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("commodity_inventory", "futures_inventory_em"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P2",
+        "data_theme": "commodity_inventory",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("commodity_inventory", "futures_comex_inventory"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P2",
+        "data_theme": "global_commodity_inventory",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("commodity_inventory", "futures_gfex_warehouse_receipt"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P2",
+        "data_theme": "commodity_warehouse_receipt",
+        "exchange": "GFEX",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("commodity_inventory", "futures_shfe_warehouse_receipt"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P2",
+        "data_theme": "commodity_warehouse_receipt",
+        "exchange": "SHFE",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+    ("commodity_inventory", "futures_warehouse_receipt_czce"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "priority_tier": "P2",
+        "data_theme": "commodity_warehouse_receipt",
+        "exchange": "CZCE",
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "p15p2_wave1_recovered_source",
+        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+    },
+}
+
+P15P2_WAVE1_APIS: set[tuple[str, str]] = set(P15P2_WAVE1_SOURCE_METADATA)
+WAREHOUSE_RECEIPT_EXCHANGES: dict[str, str] = {
+    "futures_gfex_warehouse_receipt": "GFEX",
+    "futures_shfe_warehouse_receipt": "SHFE",
+    "futures_warehouse_receipt_czce": "CZCE",
+}
+
 TEMP_DISABLED_APIS: set[tuple[str, str]] = {
+    *P15P2_WAVE1_APIS,
     ("market_price", "stock_zh_a_hist"),
     ("market_price", "stock_individual_info_em"),
     ("financial_fundamental", "stock_financial_analysis_indicator"),
@@ -192,6 +298,7 @@ DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
 
 API_POLICY_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
     **DISABLED_API_METADATA,
+    **P15P2_WAVE1_SOURCE_METADATA,
     ("disclosure_ir", "stock_zh_a_disclosure_relation_cninfo"): {
         "enabled": True,
         "default_enabled": True,
@@ -251,14 +358,57 @@ def _build_raw_partition(family: str, api_name: str, params: dict[str, str], fil
     """Build a stable raw partition that preserves the logical acquisition key."""
     if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
         return {"snapshot": "latest"}
-    if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
+    if "date" in params and (family, api_name) in TRADE_DATE_RANGE_CALL_APIS | {
+        ("commodity_inventory", "futures_gfex_warehouse_receipt"),
+        ("commodity_inventory", "futures_shfe_warehouse_receipt"),
+        ("commodity_inventory", "futures_warehouse_receipt_czce"),
+    }:
         partition = {"trade_date": str(params["date"])}
         if "symbol" in params:
             partition["symbol"] = str(params["symbol"])
         return partition
     if filtered:
         return dict(filtered)
+    if (family, api_name) in P15P2_WAVE1_APIS:
+        return {"snapshot": "latest"}
     return {"api_name": api_name}
+
+
+def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]) -> pd.DataFrame:
+    """Normalize an AkShare raw result while preserving source columns.
+
+    Warehouse receipt APIs return dict[str, DataFrame].  Each non-empty child
+    frame is copied, tagged with the dict key as product_key, and concatenated
+    into one raw-compatible DataFrame.
+    """
+    if isinstance(raw, dict):
+        frames: list[pd.DataFrame] = []
+        exchange = WAREHOUSE_RECEIPT_EXCHANGES.get(api_name, "")
+        trade_date = str(params.get("date", ""))
+        for product_key, subframe in raw.items():
+            if subframe is None:
+                continue
+            frame = subframe.copy() if isinstance(subframe, pd.DataFrame) else pd.DataFrame(subframe)
+            if frame.empty:
+                continue
+            frame["product_key"] = str(product_key)
+            frame["source_api"] = api_name
+            if exchange:
+                frame["exchange"] = exchange
+            if trade_date:
+                frame["trade_date"] = trade_date
+            frames.append(frame)
+        if not frames:
+            return pd.DataFrame()
+        return pd.concat(frames, ignore_index=True, sort=False)
+    if isinstance(raw, pd.DataFrame):
+        return raw
+    return pd.DataFrame(raw)
+
+
+def _manual_selection_allows_disabled_source(family: str, api_name: str, manual_selected: bool) -> bool:
+    """Allow Wave 1 recovered sources to run when explicitly selected by API name."""
+    return manual_selected and (family, api_name) in P15P2_WAVE1_APIS
 
 
 @dataclass
@@ -675,6 +825,7 @@ def _run_single_coverage_task(
     adapters: dict[str, AdapterFn],
     ak_module: object | None,
     include_disabled: bool,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     status = "pending_adapter"
@@ -683,7 +834,7 @@ def _run_single_coverage_task(
     n_rows = 0
     out_path = meta_path = ""
 
-    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled and not _manual_selection_allows_disabled_source(family, api_name, manual_selected):
         disabled_reason = str(
             DISABLED_API_METADATA.get((family, api_name), {}).get(
                 "disabled_reason", "temporarily disabled for acquisition control"
@@ -762,9 +913,7 @@ def _run_single_coverage_task(
                 ret = fn(**filtered)
             if ret is None:
                 raise ValueError("none_result_from_api")
-            raw = ret.raw if hasattr(ret, "raw") else ret
-            if not isinstance(raw, pd.DataFrame):
-                raw = pd.DataFrame(raw)
+            raw = _normalize_raw_api_result(ret.raw if hasattr(ret, "raw") else ret, used_api_name, params)
             if used_api_name == "stock_zh_a_daily":
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
@@ -788,6 +937,7 @@ def _run_single_coverage_task(
                     dp, mp = write_raw_partition(
                         output_root, family, used_api_name, partition, raw,
                         {
+                            **_api_policy_metadata(family, requested_api_name),
                             "source_family": family,
                             "api_name": used_api_name,
                             "requested_api_name": requested_api_name,
@@ -860,6 +1010,7 @@ def _run_task_with_signal_timeout(
     ak_module: object | None,
     include_disabled: bool,
     task_timeout_sec: float,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -868,7 +1019,7 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, manual_selected)
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -906,12 +1057,13 @@ def _run_task_in_subprocess_with_timeout(
     ak_module: object | None,
     include_disabled: bool,
     task_timeout_sec: float,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
 
     def _worker(q: mp.Queue) -> None:
         try:
-            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, manual_selected)
             q.put(("ok", rows))
         except Exception as exc:  # noqa: BLE001
             q.put(("err", f"{type(exc).__name__}: {exc}"))
@@ -1123,9 +1275,9 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
             if max_workers > 1 and float(task_timeout_sec) >= 5.0:
-                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected)
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
 
     def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         max_attempts = max(0, int(task_retry_attempts)) + 1
@@ -1427,6 +1579,7 @@ def _run_single_coverage_task(
     adapters: dict[str, AdapterFn],
     ak_module: object | None,
     include_disabled: bool,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     status = "pending_adapter"
@@ -1435,7 +1588,7 @@ def _run_single_coverage_task(
     n_rows = 0
     out_path = meta_path = ""
 
-    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled:
+    if (family, api_name) in TEMP_DISABLED_APIS and not include_disabled and not _manual_selection_allows_disabled_source(family, api_name, manual_selected):
         disabled_reason = str(
             DISABLED_API_METADATA.get((family, api_name), {}).get(
                 "disabled_reason", "temporarily disabled for acquisition control"
@@ -1514,9 +1667,7 @@ def _run_single_coverage_task(
                 ret = fn(**filtered)
             if ret is None:
                 raise ValueError("none_result_from_api")
-            raw = ret.raw if hasattr(ret, "raw") else ret
-            if not isinstance(raw, pd.DataFrame):
-                raw = pd.DataFrame(raw)
+            raw = _normalize_raw_api_result(ret.raw if hasattr(ret, "raw") else ret, used_api_name, params)
             if used_api_name == "stock_zh_a_daily":
                 raw = _filter_daily_frame_by_range(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
             n_rows = len(raw)
@@ -1540,6 +1691,7 @@ def _run_single_coverage_task(
                     dp, mp = write_raw_partition(
                         output_root, family, used_api_name, partition, raw,
                         {
+                            **_api_policy_metadata(family, requested_api_name),
                             "source_family": family,
                             "api_name": used_api_name,
                             "requested_api_name": requested_api_name,
@@ -1612,6 +1764,7 @@ def _run_task_with_signal_timeout(
     ak_module: object | None,
     include_disabled: bool,
     task_timeout_sec: float,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
@@ -1620,7 +1773,7 @@ def _run_task_with_signal_timeout(
     old = signal.signal(signal.SIGALRM, _handler)
     signal.setitimer(signal.ITIMER_REAL, task_timeout_sec)
     try:
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, manual_selected)
     except TimeoutError as exc:
         finished_at = datetime.now(UTC)
         symbol = str(params.get("symbol", ""))
@@ -1658,12 +1811,13 @@ def _run_task_in_subprocess_with_timeout(
     ak_module: object | None,
     include_disabled: bool,
     task_timeout_sec: float,
+    manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
 
     def _worker(q: mp.Queue) -> None:
         try:
-            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+            rows = _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, manual_selected)
             q.put(("ok", rows))
         except Exception as exc:  # noqa: BLE001
             q.put(("err", f"{type(exc).__name__}: {exc}"))
@@ -1837,9 +1991,9 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     def _execute_task_once(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         if task_timeout_sec and task_timeout_sec > 0:
             if max_workers > 1 and float(task_timeout_sec) >= 5.0:
-                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
-            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec))
-        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled)
+                return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected)
+        return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
 
     def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
         max_attempts = max(0, int(task_retry_attempts)) + 1
