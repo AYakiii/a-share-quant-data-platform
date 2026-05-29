@@ -381,9 +381,9 @@ def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]
     frame is copied, tagged with the dict key as product_key, and concatenated
     into one raw-compatible DataFrame.
     """
-    if isinstance(raw, dict):
+    if isinstance(raw, dict) and api_name in WAREHOUSE_RECEIPT_EXCHANGES:
         frames: list[pd.DataFrame] = []
-        exchange = WAREHOUSE_RECEIPT_EXCHANGES.get(api_name, "")
+        exchange = WAREHOUSE_RECEIPT_EXCHANGES[api_name]
         trade_date = str(params.get("date", ""))
         for product_key, subframe in raw.items():
             if subframe is None:

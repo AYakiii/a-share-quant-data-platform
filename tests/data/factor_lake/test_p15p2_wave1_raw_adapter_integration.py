@@ -100,6 +100,29 @@ def test_warehouse_receipt_dict_frames_are_flattened_with_product_exchange_and_t
     assert {"仓库", "仓单"} <= set(raw.columns)
 
 
+def test_non_warehouse_dict_result_uses_generic_dataframe_conversion(tmp_path: Path) -> None:
+    def stock_fund_flow_industry() -> dict[str, list[object]]:
+        return {"行业": ["银行"], "净流入": [88.0]}
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["market_sentiment"],
+        selected_api_names=["stock_fund_flow_industry"],
+        adapter_map={"stock_fund_flow_industry": stock_fund_flow_industry},
+        max_workers=1,
+    )
+
+    [row] = out["rows"]
+    assert row["status"] == "success"
+    assert row["rows"] == 1
+    raw = pd.read_parquet(row["output_path"])
+    assert list(raw.columns) == ["行业", "净流入"]
+    assert "product_key" not in raw.columns
+    assert "exchange" not in raw.columns
+    assert "trade_date" not in raw.columns
+    assert "source_api" not in raw.columns
+
+
 def test_empty_warehouse_receipt_dict_is_empty_not_success(tmp_path: Path) -> None:
     def futures_gfex_warehouse_receipt(date: str) -> dict[str, pd.DataFrame]:  # noqa: ARG001
         return {"SI": pd.DataFrame(), "LC": pd.DataFrame()}
