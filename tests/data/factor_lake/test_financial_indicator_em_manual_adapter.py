@@ -20,12 +20,21 @@ from qsys.data.factor_lake.registry import FACTOR_SOURCE_REGISTRY, SOURCE_CAPABI
 def test_financial_indicator_em_registered_manual_only_and_legacy_preserved() -> None:
     financial_specs = COVERAGE_API_SPECS["financial_fundamental"]
     api_names = {spec["api_name"] for spec in financial_specs}
-    capability_names = {spec.api_name for spec in SOURCE_CAPABILITY_REGISTRY}
+    capability_by_api = {spec.api_name: spec for spec in SOURCE_CAPABILITY_REGISTRY}
     source_case_names = {case.api_name: case for case in FACTOR_SOURCE_REGISTRY}
 
     assert "stock_financial_analysis_indicator_em" in api_names
-    assert "stock_financial_analysis_indicator_em" in capability_names
+    assert "stock_financial_analysis_indicator_em" in capability_by_api
     assert "stock_financial_analysis_indicator_em" in source_case_names
+    capability = capability_by_api["stock_financial_analysis_indicator_em"]
+    assert capability.adapter_function == "stock_financial_analysis_indicator_em"
+    assert capability.date_field == "REPORT_DATE"
+    assert capability.symbol_field == "SECUCODE/SECURITY_CODE"
+    assert capability.report_period_field == "REPORT_DATE"
+    assert capability.announcement_date_field == "NOTICE_DATE"
+    assert capability.normalized_target == ""
+    assert capability.factor_family_target == ""
+    assert capability.lookahead_risk_fields == "REPORT_DATE must not be used as PIT availability time; use NOTICE_DATE"
     policy = API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")]
     assert policy["enabled"] is False
     assert policy["default_enabled"] is False
@@ -44,7 +53,9 @@ def test_financial_indicator_em_registered_manual_only_and_legacy_preserved() ->
     assert legacy_policy["disabled_category"] == "empty_review_source"
     assert legacy_policy["review_category"] == "parameter_schema_review"
     assert legacy_policy["legacy_policy"] == "legacy_start_year_required"
+    assert legacy_policy["acquisition_mode"] == "legacy_direct_manual_only"
     assert "start_year=1900" in str(legacy_policy["disabled_reason"])
+    assert "valid start_year such as 2020" in str(legacy_policy["disabled_reason"])
 
 
 def test_financial_indicator_em_task_planning_produces_two_indicator_modes() -> None:
@@ -83,6 +94,11 @@ def test_financial_indicator_em_symbol_conversion(symbol: str, expected: str) ->
 def test_financial_indicator_em_symbol_conversion_rejects_unverified_prefixes() -> None:
     with pytest.raises(ValueError, match="unsupported EM financial indicator symbol prefix"):
         _financial_indicator_em_symbol("830000")
+
+
+def test_financial_indicator_em_symbol_conversion_rejects_malformed_unsuffixed_input() -> None:
+    with pytest.raises(ValueError, match="expected exactly six digits"):
+        _financial_indicator_em_symbol("abc000001")
 
 
 def test_financial_indicator_em_partitions_keep_logical_symbol_and_stable_indicator_labels() -> None:

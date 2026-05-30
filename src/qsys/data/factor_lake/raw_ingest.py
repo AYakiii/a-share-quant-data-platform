@@ -281,8 +281,8 @@ DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indica
     "disabled_category": "empty_review_source",
     "review_category": "parameter_schema_review",
     "legacy_policy": "legacy_start_year_required",
-    "acquisition_mode": "manual_selected_only",
-    "disabled_reason": "legacy Sina source preserved for controlled manual runs; default start_year=1900 may return empty when absent from the upstream year list, so explicit runs should provide a valid start_year such as 2020",
+    "acquisition_mode": "legacy_direct_manual_only",
+    "disabled_reason": "legacy Sina source preserved for controlled direct/manual calls; the official runner uses symbol_only and does not inject start_year, so default start_year=1900 may return empty when absent from the upstream year list; controlled direct/manual calls should provide a valid start_year such as 2020",
 }
 DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")] = {
     "enabled": False,
@@ -366,13 +366,12 @@ def _financial_indicator_em_symbol(symbol: str | int) -> str:
     raw = str(symbol).strip().upper()
     if raw.endswith((".SZ", ".SH")):
         return raw
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) != 6:
-        raise ValueError(f"unsupported EM financial indicator symbol: {symbol!r}; expected six digits or .SZ/.SH suffix")
-    if digits.startswith(("0", "3")):
-        return f"{digits}.SZ"
-    if digits.startswith("6"):
-        return f"{digits}.SH"
+    if not (raw.isdigit() and len(raw) == 6):
+        raise ValueError(f"unsupported EM financial indicator symbol: {symbol!r}; expected exactly six digits or .SZ/.SH suffix")
+    if raw.startswith(("0", "3")):
+        return f"{raw}.SZ"
+    if raw.startswith("6"):
+        return f"{raw}.SH"
     raise ValueError(f"unsupported EM financial indicator symbol prefix: {symbol!r}; only 0/3 => .SZ and 6 => .SH are verified")
 
 
