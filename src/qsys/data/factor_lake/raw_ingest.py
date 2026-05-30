@@ -219,6 +219,8 @@ P15P2_WAVE1_APIS: set[tuple[str, str]] = set(P15P2_WAVE1_SOURCE_METADATA)
 MANUAL_SELECTED_ONLY_APIS: set[tuple[str, str]] = {
     *P15P2_WAVE1_APIS,
     ("financial_fundamental", "stock_financial_analysis_indicator_em"),
+    ("disclosure_ir", "stock_jgdy_detail_em"),
+    ("event_ownership", "stock_gdfx_holding_analyse_em"),
 }
 WAREHOUSE_RECEIPT_EXCHANGES: dict[str, str] = {
     "futures_gfex_warehouse_receipt": "GFEX",
@@ -256,8 +258,10 @@ DISABLED_API_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")] = {
     "enabled": False,
     "default_enabled": False,
     "manual_review_required": True,
-    "disabled_category": "network_unstable_source",
-    "disabled_reason": "expensive and unstable in 10d recovery run; Response ended prematurely",
+    "importance": "high",
+    "acquisition_mode": "long_recovery_run",
+    "disabled_category": "recovered_heavy_source",
+    "disabled_reason": "controlled recovery run succeeded with approximately 123,880 rows in about 857 seconds; remains manual-only because of heavy source cost and elapsed time",
 }
 DISABLED_API_METADATA[("market_price", "stock_zh_a_hist")] = {
     "enabled": False,
@@ -422,6 +426,95 @@ def _build_raw_partition(family: str, api_name: str, params: dict[str, str], fil
         return {"snapshot": "latest"}
     return {"api_name": api_name}
 
+
+
+def _canonical_json(value: object) -> str:
+    """Serialize a stable JSON key for task/catalog identity fields."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _build_task_key(family: str, api_name: str, params: dict[str, str]) -> str:
+    """Build the planned logical task key used for resume decisions.
+
+    The key intentionally includes the requested parameter set in addition to the
+    logical raw partition.  This keeps report-date partitions independent and
+    prevents one market-price monthly output partition from proving that a wider
+    multi-month request completed.
+    """
+    normalized_params = {str(k): str(v) for k, v in params.items()}
+    return _canonical_json(
+        {
+            "source_family": family,
+            "api_name": api_name,
+            "partition": _build_raw_partition(family, api_name, normalized_params, {}),
+            "params": normalized_params,
+        }
+    )
+
+
+def _months_between(start_date: str, end_date: str) -> set[tuple[str, str]]:
+    """Return inclusive (year, month) keys for compact YYYYMMDD date ranges."""
+    start = pd.to_datetime(str(start_date), format="%Y%m%d", errors="coerce")
+    end = pd.to_datetime(str(end_date), format="%Y%m%d", errors="coerce")
+    if pd.isna(start) or pd.isna(end) or start > end:
+        return set()
+    months = pd.period_range(start=start.to_period("M"), end=end.to_period("M"), freq="M")
+    return {(str(period.year), f"{period.month:02d}") for period in months}
+
+
+def _completed_task_keys_from_catalog(existing: pd.DataFrame) -> set[str]:
+    """Find exact planned-task keys that are complete in an existing catalog."""
+    if existing.empty or "task_key_json" not in existing.columns or "status" not in existing.columns:
+        return set()
+    keyed = existing.copy()
+    keyed["task_key_json"] = keyed["task_key_json"].fillna("").astype(str)
+    keyed = keyed[keyed["task_key_json"] != ""]
+    keyed = keyed[keyed["status"].astype(str).isin({"success", "already_exists"})]
+    if keyed.empty:
+        return set()
+
+    completed: set[str] = set()
+    market_api_names = {"stock_zh_a_hist", "stock_zh_a_daily"}
+    for task_key, group in keyed.groupby("task_key_json", dropna=False):
+        task_key_text = str(task_key)
+        try:
+            payload = json.loads(task_key_text)
+        except json.JSONDecodeError:
+            completed.add(task_key_text)
+            continue
+        family = str(payload.get("source_family", ""))
+        api_name = str(payload.get("api_name", ""))
+        params = payload.get("params", {}) if isinstance(payload.get("params", {}), dict) else {}
+        if family == "market_price" and api_name in market_api_names and {"start_date", "end_date"} <= set(params):
+            expected_months = _months_between(str(params.get("start_date", "")), str(params.get("end_date", "")))
+            if expected_months and {"year", "month"} <= set(group.columns):
+                actual_months = {
+                    (str(row.get("year", "")).split(".")[0], str(row.get("month", "")).split(".")[0].zfill(2))
+                    for _, row in group.iterrows()
+                }
+                if expected_months <= actual_months:
+                    completed.add(task_key_text)
+                continue
+        completed.add(task_key_text)
+    return completed
+
+
+def _merge_catalog_rows(existing: pd.DataFrame, new_rows: list[dict[str, object]], resume: bool) -> pd.DataFrame:
+    """Merge prior and new catalog rows without unbounded duplicate growth."""
+    new_df = pd.DataFrame(new_rows)
+    if not resume or existing.empty:
+        merged = new_df
+    elif new_df.empty or "task_key_json" not in new_df.columns:
+        merged = existing.copy()
+    else:
+        rerun_keys = {str(k) for k in new_df["task_key_json"].fillna("").astype(str) if str(k)}
+        prior = existing.copy()
+        if "task_key_json" in prior.columns and rerun_keys:
+            prior = prior[~prior["task_key_json"].fillna("").astype(str).isin(rerun_keys)]
+        merged = pd.concat([prior, new_df], ignore_index=True, sort=False)
+    if not merged.empty and {"task_key_json", "partition_json", "status"} <= set(merged.columns):
+        merged = merged.drop_duplicates(subset=["task_key_json", "partition_json", "status"], keep="last")
+    return merged.reset_index(drop=True)
 
 def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]) -> pd.DataFrame:
     """Normalize an AkShare raw result while preserving source columns.
@@ -804,6 +897,7 @@ def _write_market_price_month_partitions(
     adjust_label: str,
     started_at: datetime,
 ) -> list[dict[str, object]]:
+    task_key_json = _build_task_key(family, requested_api_name, params)
     month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
     task_rows: list[dict[str, object]] = []
     date_col = _detect_daily_date_column(raw)
@@ -847,6 +941,7 @@ def _write_market_price_month_partitions(
                 "dataset_name": "raw_source_api",
                 "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
                 "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
                 "source_family": family,
                 "api_name": used_api_name,
                 "requested_api_name": requested_api_name,
@@ -883,6 +978,7 @@ def _run_single_coverage_task(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
     status = "pending_adapter"
     err = ""
     err_type = ""
@@ -900,6 +996,7 @@ def _run_single_coverage_task(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(_build_raw_partition(family, api_name, params, {}), ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1035,6 +1132,7 @@ def _run_single_coverage_task(
         "dataset_name": "raw_source_api",
         "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "task_key_json": task_key_json,
         "source_family": family,
         "api_name": used_api_name,
         "requested_api_name": requested_api_name,
@@ -1070,6 +1168,7 @@ def _run_task_with_signal_timeout(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
     def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
         raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
 
@@ -1084,6 +1183,7 @@ def _run_task_with_signal_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1117,6 +1217,7 @@ def _run_task_in_subprocess_with_timeout(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
 
     def _worker(q: mp.Queue) -> None:
         try:
@@ -1144,6 +1245,7 @@ def _run_task_in_subprocess_with_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1170,6 +1272,7 @@ def _run_task_in_subprocess_with_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1214,18 +1317,15 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
-    resume_keys: set[tuple[str, str, str]] = set()
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
-    if resume and catalog_path.exists():
-        existing = pd.read_csv(catalog_path)
-        for _, row in existing.iterrows():
-            resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
+    existing_catalog = pd.read_csv(catalog_path) if resume and catalog_path.exists() else pd.DataFrame()
+    completed_task_keys = _completed_task_keys_from_catalog(existing_catalog) if resume else set()
     run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
     op_dir = Path(output_root) / "_operation_review"
     op_dir.mkdir(parents=True, exist_ok=True)
     task_events_path = op_dir / "task_events.jsonl"
-    if task_events_path.exists():
+    if task_events_path.exists() and not resume:
         task_events_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
@@ -1263,7 +1363,8 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
             params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
-                if resume and (family, api_name, "success") in resume_keys:
+                task_key_json = _build_task_key(family, api_name, params)
+                if resume and task_key_json in completed_task_keys:
                     continue
                 tasks.append((family, api_name, params))
     total_tasks = len(tasks)
@@ -1281,6 +1382,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             "fallback_from": best.get("fallback_from", ""),
             "original_symbol": best.get("original_symbol", ""),
             "akshare_symbol": best.get("akshare_symbol", ""),
+            "task_key_json": best.get("task_key_json", ""),
             "status": best.get("status", ""),
             "error_type": best.get("error_type", ""),
             "error_message": best.get("error_message", ""),
@@ -1343,12 +1445,14 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             rows_now = _execute_task_once(family, api_name, params)
             for r in rows_now:
                 task_attempt_records.append({
+                    "run_id": run_id,
                     "source_family": r.get("source_family", ""),
                     "api_name": r.get("api_name", ""),
                     "requested_api_name": r.get("requested_api_name", ""),
                     "actual_api_name": r.get("actual_api_name", ""),
                     "original_symbol": r.get("original_symbol", ""),
                     "akshare_symbol": r.get("akshare_symbol", ""),
+                    "task_key_json": r.get("task_key_json", ""),
                     "attempt_no": attempt_no,
                     "status": r.get("status", ""),
                     "error_type": r.get("error_type", ""),
@@ -1560,6 +1664,7 @@ def _write_market_price_month_partitions(
     adjust_label: str,
     started_at: datetime,
 ) -> list[dict[str, object]]:
+    task_key_json = _build_task_key(family, requested_api_name, params)
     month_frames = _split_daily_by_year_month(raw, str(params.get("start_date", "")), str(params.get("end_date", "")))
     task_rows: list[dict[str, object]] = []
     date_col = _detect_daily_date_column(raw)
@@ -1603,6 +1708,7 @@ def _write_market_price_month_partitions(
                 "dataset_name": "raw_source_api",
                 "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
                 "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
                 "source_family": family,
                 "api_name": used_api_name,
                 "requested_api_name": requested_api_name,
@@ -1639,6 +1745,7 @@ def _run_single_coverage_task(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
     status = "pending_adapter"
     err = ""
     err_type = ""
@@ -1656,6 +1763,7 @@ def _run_single_coverage_task(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(_build_raw_partition(family, api_name, params, {}), ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1791,6 +1899,7 @@ def _run_single_coverage_task(
         "dataset_name": "raw_source_api",
         "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
         "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "task_key_json": task_key_json,
         "source_family": family,
         "api_name": used_api_name,
         "requested_api_name": requested_api_name,
@@ -1826,6 +1935,7 @@ def _run_task_with_signal_timeout(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
     def _handler(signum: int, frame: object) -> None:  # noqa: ARG001
         raise TimeoutError(f"task timeout after {task_timeout_sec} sec")
 
@@ -1840,6 +1950,7 @@ def _run_task_with_signal_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1873,6 +1984,7 @@ def _run_task_in_subprocess_with_timeout(
     manual_selected: bool = False,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
+    task_key_json = _build_task_key(family, api_name, params)
 
     def _worker(q: mp.Queue) -> None:
         try:
@@ -1900,6 +2012,7 @@ def _run_task_in_subprocess_with_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1926,6 +2039,7 @@ def _run_task_in_subprocess_with_timeout(
             "dataset_name": "raw_source_api",
             "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
             "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
             "source_family": family,
             "api_name": api_name,
             "requested_api_name": api_name,
@@ -1970,18 +2084,15 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
-    resume_keys: set[tuple[str, str, str]] = set()
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
-    if resume and catalog_path.exists():
-        existing = pd.read_csv(catalog_path)
-        for _, row in existing.iterrows():
-            resume_keys.add((str(row.get("source_family", "")), str(row.get("api_name", "")), str(row.get("status", ""))))
+    existing_catalog = pd.read_csv(catalog_path) if resume and catalog_path.exists() else pd.DataFrame()
+    completed_task_keys = _completed_task_keys_from_catalog(existing_catalog) if resume else set()
     run_id = f"raw_official_{uuid.uuid4().hex[:8]}"
     adapters = adapter_map or {}
     op_dir = Path(output_root) / "_operation_review"
     op_dir.mkdir(parents=True, exist_ok=True)
     task_events_path = op_dir / "task_events.jsonl"
-    if task_events_path.exists():
+    if task_events_path.exists() and not resume:
         task_events_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
@@ -1997,7 +2108,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
             params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
             for params in params_list:
-                if resume and (family, api_name, "success") in resume_keys:
+                task_key_json = _build_task_key(family, api_name, params)
+                if resume and task_key_json in completed_task_keys:
                     continue
                 tasks.append((family, api_name, params))
 
@@ -2014,6 +2126,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             "fallback_from": best.get("fallback_from", ""),
             "original_symbol": best.get("original_symbol", ""),
             "akshare_symbol": best.get("akshare_symbol", ""),
+            "task_key_json": best.get("task_key_json", ""),
             "status": best.get("status", ""),
             "error_type": best.get("error_type", ""),
             "error_message": best.get("error_message", ""),
@@ -2061,12 +2174,14 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             rows_now = _execute_task_once(family, api_name, params)
             for r in rows_now:
                 task_attempt_records.append({
+                    "run_id": run_id,
                     "source_family": r.get("source_family", ""),
                     "api_name": r.get("api_name", ""),
                     "requested_api_name": r.get("requested_api_name", ""),
                     "actual_api_name": r.get("actual_api_name", ""),
                     "original_symbol": r.get("original_symbol", ""),
                     "akshare_symbol": r.get("akshare_symbol", ""),
+                    "task_key_json": r.get("task_key_json", ""),
                     "attempt_no": attempt_no,
                     "status": r.get("status", ""),
                     "error_type": r.get("error_type", ""),
@@ -2139,18 +2254,39 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     out.mkdir(parents=True, exist_ok=True)
     catalog_path = out / "raw_ingest_catalog.csv"
     summary_path = out / "raw_ingest_summary.csv"
-    df = pd.DataFrame(rows)
+    df = _merge_catalog_rows(existing_catalog, rows, resume)
     df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
     timeout_df = df[df["status"] == "timeout"].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
     timeout_df.to_csv(op_dir / "timeout_tasks.csv", index=False, encoding="utf-8-sig")
     recovery_df = df[df["status"].isin(["failed", "timeout"])].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
     if not recovery_df.empty:
-        keep_cols = [c for c in ["source_family", "api_name", "requested_api_name", "original_symbol", "akshare_symbol", "status", "error_type", "error_message"] if c in recovery_df.columns]
+        keep_cols = [
+            c
+            for c in [
+                "source_family",
+                "api_name",
+                "requested_api_name",
+                "original_symbol",
+                "akshare_symbol",
+                "status",
+                "error_type",
+                "error_message",
+                "partition_json",
+                "params_json",
+                "task_key_json",
+            ]
+            if c in recovery_df.columns
+        ]
         recovery_df = recovery_df[keep_cols]
         recovery_df["start_date"] = start_date
         recovery_df["end_date"] = end_date
     recovery_df.to_csv(op_dir / "recovery_tasks.csv", index=False, encoding="utf-8-sig")
-    pd.DataFrame(task_attempt_records).to_csv(op_dir / "task_attempts.csv", index=False, encoding="utf-8-sig")
+    attempts_path = op_dir / "task_attempts.csv"
+    attempts_df = pd.DataFrame(task_attempt_records)
+    if resume and attempts_path.exists():
+        prior_attempts = pd.read_csv(attempts_path)
+        attempts_df = pd.concat([prior_attempts, attempts_df], ignore_index=True, sort=False) if not attempts_df.empty else prior_attempts
+    attempts_df.to_csv(attempts_path, index=False, encoding="utf-8-sig")
     s = df.groupby(["source_family", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "status", "size"])
     s.to_csv(summary_path, index=False, encoding="utf-8-sig")
     checklist_df, checklist_summary_df = build_acquisition_checklist(df)
@@ -2163,7 +2299,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         "summary_path": str(summary_path),
         "checklist_path": str(checklist_path),
         "checklist_summary_path": str(checklist_summary_path),
-        "rows": rows,
+        "rows": df.to_dict("records"),
     }
 
 

@@ -36,12 +36,12 @@ def test_stock_jgdy_detail_default_policy_is_high_importance_manual_review(tmp_p
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
         families=["disclosure_ir"],
+        symbols=["000001"],
         report_dates=["20241211"],
-        selected_api_names=["stock_jgdy_detail_em"],
         max_workers=1,
     )
 
-    [row] = out["rows"]
+    row = [r for r in out["rows"] if r["api_name"] == "stock_jgdy_detail_em"][0]
     assert row["status"] == "skipped"
     assert row["error_type"] == "default_disabled"
     assert row["importance"] == "high"
@@ -51,21 +51,23 @@ def test_stock_jgdy_detail_default_policy_is_high_importance_manual_review(tmp_p
     assert row["disabled_category"] == "heavy_detail_source"
 
 
-def test_stock_gdfx_holding_analyse_policy_is_network_unstable_manual_review(tmp_path):
+def test_stock_gdfx_holding_analyse_policy_is_recovered_heavy_manual_review(tmp_path):
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
         families=["event_ownership"],
+        symbols=["000001"],
         report_dates=["20241231"],
-        selected_api_names=["stock_gdfx_holding_analyse_em"],
         max_workers=1,
     )
 
-    [row] = out["rows"]
+    row = [r for r in out["rows"] if r["api_name"] == "stock_gdfx_holding_analyse_em"][0]
     assert row["status"] == "skipped"
     assert row["error_type"] == "default_disabled"
     assert row["default_enabled"] is False
     assert row["manual_review_required"] is True
-    assert row["disabled_category"] == "network_unstable_source"
+    assert row["disabled_category"] == "recovered_heavy_source"
+    assert row["importance"] == "high"
+    assert row["acquisition_mode"] == "long_recovery_run"
 
 
 def test_stock_zh_a_disclosure_relation_schema_mismatch_is_schema_drift_empty(tmp_path):
