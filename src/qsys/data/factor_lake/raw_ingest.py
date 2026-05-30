@@ -46,6 +46,7 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     ],
     "financial_fundamental": [
         {"api_name": "stock_financial_analysis_indicator", "param_mode": "symbol_only"},
+        {"api_name": "stock_financial_analysis_indicator_em", "param_mode": "financial_indicator_em"},
         {"api_name": "stock_yjyg_em", "param_mode": "report_date"},
         {"api_name": "stock_yysj_em", "param_mode": "report_date"},
     ],
@@ -215,6 +216,10 @@ P15P2_WAVE1_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
 }
 
 P15P2_WAVE1_APIS: set[tuple[str, str]] = set(P15P2_WAVE1_SOURCE_METADATA)
+MANUAL_SELECTED_ONLY_APIS: set[tuple[str, str]] = {
+    *P15P2_WAVE1_APIS,
+    ("financial_fundamental", "stock_financial_analysis_indicator_em"),
+}
 WAREHOUSE_RECEIPT_EXCHANGES: dict[str, str] = {
     "futures_gfex_warehouse_receipt": "GFEX",
     "futures_shfe_warehouse_receipt": "SHFE",
@@ -226,6 +231,7 @@ TEMP_DISABLED_APIS: set[tuple[str, str]] = {
     ("market_price", "stock_zh_a_hist"),
     ("market_price", "stock_individual_info_em"),
     ("financial_fundamental", "stock_financial_analysis_indicator"),
+    ("financial_fundamental", "stock_financial_analysis_indicator_em"),
     ("event_ownership", "stock_gpzy_pledge_ratio_detail_em"),
     ("disclosure_ir", "stock_jgdy_tj_em"),
     ("disclosure_ir", "stock_jgdy_detail_em"),
@@ -274,7 +280,19 @@ DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indica
     "manual_review_required": True,
     "disabled_category": "empty_review_source",
     "review_category": "parameter_schema_review",
-    "disabled_reason": "executes but currently returns empty for tested symbols; deferred manual review",
+    "legacy_policy": "legacy_start_year_required",
+    "acquisition_mode": "legacy_direct_manual_only",
+    "disabled_reason": "legacy Sina source preserved for controlled direct/manual calls; the official runner uses symbol_only and does not inject start_year, so default start_year=1900 may return empty when absent from the upstream year list; controlled direct/manual calls should provide a valid start_year such as 2020",
+}
+DISABLED_API_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")] = {
+    "enabled": False,
+    "default_enabled": False,
+    "manual_review_required": True,
+    "priority_tier": "P1",
+    "data_theme": "financial_analysis_indicator",
+    "disabled_category": "recovered_financial_fundamental_source",
+    "acquisition_mode": "manual_selected_only",
+    "disabled_reason": "Eastmoney financial analysis indicator source is live-probed but remains manual-selected only pending schema review",
 }
 DISABLED_API_METADATA[("event_ownership", "stock_gpzy_pledge_ratio_detail_em")] = {
     "enabled": False,
@@ -343,9 +361,33 @@ def _effective_param_mode(family: str, api_name: str, param_mode: str) -> str:
     return param_mode
 
 
+def _financial_indicator_em_symbol(symbol: str | int) -> str:
+    """Convert A-share symbols to the suffixed Eastmoney form required by AkShare."""
+    raw = str(symbol).strip().upper()
+    if raw.endswith((".SZ", ".SH")):
+        return raw
+    if not (raw.isdigit() and len(raw) == 6):
+        raise ValueError(f"unsupported EM financial indicator symbol: {symbol!r}; expected exactly six digits or .SZ/.SH suffix")
+    if raw.startswith(("0", "3")):
+        return f"{raw}.SZ"
+    if raw.startswith("6"):
+        return f"{raw}.SH"
+    raise ValueError(f"unsupported EM financial indicator symbol prefix: {symbol!r}; only 0/3 => .SZ and 6 => .SH are verified")
+
+
+def _financial_indicator_em_partition_label(indicator: str) -> str:
+    """Return stable ASCII partition labels for Chinese EM indicator modes."""
+    labels = {"按报告期": "report_period", "按单季度": "single_quarter"}
+    if indicator not in labels:
+        raise ValueError(f"unsupported EM financial indicator mode: {indicator!r}")
+    return labels[indicator]
+
+
 def _build_api_call_params(family: str, api_name: str, params: dict[str, str]) -> dict[str, str]:
     """Build adapter call params without losing logical partition keys."""
     call_params = dict(params)
+    if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em") and "symbol" in params:
+        call_params["symbol"] = _financial_indicator_em_symbol(params["symbol"])
     if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
         trade_date = str(params["date"])
         call_params.pop("date", None)
@@ -358,6 +400,13 @@ def _build_raw_partition(family: str, api_name: str, params: dict[str, str], fil
     """Build a stable raw partition that preserves the logical acquisition key."""
     if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
         return {"snapshot": "latest"}
+    if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
+        symbol = str(params.get("symbol", "")).strip().upper()
+        if symbol.endswith((".SZ", ".SH")):
+            symbol = symbol[:-3]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        logical_symbol = digits.zfill(6) if digits else symbol
+        return {"symbol": logical_symbol, "indicator": _financial_indicator_em_partition_label(str(params.get("indicator", "")))}
     if "date" in params and (family, api_name) in TRADE_DATE_RANGE_CALL_APIS | {
         ("commodity_inventory", "futures_gfex_warehouse_receipt"),
         ("commodity_inventory", "futures_shfe_warehouse_receipt"),
@@ -407,8 +456,8 @@ def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]
 
 
 def _manual_selection_allows_disabled_source(family: str, api_name: str, manual_selected: bool) -> bool:
-    """Allow Wave 1 recovered sources to run when explicitly selected by API name."""
-    return manual_selected and (family, api_name) in P15P2_WAVE1_APIS
+    """Allow only narrow manual-selected disabled sources to run by API name."""
+    return manual_selected and (family, api_name) in MANUAL_SELECTED_ONLY_APIS
 
 
 @dataclass
@@ -567,6 +616,12 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
         return [{}]
     if mode == "symbol_only":
         return [{"symbol": symbol} for symbol in symbols]
+    if mode == "financial_indicator_em":
+        return [
+            {"symbol": symbol, "indicator": indicator}
+            for symbol in symbols
+            for indicator in ("按报告期", "按单季度")
+        ]
     if mode == "symbol_range":
         return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in symbols]
     if mode == "daily_symbol_range":
@@ -883,6 +938,8 @@ def _run_single_coverage_task(
             status = "pending_adapter"
         else:
             call_params = _build_api_call_params(family, api_name, params)
+            if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
+                akshare_symbol = str(call_params.get("symbol", ""))
             filtered = call_params
             try:
                 sig = inspect.signature(fn)
@@ -1143,7 +1200,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             selected_specs.append(spec)
 
     required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
-    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
     need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
@@ -1637,6 +1694,8 @@ def _run_single_coverage_task(
             status = "pending_adapter"
         else:
             call_params = _build_api_call_params(family, api_name, params)
+            if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
+                akshare_symbol = str(call_params.get("symbol", ""))
             filtered = call_params
             try:
                 sig = inspect.signature(fn)
@@ -1897,7 +1956,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             selected_specs.append(spec)
 
     required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
-    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date"})
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
     need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
