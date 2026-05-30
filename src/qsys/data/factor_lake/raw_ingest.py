@@ -1215,9 +1215,45 @@ def _run_task_in_subprocess_with_timeout(
     include_disabled: bool,
     task_timeout_sec: float,
     manual_selected: bool = False,
+    heartbeat_sec: float | None = None,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     task_key_json = _build_task_key(family, api_name, params)
+
+    def _normalize_symbols() -> tuple[str, str]:
+        symbol = str(params.get("symbol", "")).strip().lower()
+        if symbol.startswith(("sz", "sh", "bj")):
+            symbol = symbol[2:]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
+        return original_symbol, akshare_symbol
+
+    def _failed_row(error_type: str, error_message: str) -> dict[str, object]:
+        finished_at = datetime.now(UTC)
+        original_symbol, akshare_symbol = _normalize_symbols()
+        return {
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "status": "timeout" if error_type == "TimeoutError" else "failed",
+            "rows": 0,
+            "error_type": error_type,
+            "error_message": error_message,
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }
 
     def _worker(q: mp.Queue) -> None:
         try:
@@ -1230,67 +1266,36 @@ def _run_task_in_subprocess_with_timeout(
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(target=_worker, args=(q,))
     proc.start()
-    proc.join(task_timeout_sec)
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    deadline = time.monotonic() + float(task_timeout_sec)
+    while proc.is_alive():
+        remaining_sec = deadline - time.monotonic()
+        if remaining_sec <= 0:
+            break
+        wait_sec = min(remaining_sec, heartbeat_every_sec if heartbeat_enabled else remaining_sec)
+        proc.join(wait_sec)
+        if proc.is_alive() and heartbeat_enabled:
+            original_symbol, _ = _normalize_symbols()
+            elapsed_sec = max((datetime.now(UTC) - started_at).total_seconds(), 0.0)
+            print(
+                "[heartbeat] "
+                f"elapsed_sec={elapsed_sec:.1f} "
+                f"source_family={family} "
+                f"api_name={api_name} "
+                f"original_symbol={original_symbol} "
+                "pending_or_running_tasks=1"
+            )
     if proc.is_alive():
         proc.terminate()
         proc.join(5)
-        finished_at = datetime.now(UTC)
-        symbol = str(params.get("symbol", "")).strip().lower()
-        if symbol.startswith(("sz", "sh", "bj")):
-            symbol = symbol[2:]
-        digits = "".join(ch for ch in symbol if ch.isdigit())
-        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
-        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
-        return [{
-            "dataset_name": "raw_source_api",
-            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "task_key_json": task_key_json,
-            "source_family": family,
-            "api_name": api_name,
-            "requested_api_name": api_name,
-            "actual_api_name": api_name,
-            "fallback_from": "",
-            "original_symbol": original_symbol,
-            "akshare_symbol": akshare_symbol,
-            "status": "timeout",
-            "rows": 0,
-            "error_type": "TimeoutError",
-            "error_message": f"task timeout after {task_timeout_sec} sec",
-            "output_path": "",
-            "metadata_path": "",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
+        return [_failed_row("TimeoutError", f"task timeout after {task_timeout_sec} sec")]
     if not q.empty():
         status, payload = q.get()
         if status == "ok":
             return payload
-        finished_at = datetime.now(UTC)
-        return [{
-            "dataset_name": "raw_source_api",
-            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "task_key_json": task_key_json,
-            "source_family": family,
-            "api_name": api_name,
-            "requested_api_name": api_name,
-            "actual_api_name": api_name,
-            "fallback_from": "",
-            "original_symbol": str(params.get("symbol", "")),
-            "akshare_symbol": "",
-            "status": "failed",
-            "rows": 0,
-            "error_type": "SubprocessTaskError",
-            "error_message": str(payload),
-            "output_path": "",
-            "metadata_path": "",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
-    return []
+        return [_failed_row("SubprocessTaskError", str(payload))]
+    return [_failed_row("NoResult", "subprocess exited without queue payload")]
 
 def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
@@ -1435,7 +1440,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
         if task_timeout_sec and task_timeout_sec > 0:
             if max_workers > 1 and float(task_timeout_sec) >= 5.0:
                 return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
-            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected)
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected, heartbeat_sec)
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
 
     def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:
@@ -1982,9 +1987,45 @@ def _run_task_in_subprocess_with_timeout(
     include_disabled: bool,
     task_timeout_sec: float,
     manual_selected: bool = False,
+    heartbeat_sec: float | None = None,
 ) -> list[dict[str, object]]:
     started_at = datetime.now(UTC)
     task_key_json = _build_task_key(family, api_name, params)
+
+    def _normalize_symbols() -> tuple[str, str]:
+        symbol = str(params.get("symbol", "")).strip().lower()
+        if symbol.startswith(("sz", "sh", "bj")):
+            symbol = symbol[2:]
+        digits = "".join(ch for ch in symbol if ch.isdigit())
+        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
+        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
+        return original_symbol, akshare_symbol
+
+    def _failed_row(error_type: str, error_message: str) -> dict[str, object]:
+        finished_at = datetime.now(UTC)
+        original_symbol, akshare_symbol = _normalize_symbols()
+        return {
+            "dataset_name": "raw_source_api",
+            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+            "task_key_json": task_key_json,
+            "source_family": family,
+            "api_name": api_name,
+            "requested_api_name": api_name,
+            "actual_api_name": api_name,
+            "fallback_from": "",
+            "original_symbol": original_symbol,
+            "akshare_symbol": akshare_symbol,
+            "status": "timeout" if error_type == "TimeoutError" else "failed",
+            "rows": 0,
+            "error_type": error_type,
+            "error_message": error_message,
+            "output_path": "",
+            "metadata_path": "",
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        }
 
     def _worker(q: mp.Queue) -> None:
         try:
@@ -1997,67 +2038,36 @@ def _run_task_in_subprocess_with_timeout(
     q: mp.Queue = ctx.Queue()
     proc = ctx.Process(target=_worker, args=(q,))
     proc.start()
-    proc.join(task_timeout_sec)
+    heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
+    heartbeat_enabled = heartbeat_every_sec > 0
+    deadline = time.monotonic() + float(task_timeout_sec)
+    while proc.is_alive():
+        remaining_sec = deadline - time.monotonic()
+        if remaining_sec <= 0:
+            break
+        wait_sec = min(remaining_sec, heartbeat_every_sec if heartbeat_enabled else remaining_sec)
+        proc.join(wait_sec)
+        if proc.is_alive() and heartbeat_enabled:
+            original_symbol, _ = _normalize_symbols()
+            elapsed_sec = max((datetime.now(UTC) - started_at).total_seconds(), 0.0)
+            print(
+                "[heartbeat] "
+                f"elapsed_sec={elapsed_sec:.1f} "
+                f"source_family={family} "
+                f"api_name={api_name} "
+                f"original_symbol={original_symbol} "
+                "pending_or_running_tasks=1"
+            )
     if proc.is_alive():
         proc.terminate()
         proc.join(5)
-        finished_at = datetime.now(UTC)
-        symbol = str(params.get("symbol", "")).strip().lower()
-        if symbol.startswith(("sz", "sh", "bj")):
-            symbol = symbol[2:]
-        digits = "".join(ch for ch in symbol if ch.isdigit())
-        original_symbol = digits.zfill(6) if digits else str(params.get("symbol", ""))
-        akshare_symbol = _to_akshare_daily_symbol(original_symbol) if original_symbol else ""
-        return [{
-            "dataset_name": "raw_source_api",
-            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "task_key_json": task_key_json,
-            "source_family": family,
-            "api_name": api_name,
-            "requested_api_name": api_name,
-            "actual_api_name": api_name,
-            "fallback_from": "",
-            "original_symbol": original_symbol,
-            "akshare_symbol": akshare_symbol,
-            "status": "timeout",
-            "rows": 0,
-            "error_type": "TimeoutError",
-            "error_message": f"task timeout after {task_timeout_sec} sec",
-            "output_path": "",
-            "metadata_path": "",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
+        return [_failed_row("TimeoutError", f"task timeout after {task_timeout_sec} sec")]
     if not q.empty():
         status, payload = q.get()
         if status == "ok":
             return payload
-        finished_at = datetime.now(UTC)
-        return [{
-            "dataset_name": "raw_source_api",
-            "partition_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
-            "task_key_json": task_key_json,
-            "source_family": family,
-            "api_name": api_name,
-            "requested_api_name": api_name,
-            "actual_api_name": api_name,
-            "fallback_from": "",
-            "original_symbol": str(params.get("symbol", "")),
-            "akshare_symbol": "",
-            "status": "failed",
-            "rows": 0,
-            "error_type": "SubprocessTaskError",
-            "error_message": str(payload),
-            "output_path": "",
-            "metadata_path": "",
-            "started_at": started_at.isoformat(),
-            "finished_at": finished_at.isoformat(),
-            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
-        }]
-    return []
+        return [_failed_row("SubprocessTaskError", str(payload))]
+    return [_failed_row("NoResult", "subprocess exited without queue payload")]
 
 def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
@@ -2164,7 +2174,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         if task_timeout_sec and task_timeout_sec > 0:
             if max_workers > 1 and float(task_timeout_sec) >= 5.0:
                 return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
-            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected)
+            return _run_task_in_subprocess_with_timeout(output_root, family, api_name, params, adapters, ak_module, include_disabled, float(task_timeout_sec), api_name in selected, heartbeat_sec)
         return _run_single_coverage_task(output_root, family, api_name, params, adapters, ak_module, include_disabled, api_name in selected)
 
     def _execute_task(family: str, api_name: str, params: dict[str, str]) -> list[dict[str, object]]:

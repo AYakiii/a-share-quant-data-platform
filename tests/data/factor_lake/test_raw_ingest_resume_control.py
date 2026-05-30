@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
 
+from qsys.data.factor_lake import raw_ingest
 from qsys.data.factor_lake.raw_ingest import API_POLICY_METADATA, run_raw_coverage_ingest
 
 
@@ -152,3 +154,113 @@ def test_heavy_sources_are_manual_selected_only_and_policy_is_truthful(tmp_path:
     assert holding_policy["disabled_category"] == "recovered_heavy_source"
     assert "123,880" in str(holding_policy["disabled_reason"])
     assert "857" in str(holding_policy["disabled_reason"])
+
+
+
+def test_single_worker_subprocess_heartbeat_and_timeout(capsys, tmp_path: Path) -> None:
+    def slow_adapter(date: str) -> _Result:  # noqa: ARG001
+        time.sleep(0.5)
+        return _Result(pd.DataFrame({"date": [date], "value": [1]}))
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        report_dates=["20240930"],
+        selected_api_names=["stock_yjyg_em"],
+        adapter_map={"stock_yjyg_em": slow_adapter},
+        max_workers=1,
+        task_timeout_sec=0.2,
+        heartbeat_sec=0.05,
+    )
+
+    captured = capsys.readouterr().out
+    assert "[heartbeat]" in captured
+    assert "source_family=financial_fundamental" in captured
+    assert "api_name=stock_yjyg_em" in captured
+    assert "pending_or_running_tasks=1" in captured
+    [row] = out["rows"]
+    assert row["status"] == "timeout"
+    assert row["error_type"] == "TimeoutError"
+
+
+class _NoPayloadQueue:
+    def empty(self) -> bool:
+        return True
+
+
+class _NoPayloadProcess:
+    def __init__(self, target, args):  # noqa: ANN001, ARG002
+        self._alive = False
+
+    def start(self) -> None:
+        self._alive = False
+
+    def join(self, timeout=None) -> None:  # noqa: ANN001, ARG002
+        self._alive = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def terminate(self) -> None:
+        self._alive = False
+
+
+class _NoPayloadContext:
+    def Queue(self) -> _NoPayloadQueue:  # noqa: N802
+        return _NoPayloadQueue()
+
+    def Process(self, target, args):  # noqa: ANN001, N802
+        return _NoPayloadProcess(target, args)
+
+
+def test_subprocess_no_result_enters_recovery_and_resume_recovers(monkeypatch, tmp_path: Path) -> None:
+    with monkeypatch.context() as m:
+        m.setattr(raw_ingest.mp, "get_context", lambda method: _NoPayloadContext())
+        first = run_raw_coverage_ingest(
+            output_root=str(tmp_path),
+            families=["financial_fundamental"],
+            report_dates=["20240930"],
+            selected_api_names=["stock_yjyg_em"],
+            adapter_map={"stock_yjyg_em": lambda date: _Result(pd.DataFrame({"date": [date]}))},
+            max_workers=1,
+            task_timeout_sec=1.0,
+        )
+
+    catalog = pd.read_csv(first["catalog_path"])
+    assert len(catalog) == 1
+    row = catalog.iloc[0]
+    assert row["status"] == "failed"
+    assert row["error_type"] == "NoResult"
+    assert row["error_message"] == "subprocess exited without queue payload"
+    assert isinstance(row["task_key_json"], str) and row["task_key_json"]
+    assert json.loads(row["partition_json"]) == {"date": "20240930"}
+    assert json.loads(row["params_json"]) == {"date": "20240930"}
+
+    recovery = pd.read_csv(tmp_path / "_operation_review" / "recovery_tasks.csv")
+    assert len(recovery) == 1
+    assert recovery.iloc[0]["error_type"] == "NoResult"
+    assert recovery.iloc[0]["task_key_json"] == row["task_key_json"]
+
+    calls: list[str] = []
+
+    def recovery_adapter(date: str) -> _Result:
+        calls.append(date)
+        return _Result(pd.DataFrame({"date": [date], "value": [1]}))
+
+    second = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        report_dates=["20240930"],
+        selected_api_names=["stock_yjyg_em"],
+        adapter_map={"stock_yjyg_em": recovery_adapter},
+        max_workers=1,
+        resume=True,
+    )
+
+    assert calls == ["20240930"]
+    merged = pd.read_csv(second["catalog_path"])
+    assert len(merged) == 1
+    assert set(merged["status"]) == {"success"}
+    assert merged.iloc[0]["task_key_json"] == row["task_key_json"]
+    recovered_queue = pd.read_csv(tmp_path / "_operation_review" / "recovery_tasks.csv")
+    assert recovered_queue.empty
