@@ -165,3 +165,72 @@ def test_batch_timeout_reports_child_task_events_and_no_empty_master_catalog(tmp
     report = pd.read_csv(out["batch_report_path"])
     assert "child_task_events_path" in report.columns
     assert (tmp_path / "out" / "raw_ingest_catalog.csv").exists() is False
+
+
+def test_heartbeat_sec_non_batched_passes_through(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run_raw_ingest_official(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(cli, "run_raw_ingest_official", fake_run_raw_ingest_official)
+    args = argparse.Namespace(
+        output_root=str(tmp_path / "out"),
+        families="market_price",
+        symbols="000001",
+        index_symbols="",
+        trade_dates="",
+        report_dates="",
+        industry_names="",
+        concept_names="",
+        api_names="stock_zh_a_hist",
+        universe_root="config/factor_sources/acquisition_universe",
+        start_date="20220101",
+        end_date="20220131",
+        max_workers=1,
+        request_sleep=0.0,
+        continue_on_error=True,
+        include_disabled=False,
+        resume=False,
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+        heartbeat_sec=7.5,
+    )
+
+    cli._run_without_batching(args)
+    assert captured["heartbeat_sec"] == 7.5
+
+
+def test_heartbeat_sec_batched_child_command_passes_through(tmp_path):
+    args = argparse.Namespace(
+        families="market_price",
+        start_date="20220101",
+        end_date="20220131",
+        max_workers=1,
+        request_sleep=0.0,
+        symbols="000001,000002",
+        index_symbols="",
+        trade_dates="",
+        report_dates="",
+        industry_names="",
+        concept_names="",
+        api_names="stock_zh_a_hist",
+        universe_root="config/factor_sources/acquisition_universe",
+        task_timeout_sec=None,
+        task_retry_attempts=0,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
+        heartbeat_sec=9.0,
+        continue_on_error=False,
+        include_disabled=False,
+        resume=False,
+    )
+
+    cmd = cli._build_child_cmd(args, tmp_path / "batch", ["000001"])
+    assert "--heartbeat-sec" in cmd
+    assert cmd[cmd.index("--heartbeat-sec") + 1] == "9.0"

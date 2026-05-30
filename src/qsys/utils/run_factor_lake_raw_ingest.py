@@ -106,6 +106,7 @@ def _run_without_batching(args: argparse.Namespace) -> dict:
         task_retry_sleep_sec=args.task_retry_sleep_sec,
         task_retry_backoff=args.task_retry_backoff,
         task_retry_jitter_sec=args.task_retry_jitter_sec,
+        heartbeat_sec=getattr(args, "heartbeat_sec", None),
     )
 
 
@@ -150,6 +151,9 @@ def _build_child_cmd(args: argparse.Namespace, batch_output_root: Path, batch_sy
     cmd.extend(["--task-retry-sleep-sec", str(args.task_retry_sleep_sec)])
     cmd.extend(["--task-retry-backoff", str(args.task_retry_backoff)])
     cmd.extend(["--task-retry-jitter-sec", str(args.task_retry_jitter_sec)])
+    heartbeat_sec = getattr(args, "heartbeat_sec", None)
+    if heartbeat_sec is not None:
+        cmd.extend(["--heartbeat-sec", str(heartbeat_sec)])
     if args.continue_on_error:
         cmd.append("--continue-on-error")
     if args.include_disabled:
@@ -320,6 +324,7 @@ def main() -> None:
     p.add_argument("--task-retry-sleep-sec", type=float, default=0.0)
     p.add_argument("--task-retry-backoff", type=float, default=1.0)
     p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
+    p.add_argument("--heartbeat-sec", type=float, default=None)
     args = p.parse_args()
 
     should_batch = (not args.disable_symbol_batching) and int(args.symbol_batch_size or 0) > 0
