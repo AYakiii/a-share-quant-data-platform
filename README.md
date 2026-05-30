@@ -17,6 +17,7 @@ This repository started from an A-share data engineering pipeline and was extend
 - parquet storage
 - sqlite metadata
 - legacy notebook pipeline
+- source-specific resilient page checkpoints for selected heavy raw-detail sources, including `stock_jgdy_detail_em` under `_operation_review/stock_jgdy_detail_em_pages/since_date=YYYYMMDD/`
 
 ### Research Layer
 - panel abstraction

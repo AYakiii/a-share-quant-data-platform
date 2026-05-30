@@ -23,6 +23,7 @@ from qsys.data.factor_lake.acquisition_universe import build_report_dates, build
 from qsys.data.sources.akshare_index import fetch_stock_zh_index_hist_csindex
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
+from qsys.data.sources.akshare_jgdy_detail import JgdyDetailPageFailure, JgdyDetailSnapshotDrift, fetch_stock_jgdy_detail_em_resilient
 
 AdapterFn = Callable[..., object]
 
@@ -404,6 +405,9 @@ def _build_raw_partition(family: str, api_name: str, params: dict[str, str], fil
     """Build a stable raw partition that preserves the logical acquisition key."""
     if (family, api_name) in SNAPSHOT_RAW_PARTITION_APIS:
         return {"snapshot": "latest"}
+    if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
+        since_date = "".join(ch for ch in str(params.get("date", "")) if ch.isdigit())
+        return {"since_date": since_date}
     if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
         symbol = str(params.get("symbol", "")).strip().upper()
         if symbol.endswith((".SZ", ".SH")):
@@ -1031,6 +1035,8 @@ def _run_single_coverage_task(
     partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+        if fn is None and (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
+            fn = fetch_stock_jgdy_detail_em_resilient
         if fn is None:
             status = "pending_adapter"
         else:
@@ -1046,7 +1052,18 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = call_params
-            if api_name == "stock_zh_a_hist":
+            if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
+                jgdy_request_get = adapters.get("__stock_jgdy_detail_em_request_get__") or adapters.get("stock_jgdy_detail_em_request_get")
+                jgdy_config = adapters.get("__stock_jgdy_detail_em_config__") or {}
+                if not isinstance(jgdy_config, dict):
+                    jgdy_config = {}
+                ret = fetch_stock_jgdy_detail_em_resilient(
+                    date=str(params.get("date", "")),
+                    output_root=output_root,
+                    request_get=jgdy_request_get,
+                    **jgdy_config,
+                )
+            elif api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
                     ret = _call_api_with_retry(fn, filtered)
@@ -1120,7 +1137,9 @@ def _run_single_coverage_task(
         if primary_error or fallback_error:
             err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
         err_type = type(exc).__name__
-        if _should_downgrade_to_empty(api_name, err):
+        if isinstance(exc, (JgdyDetailPageFailure, JgdyDetailSnapshotDrift)):
+            status = "failed"
+        elif _should_downgrade_to_empty(api_name, err):
             status = "empty"
             n_rows = 0
             err_type = "downgraded_to_empty"
@@ -1803,6 +1822,8 @@ def _run_single_coverage_task(
     partition = _build_raw_partition(family, api_name, params, {})
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
+        if fn is None and (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
+            fn = fetch_stock_jgdy_detail_em_resilient
         if fn is None:
             status = "pending_adapter"
         else:
@@ -1818,7 +1839,18 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = call_params
-            if api_name == "stock_zh_a_hist":
+            if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
+                jgdy_request_get = adapters.get("__stock_jgdy_detail_em_request_get__") or adapters.get("stock_jgdy_detail_em_request_get")
+                jgdy_config = adapters.get("__stock_jgdy_detail_em_config__") or {}
+                if not isinstance(jgdy_config, dict):
+                    jgdy_config = {}
+                ret = fetch_stock_jgdy_detail_em_resilient(
+                    date=str(params.get("date", "")),
+                    output_root=output_root,
+                    request_get=jgdy_request_get,
+                    **jgdy_config,
+                )
+            elif api_name == "stock_zh_a_hist":
                 daily_fn = adapters.get("stock_zh_a_daily") or (getattr(ak_module, "stock_zh_a_daily") if ak_module is not None and hasattr(ak_module, "stock_zh_a_daily") else None)
                 try:
                     ret = _call_api_with_retry(fn, filtered)
@@ -1892,7 +1924,9 @@ def _run_single_coverage_task(
         if primary_error or fallback_error:
             err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
         err_type = type(exc).__name__
-        if _should_downgrade_to_empty(api_name, err):
+        if isinstance(exc, (JgdyDetailPageFailure, JgdyDetailSnapshotDrift)):
+            status = "failed"
+        elif _should_downgrade_to_empty(api_name, err):
             status = "empty"
             n_rows = 0
             err_type = "downgraded_to_empty"
