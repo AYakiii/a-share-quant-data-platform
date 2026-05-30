@@ -10,26 +10,32 @@ class _Result:
         self.raw = raw
 
 
-def test_stock_jgdy_detail_none_like_parser_response_downgrades_to_empty(tmp_path):
-    def stock_jgdy_detail_em(date: str) -> _Result:  # noqa: ARG001
-        raise TypeError("'NoneType' object is not subscriptable")
+def test_stock_jgdy_detail_none_like_page_failure_is_not_downgraded_to_empty(tmp_path):
+    class _FakeResponse:
+        def json(self) -> dict:
+            return {"result": None}
+
+    def fake_get(url: str, params: dict, timeout: float):  # noqa: ARG001
+        return _FakeResponse()
 
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
         families=["disclosure_ir"],
         report_dates=["20241211"],
         selected_api_names=["stock_jgdy_detail_em"],
-        adapter_map={"stock_jgdy_detail_em": stock_jgdy_detail_em},
+        adapter_map={
+            "__stock_jgdy_detail_em_request_get__": fake_get,
+            "__stock_jgdy_detail_em_config__": {"retry_attempts": 1, "retry_sleep_sec": 0.0, "request_sleep_sec": 0.0},
+        },
         include_disabled=True,
         max_workers=1,
     )
 
     [row] = out["rows"]
-    assert row["status"] == "empty"
-    assert row["error_type"] == "downgraded_to_empty"
-    assert "defensive_shape_guard" in row["error_message"]
-    assert "parser_empty_response" in row["error_message"]
-    assert "NoneType" in row["error_message"]
+    assert row["status"] == "failed"
+    assert row["error_type"] == "JgdyDetailPageFailure"
+    assert "failed_pages" in row["error_message"]
+    assert "checkpoint_dir" in row["error_message"]
 
 
 def test_stock_jgdy_detail_default_policy_is_high_importance_manual_review(tmp_path):

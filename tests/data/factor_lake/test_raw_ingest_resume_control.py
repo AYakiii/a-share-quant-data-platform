@@ -97,8 +97,24 @@ def test_partition_aware_resume_preserves_audit_and_recovers_queue(tmp_path: Pat
 
 
 def test_heavy_sources_are_manual_selected_only_and_policy_is_truthful(tmp_path: Path) -> None:
-    def stock_jgdy_detail_em(date: str) -> _Result:  # noqa: ARG001
-        return _Result(pd.DataFrame({"x": [1]}))
+    class _FakeJgdyResponse:
+        def json(self) -> dict:
+            return {
+                "result": {
+                    "pages": 1,
+                    "data": [
+                        {
+                            "SECURITY_CODE": "000001",
+                            "SECURITY_NAME_ABBR": "平安银行",
+                            "NOTICE_DATE": "2024-12-31",
+                            "RECEIVE_START_DATE": "2024-12-31",
+                        }
+                    ],
+                }
+            }
+
+    def stock_jgdy_detail_page_get(url: str, params: dict, timeout: float):  # noqa: ARG001
+        return _FakeJgdyResponse()
 
     def stock_gdfx_holding_analyse_em(date: str) -> _Result:  # noqa: ARG001
         return _Result(pd.DataFrame({"x": [2]}))
@@ -109,7 +125,8 @@ def test_heavy_sources_are_manual_selected_only_and_policy_is_truthful(tmp_path:
         symbols=["000001"],
         report_dates=["20241231"],
         adapter_map={
-            "stock_jgdy_detail_em": stock_jgdy_detail_em,
+            "__stock_jgdy_detail_em_request_get__": stock_jgdy_detail_page_get,
+            "__stock_jgdy_detail_em_config__": {"retry_attempts": 1, "retry_sleep_sec": 0.0, "request_sleep_sec": 0.0},
             "stock_gdfx_holding_analyse_em": stock_gdfx_holding_analyse_em,
         },
         max_workers=1,
@@ -132,7 +149,8 @@ def test_heavy_sources_are_manual_selected_only_and_policy_is_truthful(tmp_path:
         report_dates=["20241231"],
         selected_api_names=["stock_jgdy_detail_em", "stock_gdfx_holding_analyse_em", "stock_gdfx_free_holding_analyse_em"],
         adapter_map={
-            "stock_jgdy_detail_em": stock_jgdy_detail_em,
+            "__stock_jgdy_detail_em_request_get__": stock_jgdy_detail_page_get,
+            "__stock_jgdy_detail_em_config__": {"retry_attempts": 1, "retry_sleep_sec": 0.0, "request_sleep_sec": 0.0},
             "stock_gdfx_holding_analyse_em": stock_gdfx_holding_analyse_em,
             "stock_gdfx_free_holding_analyse_em": lambda date: _Result(pd.DataFrame({"x": [3]})),
         },
