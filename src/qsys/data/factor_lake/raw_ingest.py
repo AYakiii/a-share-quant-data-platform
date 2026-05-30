@@ -23,7 +23,7 @@ from qsys.data.factor_lake.acquisition_universe import build_report_dates, build
 from qsys.data.sources.akshare_index import fetch_stock_zh_index_hist_csindex
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
-from qsys.data.sources.akshare_jgdy_detail import JgdyDetailPageFailure, fetch_stock_jgdy_detail_em_resilient
+from qsys.data.sources.akshare_jgdy_detail import JgdyDetailPageFailure, JgdyDetailSnapshotDrift, fetch_stock_jgdy_detail_em_resilient
 
 AdapterFn = Callable[..., object]
 
@@ -1137,7 +1137,7 @@ def _run_single_coverage_task(
         if primary_error or fallback_error:
             err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
         err_type = type(exc).__name__
-        if isinstance(exc, JgdyDetailPageFailure):
+        if isinstance(exc, (JgdyDetailPageFailure, JgdyDetailSnapshotDrift)):
             status = "failed"
         elif _should_downgrade_to_empty(api_name, err):
             status = "empty"
@@ -1924,7 +1924,7 @@ def _run_single_coverage_task(
         if primary_error or fallback_error:
             err = f"primary_error={primary_error or 'n/a'}; fallback_error={fallback_error or 'n/a'}"
         err_type = type(exc).__name__
-        if isinstance(exc, JgdyDetailPageFailure):
+        if isinstance(exc, (JgdyDetailPageFailure, JgdyDetailSnapshotDrift)):
             status = "failed"
         elif _should_downgrade_to_empty(api_name, err):
             status = "empty"
