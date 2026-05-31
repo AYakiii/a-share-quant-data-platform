@@ -55,6 +55,14 @@ def test_all_financial_statement_apis_registered_under_financial_fundamental() -
         assert by_api[api_name] == {"api_name": api_name, "param_mode": "financial_statement_symbol"}
     for api_name in REPORT_DATE_APIS:
         assert by_api[api_name] == {"api_name": api_name, "param_mode": "financial_statement_report_date"}
+        capability = next(spec for spec in SOURCE_CAPABILITY_REGISTRY if spec.api_name == api_name)
+        assert capability.partition_keys == ("report_date",)
+        assert capability.date_field == "report_date(input)"
+        assert capability.symbol_field == "股票代码"
+        assert capability.report_period_field == "report_date(input)"
+        assert capability.announcement_date_field == "公告日期"
+        assert "REPORT_DATE" not in {capability.date_field, capability.report_period_field}
+        assert capability.announcement_date_field != "NOTICE_DATE"
 
 
 def test_policy_metadata_marks_statement_apis_p1_raw_not_deferred() -> None:
@@ -218,11 +226,11 @@ def test_synthetic_wide_dataframe_columns_are_preserved_unchanged(tmp_path: Path
 
 
 def test_synthetic_summary_dataframe_chinese_columns_are_preserved_unchanged(tmp_path: Path) -> None:
-    expected_columns = ["股票代码", "股票简称", "公告日期", "报告期", "净利润", "经营现金流"]
+    expected_columns = ["股票代码", "股票简称", "公告日期", "净利润", "经营现金流"]
 
     def stock_xjll_em(date: str) -> pd.DataFrame:
         assert date == "20240331"
-        return pd.DataFrame([["600519", "贵州茅台", "2024-04-03", "2024-03-31", 1, 2]], columns=expected_columns)
+        return pd.DataFrame([["600519", "贵州茅台", "2024-04-03", 1, 2]], columns=expected_columns)
 
     out = run_raw_coverage_ingest(
         output_root=str(tmp_path),
