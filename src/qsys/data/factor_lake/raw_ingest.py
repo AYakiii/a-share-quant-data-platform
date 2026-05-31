@@ -786,7 +786,7 @@ def run_raw_ingest_mvp(datasets: list[str], root: str, metastore_path: str, symb
     return {"results": results, "catalog_path": str(catalog_path), "summary_path": str(summary_path)}
 
 
-def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str) -> list[dict[str, str]]:
+def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], report_dates: list[str], trade_dates: list[str], industry_names: list[str], concept_names: list[str], start_date: str, end_date: str, industry_codes: list[str] | None = None) -> list[dict[str, str]]:
     if mode == "none":
         return [{}]
     if mode == "symbol_only":
@@ -818,7 +818,7 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "symbol_report_date":
         return [{"symbol": symbol, "date": date} for symbol in symbols for date in report_dates]
     if mode == "industry_code":
-        return [{"symbol": "801010"}]
+        return [{"symbol": code} for code in (industry_codes or [])]
     if mode == "industry_name_range":
         return [{"symbol": name, "start_date": start_date, "end_date": end_date} for name in industry_names]
     if mode == "industry_name":
@@ -1400,7 +1400,7 @@ def _run_task_in_subprocess_with_timeout(
         return [_failed_row("SubprocessTaskError", str(payload))]
     return [_failed_row("NoResult", "subprocess exited without queue payload")]
 
-def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
+def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -1416,6 +1416,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
     need_trade_dates = "trade_date" in required_modes
     need_report_dates = bool(required_modes & {"report_date", "symbol_report_date", "financial_statement_report_date"})
     need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
+    need_industry_codes = "industry_code" in required_modes
     need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
 
     symbols = load_stock_symbols(symbols, universe_root=universe_root) if need_symbols else (symbols or [])
@@ -1423,6 +1424,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
     trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
     report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
+    industry_codes = load_industry_names(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
@@ -1469,7 +1471,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             if selected and api_name not in selected:
                 continue
             param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
-            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date, industry_codes=industry_codes)
             for params in params_list:
                 task_key_json = _build_task_key(family, api_name, params)
                 if resume and task_key_json in completed_task_keys:
@@ -2189,7 +2191,7 @@ def _run_task_in_subprocess_with_timeout(
         return [_failed_row("SubprocessTaskError", str(payload))]
     return [_failed_row("NoResult", "subprocess exited without queue payload")]
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -2205,6 +2207,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     need_trade_dates = "trade_date" in required_modes
     need_report_dates = bool(required_modes & {"report_date", "symbol_report_date", "financial_statement_report_date"})
     need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
+    need_industry_codes = "industry_code" in required_modes
     need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
 
     symbols = load_stock_symbols(symbols, universe_root=universe_root) if need_symbols else (symbols or [])
@@ -2212,6 +2215,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
     report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
+    industry_codes = load_industry_names(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
@@ -2236,7 +2240,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             if selected and api_name not in selected:
                 continue
             param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
-            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date)
+            params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date, industry_codes=industry_codes)
             for params in params_list:
                 task_key_json = _build_task_key(family, api_name, params)
                 if resume and task_key_json in completed_task_keys:

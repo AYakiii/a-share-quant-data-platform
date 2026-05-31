@@ -22,6 +22,15 @@ class FakeAk:
     def stock_board_concept_name_ths(self):
         return pd.DataFrame({"概念名称": ["人工智能", "低空经济"]})
 
+    def sw_index_first_info(self):
+        return pd.DataFrame({"行业代码": ["801010", "801020"]})
+
+    def sw_index_second_info(self):
+        return pd.DataFrame({"行业代码": ["801011"]})
+
+    def sw_index_third_info(self):
+        return pd.DataFrame({"行业代码": ["801012", "801010"]})
+
 
 def _symbols_file(tmp_path: Path, content: str = "# comment\n000001\n600000\n000001\n\n") -> Path:
     path = tmp_path / "symbols.txt"
@@ -36,19 +45,30 @@ def _args(tmp_path: Path, **overrides):
         start_date="20260518",
         end_date="20260529",
         report_dates="20251231,20260331",
+        lanes="main",
+        only_families=None,
+        exclude_families=None,
+        only_apis=None,
+        exclude_apis=None,
         max_workers=64,
         heavy_max_workers=16,
         long_run_max_workers=1,
         deferred_max_workers=4,
         heartbeat_sec=30,
-        task_timeout_sec=600,
-        heavy_task_timeout_sec=1200,
-        long_run_task_timeout_sec=1800,
+        task_timeout_sec=120,
+        manual_selected_task_timeout_sec=180,
+        heavy_task_timeout_sec=300,
+        long_run_task_timeout_sec=600,
+        deferred_task_timeout_sec=300,
         request_sleep=0.10,
         heavy_request_sleep=0.20,
         long_run_request_sleep=0.50,
         task_retry_attempts=2,
+        task_retry_sleep_sec=0.0,
+        task_retry_backoff=1.0,
+        task_retry_jitter_sec=0.0,
         resume=False,
+        refresh_universe=False,
         include_deferred_recovery=False,
         skip_heavy=False,
         skip_long_run=False,
@@ -85,6 +105,7 @@ def test_index_industry_concept_discovery_uses_synthetic_akshare_adapter():
     assert preheat.discover_index_symbols(ak) == ["000300", "000905", "000852", "399001"]
     assert preheat.discover_industry_names(ak) == ["半导体", "银行"]
     assert preheat.discover_concept_names(ak) == ["人工智能", "低空经济"]
+    assert preheat.discover_sw_industry_codes(ak) == ["801010", "801020", "801011", "801012"]
 
 
 def test_report_date_parsing_preserves_explicit_values():
@@ -228,6 +249,139 @@ def test_checklist_artifact_created_from_synthetic_lane_outputs(tmp_path):
     checklist = pd.read_csv(output_root / "_operation_review" / "acquisition_checklist.csv")
     assert checklist.loc[0, "success_tasks"] == 1
     assert checklist.loc[0, "rows"] == 3
+
+
+def test_default_main_only_execution_excludes_heavy_and_long_run(tmp_path):
+    args = _args(tmp_path)
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    assert {row["lane"] for row in plan if row["selected"]} == {"main"}
+    assert not any(row["api_name"] == "stock_zh_index_hist_csindex" and row["selected"] for row in plan)
+
+
+def test_manual_selected_lane_requires_explicit_selection(tmp_path):
+    default_plan = preheat.build_preheat_plan(_args(tmp_path), _universe(tmp_path))
+    assert not any(row["api_name"] == "stock_financial_analysis_indicator_em" and row["selected"] for row in default_plan)
+    manual_plan = preheat.build_preheat_plan(_args(tmp_path, lanes="manual_selected"), _universe(tmp_path))
+    assert any(row["api_name"] == "stock_financial_analysis_indicator_em" and row["lane"] == "manual_selected" and row["selected"] for row in manual_plan)
+
+
+def test_heavy_opt_in_and_only_heavy_execution(tmp_path):
+    args = _args(tmp_path, lanes="heavy")
+    universe = preheat.PreheatUniverse(index_symbols=["000300"], industry_names=["半导体"], concept_names=["人工智能"], industry_codes=["801010"])
+    plan = preheat.build_preheat_plan(args, universe)
+    selected = [row for row in plan if row["selected"]]
+    assert selected
+    assert {row["lane"] for row in selected} == {"heavy"}
+    assert any(row["api_name"] == "stock_zh_index_hist_csindex" for row in selected)
+
+
+def test_family_and_api_include_exclude_filters(tmp_path):
+    args = _args(tmp_path, only_families="financial_fundamental", exclude_apis="stock_zcfz_em")
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    selected = [row for row in plan if row["selected"]]
+    assert selected
+    assert {row["source_family"] for row in selected} == {"financial_fundamental"}
+    assert "stock_zcfz_em" not in {row["api_name"] for row in selected}
+    args = _args(tmp_path, only_apis="stock_zcfz_em,stock_lrb_em", exclude_families="market_price")
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    assert {row["api_name"] for row in plan if row["selected"]} == {"stock_zcfz_em", "stock_lrb_em"}
+
+
+def test_only_non_heavy_execution_with_main_lane(tmp_path):
+    args = _args(tmp_path, lanes="main")
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    assert all(row["lane"] == "main" for row in plan if row["selected"])
+
+
+def test_lazy_discovery_and_conditional_symbols_and_report_dates(tmp_path):
+    calls = []
+
+    class MinimalAk(FakeAk):
+        def stock_zh_index_spot_em(self):
+            calls.append("index")
+            return super().stock_zh_index_spot_em()
+
+        def stock_board_industry_name_ths(self):
+            calls.append("industry")
+            return super().stock_board_industry_name_ths()
+
+    args = _args(tmp_path, symbols_file=None, report_dates=None, only_apis="stock_margin_underlying_info_szse")
+    skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
+    universe = preheat.discover_universe_for_plan(args, skeleton, ak_module=MinimalAk())
+    assert universe == preheat.PreheatUniverse()
+    assert calls == []
+    args = _args(tmp_path, symbols_file=None, report_dates=None, only_apis="stock_zcfz_em")
+    skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
+    with pytest.raises(ValueError, match="report-dates"):
+        preheat.discover_universe_for_plan(args, skeleton, ak_module=FakeAk())
+
+
+def test_catalog_preservation_across_lanes_and_retry_forwarding(tmp_path):
+    args = _args(tmp_path, lanes="main,heavy", task_retry_sleep_sec=1.5, task_retry_backoff=2.0, task_retry_jitter_sec=0.25)
+    universe = preheat.PreheatUniverse(stock_symbols=["000001"], report_dates=["20251231"], index_symbols=["000300"], industry_names=["半导体"], concept_names=["人工智能"], industry_codes=["801010"])
+    plan = preheat.build_preheat_plan(args, universe)
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": []}
+
+    manifests = preheat.run_lanes(args, universe, plan, runner=runner)
+    assert len(calls) >= 2
+    assert calls[0]["resume"] is False
+    assert calls[1]["resume"] is True
+    assert manifests[0]["requested_resume"] is False
+    assert manifests[1]["effective_resume"] is True
+    assert calls[0]["task_retry_sleep_sec"] == 1.5
+    assert calls[0]["task_retry_backoff"] == 2.0
+    assert calls[0]["task_retry_jitter_sec"] == 0.25
+
+
+def test_resume_reuses_universe_snapshots_by_default(tmp_path):
+    output_root = tmp_path / "out"
+    preheat.write_universe_snapshots(output_root, preheat.PreheatUniverse(stock_symbols=["000001"], report_dates=["20251231"]))
+    args = _args(tmp_path, output_root=str(output_root), symbols_file=None, report_dates=None, only_apis="stock_zcfz_em")
+    skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
+    universe = preheat.discover_universe_for_plan(args, skeleton, ak_module=FakeAk())
+    assert universe.stock_symbols == ["000001"]
+    assert universe.report_dates == ["20251231"]
+
+
+def test_dry_run_semantics_do_not_create_false_recovery_rows(tmp_path):
+    args = _args(tmp_path, dry_run=True)
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    preheat.write_runtime_artifacts(args.output_root, plan, [], dry_run=True)
+    checklist = pd.read_csv(Path(args.output_root) / "_operation_review" / "acquisition_checklist.csv")
+    selected = checklist[checklist["api_name"] == "stock_zcfz_em"].iloc[0]
+    assert selected["execution_status"] == "dry_run_not_executed"
+    assert selected["recovery_required"] == False
+    assert selected["recommended_action"] == "ready_for_execution"
+    recovery = pd.read_csv(Path(args.output_root) / "_operation_review" / "recovery_tasks.csv")
+    assert recovery.empty
+
+
+def test_sw_full_industry_code_fanout_and_heavy_classification(tmp_path):
+    args = _args(tmp_path, lanes="heavy")
+    skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
+    universe = preheat.discover_universe_for_plan(args, skeleton, ak_module=FakeAk())
+    assert universe.industry_codes == ["801010", "801020", "801011", "801012"]
+    plan = preheat.build_preheat_plan(args, universe)
+    by_api = {row["api_name"]: row for row in plan}
+    assert by_api["index_hist_sw"]["lane"] == "heavy"
+    assert by_api["index_hist_sw"]["planned_tasks"] == 4
+
+
+def test_timeout_defaults_and_overrides(tmp_path):
+    parser = preheat.build_parser()
+    args = parser.parse_args(["--output-root", str(tmp_path), "--start-date", "20260518", "--end-date", "20260529"])
+    assert args.task_timeout_sec == 120
+    assert args.manual_selected_task_timeout_sec == 180
+    assert args.heavy_task_timeout_sec == 300
+    assert args.long_run_task_timeout_sec == 600
+    assert args.deferred_task_timeout_sec == 300
+    args = parser.parse_args(["--output-root", str(tmp_path), "--start-date", "20260518", "--end-date", "20260529", "--task-timeout-sec", "9", "--heavy-task-timeout-sec", "10"])
+    assert args.task_timeout_sec == 9
+    assert args.heavy_task_timeout_sec == 10
 
 
 def test_raw_ingest_runner_is_reused_without_parquet_writer_logic():
