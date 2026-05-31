@@ -50,6 +50,12 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
         {"api_name": "stock_financial_analysis_indicator_em", "param_mode": "financial_indicator_em"},
         {"api_name": "stock_yjyg_em", "param_mode": "report_date"},
         {"api_name": "stock_yysj_em", "param_mode": "report_date"},
+        {"api_name": "stock_balance_sheet_by_report_em", "param_mode": "financial_statement_symbol"},
+        {"api_name": "stock_profit_sheet_by_report_em", "param_mode": "financial_statement_symbol"},
+        {"api_name": "stock_cash_flow_sheet_by_report_em", "param_mode": "financial_statement_symbol"},
+        {"api_name": "stock_zcfz_em", "param_mode": "financial_statement_report_date"},
+        {"api_name": "stock_lrb_em", "param_mode": "financial_statement_report_date"},
+        {"api_name": "stock_xjll_em", "param_mode": "financial_statement_report_date"},
     ],
     "industry_concept": [
         {"api_name": "stock_industry_change_cninfo", "param_mode": "symbol_range"},
@@ -319,9 +325,47 @@ DISABLED_API_METADATA[("disclosure_ir", "stock_jgdy_detail_em")] = {
     "disabled_reason": "high-importance heavy detail source; deferred by default because real runs fan out into long detail crawls",
 }
 
+FINANCIAL_STATEMENT_SYMBOL_APIS: set[tuple[str, str]] = {
+    ("financial_fundamental", "stock_balance_sheet_by_report_em"),
+    ("financial_fundamental", "stock_profit_sheet_by_report_em"),
+    ("financial_fundamental", "stock_cash_flow_sheet_by_report_em"),
+}
+
+FINANCIAL_STATEMENT_REPORT_DATE_APIS: set[tuple[str, str]] = {
+    ("financial_fundamental", "stock_zcfz_em"),
+    ("financial_fundamental", "stock_lrb_em"),
+    ("financial_fundamental", "stock_xjll_em"),
+}
+
+FINANCIAL_STATEMENT_POLICY_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
+    pair: {
+        "enabled": True,
+        "default_enabled": True,
+        "manual_review_required": False,
+        "priority_tier": "P1",
+        "data_theme": "financial_statement_raw",
+        "acquisition_mode": "bulk_financial_wide",
+    }
+    for pair in FINANCIAL_STATEMENT_SYMBOL_APIS
+}
+FINANCIAL_STATEMENT_POLICY_METADATA.update(
+    {
+        pair: {
+            "enabled": True,
+            "default_enabled": True,
+            "manual_review_required": False,
+            "priority_tier": "P1",
+            "data_theme": "financial_statement_raw",
+            "acquisition_mode": "bulk_financial_core",
+        }
+        for pair in FINANCIAL_STATEMENT_REPORT_DATE_APIS
+    }
+)
+
 API_POLICY_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
     **DISABLED_API_METADATA,
     **P15P2_WAVE1_SOURCE_METADATA,
+    **FINANCIAL_STATEMENT_POLICY_METADATA,
     ("disclosure_ir", "stock_zh_a_disclosure_relation_cninfo"): {
         "enabled": True,
         "default_enabled": True,
@@ -380,6 +424,32 @@ def _financial_indicator_em_symbol(symbol: str | int) -> str:
     raise ValueError(f"unsupported EM financial indicator symbol prefix: {symbol!r}; only 0/3 => .SZ and 6 => .SH are verified")
 
 
+
+def _financial_statement_symbol_pair(symbol: str | int) -> tuple[str, str]:
+    """Return logical six-digit and AkShare-prefixed symbols for statement APIs."""
+    raw = str(symbol).strip().upper()
+    if raw.startswith(("SH", "SZ")):
+        digits = raw[2:]
+        if len(raw) == 8 and digits.isdigit():
+            if raw.startswith("SH") and digits.startswith("6"):
+                return digits, raw
+            if raw.startswith("SZ") and digits.startswith(("0", "3")):
+                return digits, raw
+        raise ValueError(
+            f"unsupported financial statement symbol: {symbol!r}; expected SH6xxxxx, SZ0xxxxx, SZ3xxxxx, or six digits starting with 0/3/6"
+        )
+    if not (raw.isdigit() and len(raw) == 6):
+        raise ValueError(
+            f"malformed financial statement symbol: {symbol!r}; expected exactly six digits or SH/SZ-prefixed six digits"
+        )
+    if raw.startswith("6"):
+        return raw, f"SH{raw}"
+    if raw.startswith(("0", "3")):
+        return raw, f"SZ{raw}"
+    raise ValueError(
+        f"unsupported financial statement symbol prefix: {symbol!r}; only 6 => SH and 0/3 => SZ are verified"
+    )
+
 def _financial_indicator_em_partition_label(indicator: str) -> str:
     """Return stable ASCII partition labels for Chinese EM indicator modes."""
     labels = {"按报告期": "report_period", "按单季度": "single_quarter"}
@@ -393,6 +463,9 @@ def _build_api_call_params(family: str, api_name: str, params: dict[str, str]) -
     call_params = dict(params)
     if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em") and "symbol" in params:
         call_params["symbol"] = _financial_indicator_em_symbol(params["symbol"])
+    if (family, api_name) in FINANCIAL_STATEMENT_SYMBOL_APIS and "symbol" in params:
+        _logical_symbol, akshare_symbol = _financial_statement_symbol_pair(params["symbol"])
+        call_params["symbol"] = akshare_symbol
     if (family, api_name) in TRADE_DATE_RANGE_CALL_APIS and "date" in params:
         trade_date = str(params["date"])
         call_params.pop("date", None)
@@ -415,6 +488,11 @@ def _build_raw_partition(family: str, api_name: str, params: dict[str, str], fil
         digits = "".join(ch for ch in symbol if ch.isdigit())
         logical_symbol = digits.zfill(6) if digits else symbol
         return {"symbol": logical_symbol, "indicator": _financial_indicator_em_partition_label(str(params.get("indicator", "")))}
+    if (family, api_name) in FINANCIAL_STATEMENT_SYMBOL_APIS:
+        logical_symbol, _akshare_symbol = _financial_statement_symbol_pair(str(params.get("symbol", "")))
+        return {"symbol": logical_symbol}
+    if (family, api_name) in FINANCIAL_STATEMENT_REPORT_DATE_APIS:
+        return {"report_date": str(params.get("date", ""))}
     if "date" in params and (family, api_name) in TRADE_DATE_RANGE_CALL_APIS | {
         ("commodity_inventory", "futures_gfex_warehouse_receipt"),
         ("commodity_inventory", "futures_shfe_warehouse_receipt"),
@@ -719,6 +797,8 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
             for symbol in symbols
             for indicator in ("按报告期", "按单季度")
         ]
+    if mode == "financial_statement_symbol":
+        return [{"symbol": _financial_statement_symbol_pair(symbol)[0]} for symbol in symbols]
     if mode == "symbol_range":
         return [{"symbol": symbol, "start_date": start_date, "end_date": end_date} for symbol in symbols]
     if mode == "daily_symbol_range":
@@ -732,6 +812,8 @@ def _params_for_mode(mode: str, symbols: list[str], index_symbols: list[str], re
     if mode == "trade_date":
         return [{"date": date} for date in trade_dates]
     if mode == "report_date":
+        return [{"date": date} for date in report_dates]
+    if mode == "financial_statement_report_date":
         return [{"date": date} for date in report_dates]
     if mode == "symbol_report_date":
         return [{"symbol": symbol, "date": date} for symbol in symbols for date in report_dates]
@@ -1043,6 +1125,8 @@ def _run_single_coverage_task(
             call_params = _build_api_call_params(family, api_name, params)
             if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
                 akshare_symbol = str(call_params.get("symbol", ""))
+            if (family, api_name) in FINANCIAL_STATEMENT_SYMBOL_APIS:
+                original_symbol, akshare_symbol = _financial_statement_symbol_pair(str(params.get("symbol", "")))
             filtered = call_params
             try:
                 sig = inspect.signature(fn)
@@ -1327,10 +1411,10 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
             selected_specs.append(spec)
 
     required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
-    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em"})
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em", "financial_statement_symbol"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
-    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
+    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date", "financial_statement_report_date"})
     need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
     need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
 
@@ -1830,6 +1914,8 @@ def _run_single_coverage_task(
             call_params = _build_api_call_params(family, api_name, params)
             if (family, api_name) == ("financial_fundamental", "stock_financial_analysis_indicator_em"):
                 akshare_symbol = str(call_params.get("symbol", ""))
+            if (family, api_name) in FINANCIAL_STATEMENT_SYMBOL_APIS:
+                original_symbol, akshare_symbol = _financial_statement_symbol_pair(str(params.get("symbol", "")))
             filtered = call_params
             try:
                 sig = inspect.signature(fn)
@@ -2114,10 +2200,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             selected_specs.append(spec)
 
     required_modes = {_effective_param_mode(family, spec["api_name"], spec["param_mode"]) for family in families for spec in COVERAGE_API_SPECS.get(family, []) if not selected or spec["api_name"] in selected}
-    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em"})
+    need_symbols = bool(required_modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em", "financial_statement_symbol"})
     need_index_symbols = bool(required_modes & {"index_symbol_range", "index_symbol"})
     need_trade_dates = "trade_date" in required_modes
-    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date"})
+    need_report_dates = bool(required_modes & {"report_date", "symbol_report_date", "financial_statement_report_date"})
     need_industry_names = bool(required_modes & {"industry_name_range", "industry_name"})
     need_concept_names = bool(required_modes & {"concept_name_range", "concept_name"})
 
