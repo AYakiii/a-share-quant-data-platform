@@ -220,7 +220,7 @@ def read_universe_snapshots(output_root: str | Path) -> PreheatUniverse:
         concept_names=_read_snapshot(root, "concept_names.csv", "name"),
         trading_dates=_read_snapshot(root, "trading_calendar.csv", "trade_date"),
         report_dates=_read_snapshot(root, "report_dates.csv", "report_date"),
-        industry_codes=_read_snapshot(root, "industry_codes.csv", "code"),
+        industry_codes=_read_snapshot(root, "industry_codes.csv", "industry_code"),
     )
 
 
@@ -235,7 +235,7 @@ def write_universe_snapshots(output_root: str | Path, universe: PreheatUniverse)
         "concept_names.csv": ("name", universe.concept_names),
         "trading_calendar.csv": ("trade_date", universe.trading_dates),
         "report_dates.csv": ("report_date", universe.report_dates),
-        "industry_codes.csv": ("code", universe.industry_codes),
+        "industry_codes.csv": ("industry_code", universe.industry_codes),
     }
     for filename, (column, values) in files.items():
         pd.DataFrame({column: values}).to_csv(root / filename, index=False, encoding="utf-8-sig")

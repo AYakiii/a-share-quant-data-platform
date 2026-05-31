@@ -377,6 +377,18 @@ def test_fresh_non_resume_run_rediscoveres_instead_of_reusing_stale_snapshots(tm
     assert universe.report_dates == ["20251231"]
 
 
+def test_industry_code_snapshot_schema_matches_acquisition_universe_loader(tmp_path):
+    output_root = tmp_path / "out"
+    codes = ["801010", "801020"]
+    preheat.write_universe_snapshots(output_root, preheat.PreheatUniverse(industry_codes=codes))
+    snapshot_path = output_root / "_operation_review" / "universe_snapshots" / "industry_codes.csv"
+    snapshot = pd.read_csv(snapshot_path, dtype=str)
+    assert list(snapshot.columns) == ["industry_code"]
+    assert snapshot["industry_code"].tolist() == codes
+    assert preheat.read_universe_snapshots(output_root).industry_codes == codes
+    assert load_industry_codes(universe_root=snapshot_path.parent) == codes
+
+
 def test_industry_codes_loader_and_raw_ingest_fallback_use_industry_codes_file(tmp_path):
     universe_root = tmp_path / "universe"
     universe_root.mkdir()
