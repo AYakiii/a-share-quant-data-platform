@@ -19,7 +19,7 @@ import pandas as pd
 from qsys.data.factor_lake.io import write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
 from qsys.data.factor_lake.registry import DATASET_REGISTRY, get_dataset_spec, plan_partitions
-from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_names, load_stock_symbols
+from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_codes, load_industry_names, load_stock_symbols
 from qsys.data.sources.akshare_index import fetch_stock_zh_index_hist_csindex
 from qsys.data.sources.akshare_margin import fetch_stock_margin_detail_sse, fetch_stock_margin_detail_szse
 from qsys.data.sources.akshare_market import fetch_stock_zh_a_daily, fetch_stock_zh_a_hist
@@ -1424,7 +1424,7 @@ def _run_raw_coverage_ingest_duplicate_legacy(output_root: str, families: list[s
     trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
     report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
-    industry_codes = load_industry_names(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
+    industry_codes = load_industry_codes(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"
@@ -2215,7 +2215,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     trade_dates = build_trade_dates(start_date, end_date, trade_dates, universe_root=universe_root) if need_trade_dates else (trade_dates or [])
     report_dates = build_report_dates(start_date, end_date, report_dates) if need_report_dates else (report_dates or [])
     industry_names = load_industry_names(industry_names, universe_root=universe_root) if need_industry_names else (industry_names or [])
-    industry_codes = load_industry_names(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
+    industry_codes = load_industry_codes(industry_codes, universe_root=universe_root) if need_industry_codes else (industry_codes or [])
     concept_names = load_concept_names(concept_names, universe_root=universe_root) if need_concept_names else (concept_names or [])
 
     catalog_path = Path(output_root) / "raw_ingest_catalog.csv"

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from qsys.data.factor_lake.acquisition_universe import load_industry_codes
+from qsys.data.factor_lake.raw_ingest import _params_for_mode, run_raw_coverage_ingest
 from qsys.utils import run_raw_lake_preheat as preheat
 
 
@@ -165,6 +167,25 @@ def test_duplicate_api_registrations_do_not_cause_duplicate_execution(monkeypatc
     monkeypatch.setattr(preheat, "PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
     plan = preheat.build_preheat_plan(_args(tmp_path), _universe(tmp_path))
     assert [row["api_name"] for row in plan] == ["same_api"]
+
+
+def test_deferred_recovery_only_api_filter_does_not_release_all_deferred(tmp_path):
+    args = _args(tmp_path, lanes="deferred_recovery", only_apis="stock_zh_a_hist")
+    plan = preheat.build_preheat_plan(args, _universe(tmp_path))
+    selected = [row for row in plan if row["selected"]]
+    assert [row["api_name"] for row in selected] == ["stock_zh_a_hist"]
+    assert selected[0]["lane"] == "deferred_recovery"
+
+
+def test_conflicting_duplicate_api_param_modes_fail_clearly(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        preheat,
+        "COVERAGE_API_SPECS",
+        {"family_a": [{"api_name": "same_api", "param_mode": "none"}], "family_b": [{"api_name": "same_api", "param_mode": "symbol_only"}]},
+    )
+    monkeypatch.setattr(preheat, "PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
+    with pytest.raises(ValueError, match="Conflicting duplicate API registration.*same_api"):
+        preheat.build_preheat_plan(_args(tmp_path), preheat.PreheatUniverse())
 
 
 def test_dry_run_writes_plan_artifacts_and_executes_no_acquisition_calls(tmp_path):
@@ -340,11 +361,48 @@ def test_catalog_preservation_across_lanes_and_retry_forwarding(tmp_path):
 def test_resume_reuses_universe_snapshots_by_default(tmp_path):
     output_root = tmp_path / "out"
     preheat.write_universe_snapshots(output_root, preheat.PreheatUniverse(stock_symbols=["000001"], report_dates=["20251231"]))
-    args = _args(tmp_path, output_root=str(output_root), symbols_file=None, report_dates=None, only_apis="stock_zcfz_em")
+    args = _args(tmp_path, output_root=str(output_root), symbols_file=None, report_dates=None, only_apis="stock_zcfz_em", resume=True)
     skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
     universe = preheat.discover_universe_for_plan(args, skeleton, ak_module=FakeAk())
     assert universe.stock_symbols == ["000001"]
     assert universe.report_dates == ["20251231"]
+
+
+def test_fresh_non_resume_run_rediscoveres_instead_of_reusing_stale_snapshots(tmp_path):
+    output_root = tmp_path / "out"
+    preheat.write_universe_snapshots(output_root, preheat.PreheatUniverse(report_dates=["19991231"]))
+    args = _args(tmp_path, output_root=str(output_root), report_dates="20251231", only_apis="stock_zcfz_em", resume=False)
+    skeleton = preheat.build_preheat_plan(args, preheat.PreheatUniverse())
+    universe = preheat.discover_universe_for_plan(args, skeleton, ak_module=FakeAk())
+    assert universe.report_dates == ["20251231"]
+
+
+def test_industry_codes_loader_and_raw_ingest_fallback_use_industry_codes_file(tmp_path):
+    universe_root = tmp_path / "universe"
+    universe_root.mkdir()
+    pd.DataFrame({"industry_code": ["801010", "801020"]}).to_csv(universe_root / "industry_codes.csv", index=False)
+    assert load_industry_codes(universe_root=universe_root) == ["801010", "801020"]
+    assert _params_for_mode("industry_code", [], [], [], [], [], [], "20200101", "20200101", industry_codes=["801010", "801020"]) == [
+        {"symbol": "801010"},
+        {"symbol": "801020"},
+    ]
+
+    calls = []
+
+    def index_hist_sw(symbol: str):
+        calls.append(symbol)
+        return pd.DataFrame({"代码": [symbol]})
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path / "out"),
+        families=["industry_concept"],
+        selected_api_names=["index_hist_sw"],
+        adapter_map={"index_hist_sw": index_hist_sw},
+        universe_root=universe_root,
+        max_workers=1,
+    )
+    assert calls == ["801010", "801020"]
+    assert [row["status"] for row in out["rows"]] == ["success", "success"]
 
 
 def test_dry_run_semantics_do_not_create_false_recovery_rows(tmp_path):

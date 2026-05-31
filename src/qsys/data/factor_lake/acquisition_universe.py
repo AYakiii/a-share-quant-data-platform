@@ -57,3 +57,8 @@ def load_industry_names(industry_names: list[str] | None = None, universe_root: 
 def load_concept_names(concept_names: list[str] | None = None, universe_root: str | Path = DEFAULT_UNIVERSE_ROOT) -> list[str]:
     vals = _norm(concept_names)
     return vals if vals else _load_required_csv(Path(universe_root) / "concept_names.csv", "concept_name")
+
+
+def load_industry_codes(industry_codes: list[str] | None = None, universe_root: str | Path = DEFAULT_UNIVERSE_ROOT) -> list[str]:
+    vals = _norm(industry_codes)
+    return vals if vals else _load_required_csv(Path(universe_root) / "industry_codes.csv", "industry_code")

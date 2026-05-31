@@ -283,15 +283,18 @@ def _base_lane_for(family: str, api_name: str, param_mode: str) -> str:
 
 def _all_registered_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    seen_api_names: set[str] = set()
+    seen_api_modes: dict[str, str] = {}
     families = list(dict.fromkeys([*PHASE_COVERAGE_FAMILIES, *COVERAGE_API_SPECS.keys()]))
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
-            if api_name in seen_api_names:
-                continue
-            seen_api_names.add(api_name)
             param_mode = _effective_param_mode(family, api_name, spec["param_mode"])
+            prior_mode = seen_api_modes.get(api_name)
+            if prior_mode is not None:
+                if prior_mode != param_mode:
+                    raise ValueError(f"Conflicting duplicate API registration for {api_name}: {prior_mode} vs {param_mode}")
+                continue
+            seen_api_modes[api_name] = param_mode
             rows.append(
                 {
                     "source_family": family,
@@ -345,7 +348,7 @@ def discover_universe_for_plan(args: argparse.Namespace, plan_rows: list[dict[st
     if ak_module is None:
         import akshare as ak_module  # type: ignore[no-redef]
 
-    existing = read_universe_snapshots(args.output_root) if not args.refresh_universe else PreheatUniverse()
+    existing = read_universe_snapshots(args.output_root) if args.resume and not args.refresh_universe else PreheatUniverse()
     modes = required_modes(plan_rows)
     need_symbols = bool(modes & {"symbol_only", "symbol_range", "daily_symbol_range", "daily_symbol_range_hist", "symbol_report_date", "financial_indicator_em", "financial_statement_symbol"})
     need_index = bool(modes & {"index_symbol_range", "index_symbol"})
@@ -403,24 +406,24 @@ def build_preheat_plan(args: argparse.Namespace, universe: PreheatUniverse | Non
     }
     plan_rows: list[dict[str, Any]] = []
     universe = universe or PreheatUniverse()
+    selected_lanes = _selected_lanes(args)
     for row in _all_registered_rows():
-        selected, reason = _selection(row, args)
-        lane = "deferred_recovery" if row["lane"] == "deferred" and "deferred_recovery" in _selected_lanes(args) else row["lane"]
-        if row["lane"] == "deferred" and lane == "deferred_recovery":
-            selected, reason = True, "selected_deferred_recovery"
-        policy = API_POLICY_METADATA.get((row["source_family"], row["api_name"]), {})
+        planned_row = dict(row)
+        if planned_row["lane"] == "deferred" and "deferred_recovery" in selected_lanes:
+            planned_row["lane"] = "deferred_recovery"
+        selected, reason = _selection(planned_row, args)
+        policy = API_POLICY_METADATA.get((planned_row["source_family"], planned_row["api_name"]), {})
         execution_status = "pending_execution" if selected else "not_selected"
         plan_rows.append(
             {
-                **row,
-                "lane": lane,
+                **planned_row,
                 "selected": selected,
                 "selection_reason": reason,
                 "enabled": selected,
                 "execution_status": execution_status,
-                "default_enabled": bool(policy.get("default_enabled", (row["source_family"], row["api_name"]) not in TEMP_DISABLED_APIS and (row["source_family"], row["api_name"]) not in EXCLUDED_APIS)),
+                "default_enabled": bool(policy.get("default_enabled", (planned_row["source_family"], planned_row["api_name"]) not in TEMP_DISABLED_APIS and (planned_row["source_family"], planned_row["api_name"]) not in EXCLUDED_APIS)),
                 "manual_review_required": bool(policy.get("manual_review_required", False)),
-                "planned_tasks": _planned_task_count(row["param_mode"], universe, args.start_date, args.end_date) if selected and universe is not None else 0,
+                "planned_tasks": _planned_task_count(planned_row["param_mode"], universe, args.start_date, args.end_date) if selected and universe is not None else 0,
                 "stock_symbol_count": len(universe.stock_symbols),
                 "index_symbol_count": len(universe.index_symbols),
                 "industry_name_count": len(universe.industry_names),
@@ -428,7 +431,7 @@ def build_preheat_plan(args: argparse.Namespace, universe: PreheatUniverse | Non
                 "trading_date_count": len(universe.trading_dates),
                 "report_date_count": len(universe.report_dates),
                 "industry_code_count": len(universe.industry_codes),
-                "lane_concurrency": lane_workers[lane],
+                "lane_concurrency": lane_workers[planned_row["lane"]],
                 "output_root": str(args.output_root),
             }
         )
