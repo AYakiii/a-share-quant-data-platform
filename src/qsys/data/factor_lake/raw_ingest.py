@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import inspect
 import time
@@ -17,7 +18,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from qsys.data.factor_lake.io import write_raw_partition
+from qsys.data.factor_lake.io import raw_partition_path, write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
 from qsys.data.factor_lake.registry import DATASET_REGISTRY, get_dataset_spec, plan_partitions
 from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_codes, load_industry_names, load_stock_symbols
@@ -1194,6 +1195,61 @@ def _run_single_coverage_task(
     primary_error = ""
     fallback_error = ""
     partition = _build_raw_partition(family, api_name, params, {})
+    if not (family == "market_price" and api_name in {"stock_zh_a_daily", "stock_zh_a_hist"}):
+        existing_dir = raw_partition_path(output_root, family, api_name, partition)
+        existing_data_path = existing_dir / "data.parquet"
+        existing_meta_path = existing_dir / "metadata.json"
+        has_data = existing_data_path.exists()
+        has_meta = existing_meta_path.exists()
+        if has_data and has_meta:
+            finished_at = datetime.now(UTC)
+            return [_attach_api_policy_metadata({
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
+                "source_family": family,
+                "api_name": api_name,
+                "requested_api_name": api_name,
+                "actual_api_name": api_name,
+                "fallback_from": "",
+                "original_symbol": original_symbol,
+                "akshare_symbol": "",
+                "status": "already_exists",
+                "rows": 0,
+                "error_type": "",
+                "error_message": "pre_request_existing_partition_skip",
+                "output_path": str(existing_data_path),
+                "metadata_path": str(existing_meta_path),
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+            }, family, api_name)]
+        if has_data != has_meta:
+            finished_at = datetime.now(UTC)
+            missing = "metadata.json" if has_data else "data.parquet"
+            return [_attach_api_policy_metadata({
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
+                "source_family": family,
+                "api_name": api_name,
+                "requested_api_name": api_name,
+                "actual_api_name": api_name,
+                "fallback_from": "",
+                "original_symbol": original_symbol,
+                "akshare_symbol": "",
+                "status": "failed",
+                "rows": 0,
+                "error_type": "partial_partition_state",
+                "error_message": f"partial raw partition state: missing {missing}; preserve existing files for manual inspection",
+                "output_path": str(existing_data_path) if has_data else "",
+                "metadata_path": str(existing_meta_path) if has_meta else "",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+            }, family, api_name)]
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None and (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
@@ -1215,6 +1271,62 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = call_params
+            if not (family == "market_price" and api_name in {"stock_zh_a_daily", "stock_zh_a_hist"}):
+                partition = _build_raw_partition(family, api_name, params, filtered)
+                existing_dir = raw_partition_path(output_root, family, api_name, partition)
+                existing_data_path = existing_dir / "data.parquet"
+                existing_meta_path = existing_dir / "metadata.json"
+                has_data = existing_data_path.exists()
+                has_meta = existing_meta_path.exists()
+                if has_data and has_meta:
+                    finished_at = datetime.now(UTC)
+                    return [_attach_api_policy_metadata({
+                        "dataset_name": "raw_source_api",
+                        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                        "task_key_json": task_key_json,
+                        "source_family": family,
+                        "api_name": api_name,
+                        "requested_api_name": api_name,
+                        "actual_api_name": api_name,
+                        "fallback_from": "",
+                        "original_symbol": original_symbol,
+                        "akshare_symbol": akshare_symbol,
+                        "status": "already_exists",
+                        "rows": 0,
+                        "error_type": "",
+                        "error_message": "pre_request_existing_partition_skip",
+                        "output_path": str(existing_data_path),
+                        "metadata_path": str(existing_meta_path),
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+                    }, family, api_name)]
+                if has_data != has_meta:
+                    finished_at = datetime.now(UTC)
+                    missing = "metadata.json" if has_data else "data.parquet"
+                    return [_attach_api_policy_metadata({
+                        "dataset_name": "raw_source_api",
+                        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                        "task_key_json": task_key_json,
+                        "source_family": family,
+                        "api_name": api_name,
+                        "requested_api_name": api_name,
+                        "actual_api_name": api_name,
+                        "fallback_from": "",
+                        "original_symbol": original_symbol,
+                        "akshare_symbol": akshare_symbol,
+                        "status": "failed",
+                        "rows": 0,
+                        "error_type": "partial_partition_state",
+                        "error_message": f"partial raw partition state: missing {missing}; preserve existing files for manual inspection",
+                        "output_path": str(existing_data_path) if has_data else "",
+                        "metadata_path": str(existing_meta_path) if has_meta else "",
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+                    }, family, api_name)]
             if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
                 jgdy_request_get = adapters.get("__stock_jgdy_detail_em_request_get__") or adapters.get("stock_jgdy_detail_em_request_get")
                 jgdy_config = adapters.get("__stock_jgdy_detail_em_config__") or {}
@@ -1985,6 +2097,61 @@ def _run_single_coverage_task(
     primary_error = ""
     fallback_error = ""
     partition = _build_raw_partition(family, api_name, params, {})
+    if not (family == "market_price" and api_name in {"stock_zh_a_daily", "stock_zh_a_hist"}):
+        existing_dir = raw_partition_path(output_root, family, api_name, partition)
+        existing_data_path = existing_dir / "data.parquet"
+        existing_meta_path = existing_dir / "metadata.json"
+        has_data = existing_data_path.exists()
+        has_meta = existing_meta_path.exists()
+        if has_data and has_meta:
+            finished_at = datetime.now(UTC)
+            return [_attach_api_policy_metadata({
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
+                "source_family": family,
+                "api_name": api_name,
+                "requested_api_name": api_name,
+                "actual_api_name": api_name,
+                "fallback_from": "",
+                "original_symbol": original_symbol,
+                "akshare_symbol": "",
+                "status": "already_exists",
+                "rows": 0,
+                "error_type": "",
+                "error_message": "pre_request_existing_partition_skip",
+                "output_path": str(existing_data_path),
+                "metadata_path": str(existing_meta_path),
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+            }, family, api_name)]
+        if has_data != has_meta:
+            finished_at = datetime.now(UTC)
+            missing = "metadata.json" if has_data else "data.parquet"
+            return [_attach_api_policy_metadata({
+                "dataset_name": "raw_source_api",
+                "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                "task_key_json": task_key_json,
+                "source_family": family,
+                "api_name": api_name,
+                "requested_api_name": api_name,
+                "actual_api_name": api_name,
+                "fallback_from": "",
+                "original_symbol": original_symbol,
+                "akshare_symbol": "",
+                "status": "failed",
+                "rows": 0,
+                "error_type": "partial_partition_state",
+                "error_message": f"partial raw partition state: missing {missing}; preserve existing files for manual inspection",
+                "output_path": str(existing_data_path) if has_data else "",
+                "metadata_path": str(existing_meta_path) if has_meta else "",
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+            }, family, api_name)]
     try:
         fn = adapters.get(api_name) or (getattr(ak_module, api_name) if ak_module is not None and hasattr(ak_module, api_name) else None)
         if fn is None and (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
@@ -2006,6 +2173,62 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = call_params
+            if not (family == "market_price" and api_name in {"stock_zh_a_daily", "stock_zh_a_hist"}):
+                partition = _build_raw_partition(family, api_name, params, filtered)
+                existing_dir = raw_partition_path(output_root, family, api_name, partition)
+                existing_data_path = existing_dir / "data.parquet"
+                existing_meta_path = existing_dir / "metadata.json"
+                has_data = existing_data_path.exists()
+                has_meta = existing_meta_path.exists()
+                if has_data and has_meta:
+                    finished_at = datetime.now(UTC)
+                    return [_attach_api_policy_metadata({
+                        "dataset_name": "raw_source_api",
+                        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                        "task_key_json": task_key_json,
+                        "source_family": family,
+                        "api_name": api_name,
+                        "requested_api_name": api_name,
+                        "actual_api_name": api_name,
+                        "fallback_from": "",
+                        "original_symbol": original_symbol,
+                        "akshare_symbol": akshare_symbol,
+                        "status": "already_exists",
+                        "rows": 0,
+                        "error_type": "",
+                        "error_message": "pre_request_existing_partition_skip",
+                        "output_path": str(existing_data_path),
+                        "metadata_path": str(existing_meta_path),
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+                    }, family, api_name)]
+                if has_data != has_meta:
+                    finished_at = datetime.now(UTC)
+                    missing = "metadata.json" if has_data else "data.parquet"
+                    return [_attach_api_policy_metadata({
+                        "dataset_name": "raw_source_api",
+                        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+                        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+                        "task_key_json": task_key_json,
+                        "source_family": family,
+                        "api_name": api_name,
+                        "requested_api_name": api_name,
+                        "actual_api_name": api_name,
+                        "fallback_from": "",
+                        "original_symbol": original_symbol,
+                        "akshare_symbol": akshare_symbol,
+                        "status": "failed",
+                        "rows": 0,
+                        "error_type": "partial_partition_state",
+                        "error_message": f"partial raw partition state: missing {missing}; preserve existing files for manual inspection",
+                        "output_path": str(existing_data_path) if has_data else "",
+                        "metadata_path": str(existing_meta_path) if has_meta else "",
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+                    }, family, api_name)]
             if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
                 jgdy_request_get = adapters.get("__stock_jgdy_detail_em_request_get__") or adapters.get("stock_jgdy_detail_em_request_get")
                 jgdy_config = adapters.get("__stock_jgdy_detail_em_config__") or {}
@@ -2287,6 +2510,12 @@ def _build_progress_payload(
     task_status_counts: Counter[str],
     selected_apis: list[str],
     event: str,
+    current_batch_id: int | None = None,
+    current_batch_scope: str = "",
+    completed_batches: int = 0,
+    total_batches: int = 0,
+    current_batch_task_count: int = 0,
+    current_batch_completed_tasks: int = 0,
 ) -> dict[str, Any]:
     """Build the canonical progress payload printed and persisted by preheat."""
     now = time.time()
@@ -2314,6 +2543,12 @@ def _build_progress_payload(
         "pending_adapter_tasks": int(task_status_counts.get("pending_adapter", 0)),
         "throughput_tasks_per_min": round(throughput, 3),
         "selected_apis": selected_apis,
+        "current_batch_id": current_batch_id,
+        "current_batch_scope": current_batch_scope,
+        "completed_batches": int(completed_batches),
+        "total_batches": int(total_batches),
+        "current_batch_task_count": int(current_batch_task_count),
+        "current_batch_completed_tasks": int(current_batch_completed_tasks),
     }
     if eta_sec is not None:
         payload["eta_sec"] = round(eta_sec, 3)
@@ -2339,6 +2574,12 @@ def _format_progress_line(payload: dict[str, Any]) -> str:
         "pending_adapter_tasks",
         "throughput_tasks_per_min",
         "eta_sec",
+        "current_batch_id",
+        "current_batch_scope",
+        "completed_batches",
+        "total_batches",
+        "current_batch_task_count",
+        "current_batch_completed_tasks",
     ]
     return "[heartbeat] " + " ".join(f"{field}={payload[field]}" for field in fields if field in payload)
 
@@ -2350,7 +2591,187 @@ def _write_progress_event(op_dir: Path, payload: dict[str, Any]) -> None:
         pf.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw") -> dict:
+HYBRID_BATCH_COLUMNS: tuple[str, ...] = (
+    "batch_id",
+    "batch_scope",
+    "symbol_start_index",
+    "symbol_end_index",
+    "symbol_count",
+    "task_count",
+    "status",
+    "started_at",
+    "finished_at",
+    "elapsed_sec",
+    "success_tasks",
+    "empty_tasks",
+    "failed_tasks",
+    "timeout_tasks",
+    "skipped_tasks",
+    "already_exists_tasks",
+)
+
+
+@dataclass(frozen=True)
+class HybridTaskBatch:
+    """Small execution batch for mixed raw-lake task plans."""
+
+    batch_id: int
+    batch_scope: str
+    symbol_start_index: int
+    symbol_end_index: int
+    symbol_count: int
+    tasks: tuple[tuple[str, str, dict[str, str]], ...]
+
+
+def _task_key_tuple(task: tuple[str, str, dict[str, str]]) -> tuple[str, str, str]:
+    family, api_name, params = task
+    return family, api_name, _canonical_json(params)
+
+
+def _task_has_stock_symbol(task: tuple[str, str, dict[str, str]], stock_symbol_order: dict[str, int]) -> bool:
+    symbol = str(task[2].get("symbol", "")).strip()
+    return bool(symbol) and symbol in stock_symbol_order
+
+
+def _build_hybrid_task_batches(
+    tasks: list[tuple[str, str, dict[str, str]]],
+    symbols: list[str],
+    symbol_batch_size: int,
+) -> list[HybridTaskBatch]:
+    """Split a complete mixed raw task plan into one non-symbol batch plus stock-symbol chunks."""
+    if symbol_batch_size <= 0:
+        return [HybridTaskBatch(0, "flat", -1, -1, 0, tuple(tasks))]
+
+    stock_symbol_order = {str(symbol): idx for idx, symbol in enumerate(symbols)}
+    non_symbol_tasks: list[tuple[str, str, dict[str, str]]] = []
+    symbol_tasks_by_symbol: dict[str, list[tuple[str, str, dict[str, str]]]] = {str(symbol): [] for symbol in symbols}
+    extra_symbol_tasks: list[tuple[str, str, dict[str, str]]] = []
+    for task in tasks:
+        symbol = str(task[2].get("symbol", "")).strip()
+        if symbol and symbol in stock_symbol_order:
+            symbol_tasks_by_symbol.setdefault(symbol, []).append(task)
+        elif symbol:
+            # Index/industry/concept/code scoped tasks also use a params["symbol"] key in this runner,
+            # but they are not stock-symbol fanout and must execute exactly once in batch 0.
+            extra_symbol_tasks.append(task)
+        else:
+            non_symbol_tasks.append(task)
+
+    batches: list[HybridTaskBatch] = [HybridTaskBatch(0, "non_symbol", -1, -1, 0, tuple(non_symbol_tasks + extra_symbol_tasks))]
+    batch_id = 1
+    for start in range(0, len(symbols), symbol_batch_size):
+        chunk_symbols = [str(symbol) for symbol in symbols[start : start + symbol_batch_size]]
+        chunk_tasks: list[tuple[str, str, dict[str, str]]] = []
+        for symbol in chunk_symbols:
+            chunk_tasks.extend(symbol_tasks_by_symbol.get(symbol, []))
+        if not chunk_tasks:
+            continue
+        batches.append(
+            HybridTaskBatch(
+                batch_id=batch_id,
+                batch_scope="symbol_chunk",
+                symbol_start_index=start,
+                symbol_end_index=start + len(chunk_symbols) - 1,
+                symbol_count=len(chunk_symbols),
+                tasks=tuple(chunk_tasks),
+            )
+        )
+        batch_id += 1
+    return batches
+
+
+def _batch_row(batch: HybridTaskBatch, status: str = "planned") -> dict[str, object]:
+    return {
+        "batch_id": batch.batch_id,
+        "batch_scope": batch.batch_scope,
+        "symbol_start_index": batch.symbol_start_index,
+        "symbol_end_index": batch.symbol_end_index,
+        "symbol_count": batch.symbol_count,
+        "task_count": len(batch.tasks),
+        "status": status,
+        "started_at": "",
+        "finished_at": "",
+        "elapsed_sec": 0.0,
+        "success_tasks": 0,
+        "empty_tasks": 0,
+        "failed_tasks": 0,
+        "timeout_tasks": 0,
+        "skipped_tasks": 0,
+        "already_exists_tasks": 0,
+    }
+
+
+def _atomic_write_csv(path: Path, rows: list[dict[str, object]], columns: tuple[str, ...]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    pd.DataFrame(rows, columns=list(columns)).to_csv(tmp, index=False, encoding="utf-8-sig")
+    tmp.replace(path)
+
+
+def _hybrid_plan_fingerprint(
+    *,
+    lane_name: str,
+    families: list[str],
+    selected_apis: list[str],
+    symbols: list[str],
+    trade_dates: list[str],
+    report_dates: list[str],
+    industry_names: list[str],
+    concept_names: list[str],
+    start_date: str,
+    end_date: str,
+    symbol_batch_size: int,
+) -> str:
+    payload = {
+        "lane_name": lane_name,
+        "families": list(families),
+        "selected_apis": list(selected_apis),
+        "symbols": list(symbols),
+        "trade_dates": list(trade_dates),
+        "report_dates": list(report_dates),
+        "industry_names": list(industry_names),
+        "concept_names": list(concept_names),
+        "start_date": start_date,
+        "end_date": end_date,
+        "symbol_batch_size": int(symbol_batch_size),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _load_completed_hybrid_batches(checkpoint_path: Path, fingerprint: str, resume: bool) -> set[int]:
+    if not resume or not checkpoint_path.exists():
+        return set()
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    found = str(checkpoint.get("plan_fingerprint", ""))
+    if found != fingerprint:
+        raise RuntimeError(
+            "hybrid batch checkpoint fingerprint mismatch; existing checkpoint belongs to a different acquisition plan"
+        )
+    return {int(row.get("batch_id")) for row in checkpoint.get("batches", []) if row.get("status") == "completed"}
+
+
+def _write_hybrid_checkpoint(checkpoint_path: Path, fingerprint: str, report_rows: list[dict[str, object]]) -> None:
+    completed = [row for row in report_rows if row.get("status") == "completed"]
+    _atomic_write_json(
+        checkpoint_path,
+        {
+            "plan_fingerprint": fingerprint,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "completed_batches": [int(row["batch_id"]) for row in completed],
+            "batches": report_rows,
+        },
+    )
+
+
+def _batch_status_counts(batch_rows: list[dict[str, object]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for task_rows in batch_rows:
+        counts[str(task_rows.get("status", ""))] += 1
+    return counts
+
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw", symbol_batch_size: int = 0, max_inflight_tasks: int | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -2387,10 +2808,17 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     task_events_path = op_dir / "task_events.jsonl"
     progress_events_path = op_dir / "progress_events.jsonl"
     live_progress_path = op_dir / "live_progress.json"
+    hybrid_plan_path = op_dir / "hybrid_batch_plan.csv"
+    hybrid_checkpoint_path = op_dir / "hybrid_batch_checkpoint.json"
+    hybrid_report_path = op_dir / "hybrid_batch_report.csv"
     if not resume:
-        for stale_path in (task_events_path, progress_events_path, live_progress_path):
+        for stale_path in (task_events_path, progress_events_path, live_progress_path, hybrid_plan_path, hybrid_checkpoint_path, hybrid_report_path):
             if stale_path.exists():
                 stale_path.unlink()
+    effective_max_workers = max(int(max_workers), 1)
+    effective_max_inflight_tasks = int(max_inflight_tasks) if max_inflight_tasks is not None else max(effective_max_workers * 2, effective_max_workers)
+    if effective_max_inflight_tasks < effective_max_workers:
+        raise ValueError("max_inflight_tasks must be >= max_workers")
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
     heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
@@ -2415,6 +2843,42 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     continue
                 tasks.append((family, api_name, params))
 
+    task_order_by_key = {_task_key_tuple(task): order for order, task in enumerate(tasks)}
+    task_order_by_task_key_json = {_build_task_key(family, api_name, params): order for order, (family, api_name, params) in enumerate(tasks)}
+    batches = _build_hybrid_task_batches(tasks, symbols, int(symbol_batch_size))
+    plan_fingerprint = _hybrid_plan_fingerprint(
+        lane_name=lane_name,
+        families=families,
+        selected_apis=selected_api_list,
+        symbols=symbols,
+        trade_dates=trade_dates,
+        report_dates=report_dates,
+        industry_names=industry_names,
+        concept_names=concept_names,
+        start_date=start_date,
+        end_date=end_date,
+        symbol_batch_size=int(symbol_batch_size),
+    )
+    completed_batch_ids = _load_completed_hybrid_batches(hybrid_checkpoint_path, plan_fingerprint, resume)
+    plan_rows = [_batch_row(batch, "planned") for batch in batches]
+    report_by_batch: dict[int, dict[str, object]] = {batch.batch_id: _batch_row(batch, "planned") for batch in batches}
+    if completed_batch_ids:
+        for batch_id in completed_batch_ids:
+            if batch_id in report_by_batch:
+                report_by_batch[batch_id]["status"] = "completed"
+    _atomic_write_csv(hybrid_plan_path, plan_rows, HYBRID_BATCH_COLUMNS)
+    _atomic_write_csv(hybrid_report_path, list(report_by_batch.values()), HYBRID_BATCH_COLUMNS)
+    _write_hybrid_checkpoint(hybrid_checkpoint_path, plan_fingerprint, list(report_by_batch.values()))
+
+    batch_progress: dict[str, object] = {
+        "current_batch_id": None,
+        "current_batch_scope": "",
+        "completed_batches": len(completed_batch_ids & {batch.batch_id for batch in batches}),
+        "total_batches": len(batches),
+        "current_batch_task_count": 0,
+        "current_batch_completed_tasks": 0,
+    }
+
     def _emit_progress(event: str) -> None:
         with progress_lock:
             payload = _build_progress_payload(
@@ -2425,6 +2889,12 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 task_status_counts=task_status_counts,
                 selected_apis=selected_api_list,
                 event=event,
+                current_batch_id=batch_progress["current_batch_id"],
+                current_batch_scope=str(batch_progress["current_batch_scope"]),
+                completed_batches=int(batch_progress["completed_batches"]),
+                total_batches=int(batch_progress["total_batches"]),
+                current_batch_task_count=int(batch_progress["current_batch_task_count"]),
+                current_batch_completed_tasks=int(batch_progress["current_batch_completed_tasks"]),
             )
             _write_progress_event(op_dir, payload)
             print(_format_progress_line(payload), flush=True)
@@ -2464,6 +2934,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         nonlocal completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
+            row["_task_order"] = task_order_by_task_key_json.get(str(row.get("task_key_json", "")), len(task_order_by_key))
             rows.append(row)
         event = _summarize_task(task_rows)
         with open(task_events_path, "a", encoding="utf-8") as ef:
@@ -2532,36 +3003,110 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1:
-        for family, api_name, params in tasks:
-            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-            task_rows = _execute_task(family, api_name, params)
+    def _record_batch_completion(batch: HybridTaskBatch, started_at: datetime, batch_task_rows: list[dict[str, object]]) -> None:
+        finished_at = datetime.now(UTC)
+        counts = _batch_status_counts(batch_task_rows)
+        status = "failed" if counts.get("failed", 0) or counts.get("timeout", 0) else "completed"
+        report_by_batch[batch.batch_id] = {
+            "batch_id": batch.batch_id,
+            "batch_scope": batch.batch_scope,
+            "symbol_start_index": batch.symbol_start_index,
+            "symbol_end_index": batch.symbol_end_index,
+            "symbol_count": batch.symbol_count,
+            "task_count": len(batch.tasks),
+            "status": status,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+            "success_tasks": int(counts.get("success", 0)),
+            "empty_tasks": int(counts.get("empty", 0)),
+            "failed_tasks": int(counts.get("failed", 0)),
+            "timeout_tasks": int(counts.get("timeout", 0)),
+            "skipped_tasks": int(counts.get("skipped", 0)),
+            "already_exists_tasks": int(counts.get("already_exists", 0)),
+        }
+        if status == "completed":
+            completed_batch_ids.add(batch.batch_id)
+        with progress_lock:
+            batch_progress["completed_batches"] = len(completed_batch_ids & {item.batch_id for item in batches})
+            batch_progress["current_batch_completed_tasks"] = len(batch.tasks)
+        _atomic_write_csv(hybrid_report_path, list(report_by_batch.values()), HYBRID_BATCH_COLUMNS)
+        _write_hybrid_checkpoint(hybrid_checkpoint_path, plan_fingerprint, list(report_by_batch.values()))
+
+    def _run_batch(batch: HybridTaskBatch) -> bool:
+        if batch.batch_id in completed_batch_ids:
+            return True
+        with progress_lock:
+            batch_progress["current_batch_id"] = batch.batch_id
+            batch_progress["current_batch_scope"] = batch.batch_scope
+            batch_progress["current_batch_task_count"] = len(batch.tasks)
+            batch_progress["current_batch_completed_tasks"] = 0
+        started_at = datetime.now(UTC)
+        report_by_batch[batch.batch_id] = {**report_by_batch[batch.batch_id], "status": "running", "started_at": started_at.isoformat()}
+        _atomic_write_csv(hybrid_report_path, list(report_by_batch.values()), HYBRID_BATCH_COLUMNS)
+        batch_task_summaries: list[dict[str, object]] = []
+        should_continue = True
+
+        def _record_for_batch(task_rows: list[dict[str, object]]) -> None:
+            nonlocal should_continue
             _record_task_rows(task_rows)
+            batch_task_summaries.append(_summarize_task(task_rows))
+            with progress_lock:
+                batch_progress["current_batch_completed_tasks"] = int(batch_progress["current_batch_completed_tasks"]) + 1
             if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
-                break
+                should_continue = False
             if request_sleep > 0:
                 time.sleep(request_sleep)
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = []
-            for family, api_name, params in tasks:
+
+        if effective_max_workers <= 1:
+            for family, api_name, params in batch.tasks:
                 print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-                futures.append(ex.submit(_execute_task, family, api_name, params))
-            if not heartbeat_enabled:
-                for fut in futures:
-                    task_rows = fut.result()
-                    _record_task_rows(task_rows)
-                    if request_sleep > 0:
-                        time.sleep(request_sleep)
-            else:
-                pending = set(futures)
+                _record_for_batch(_execute_task(family, api_name, params))
+                if not should_continue:
+                    break
+        else:
+            task_iter = iter(batch.tasks)
+            pending: set[object] = set()
+            with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
+                def _submit_next() -> bool:
+                    try:
+                        family, api_name, params = next(task_iter)
+                    except StopIteration:
+                        return False
+                    print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
+                    pending.add(ex.submit(_execute_task, family, api_name, params))
+                    return True
+
+                while len(pending) < effective_max_inflight_tasks and _submit_next():
+                    pass
                 while pending:
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
                     for fut in done:
-                        task_rows = fut.result()
-                        _record_task_rows(task_rows)
-                        if request_sleep > 0:
-                            time.sleep(request_sleep)
+                        _record_for_batch(fut.result())
+                        if should_continue:
+                            while len(pending) < effective_max_inflight_tasks and _submit_next():
+                                pass
+                    if not should_continue:
+                        for fut in pending:
+                            fut.cancel()
+                        for fut in pending:
+                            if fut.cancelled():
+                                continue
+                            _record_for_batch(fut.result())
+                        pending = set()
+                        break
+        _record_batch_completion(batch, started_at, batch_task_summaries)
+        return should_continue
+
+    for batch in batches:
+        if not _run_batch(batch):
+            break
+
+    with progress_lock:
+        batch_progress["current_batch_id"] = None
+        batch_progress["current_batch_scope"] = ""
+        batch_progress["current_batch_task_count"] = 0
+        batch_progress["current_batch_completed_tasks"] = 0
 
     heartbeat_stop.set()
     if heartbeat_thread is not None:
@@ -2572,7 +3117,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     out.mkdir(parents=True, exist_ok=True)
     catalog_path = out / "raw_ingest_catalog.csv"
     summary_path = out / "raw_ingest_summary.csv"
-    df = _merge_catalog_rows(existing_catalog, rows, resume)
+    ordered_rows = sorted(rows, key=lambda row: int(row.get("_task_order", len(task_order_by_key))))
+    for row in ordered_rows:
+        row.pop("_task_order", None)
+    df = _merge_catalog_rows(existing_catalog, ordered_rows, resume)
     df.to_csv(catalog_path, index=False, encoding="utf-8-sig")
     timeout_df = df[df["status"] == "timeout"].copy() if not df.empty and "status" in df.columns else pd.DataFrame()
     timeout_df.to_csv(op_dir / "timeout_tasks.csv", index=False, encoding="utf-8-sig")
