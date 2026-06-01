@@ -57,6 +57,8 @@ def _args(tmp_path: Path, **overrides):
         long_run_max_workers=1,
         deferred_max_workers=4,
         heartbeat_sec=30,
+        symbol_batch_size=180,
+        max_inflight_tasks=128,
         task_timeout_sec=120,
         manual_selected_task_timeout_sec=180,
         heavy_task_timeout_sec=300,
@@ -242,6 +244,30 @@ def test_resume_is_forwarded_to_official_raw_ingest_runner(tmp_path):
 
     preheat.run_lanes(args, universe, plan, runner=runner)
     assert calls[0]["resume"] is True
+
+
+def test_hybrid_batch_cli_defaults_and_forwarding(tmp_path):
+    parser = preheat.build_parser()
+    parsed = parser.parse_args([
+        "--output-root", str(tmp_path / "out"),
+        "--start-date", "20260518",
+        "--end-date", "20260529",
+    ])
+    assert parsed.symbol_batch_size == 180
+    assert parsed.max_inflight_tasks == 128
+
+    args = _args(tmp_path, only_apis="stock_zcfz_em")
+    universe = _universe(tmp_path)
+    plan = [{"source_family": "financial_fundamental", "api_name": "stock_zcfz_em", "lane": "main", "enabled": True, "selected": True}]
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": []}
+
+    preheat.run_lanes(args, universe, plan, runner=runner)
+    assert calls[0]["symbol_batch_size"] == 180
+    assert calls[0]["max_inflight_tasks"] == 128
 
 
 def test_checklist_artifact_created_from_synthetic_lane_outputs(tmp_path):

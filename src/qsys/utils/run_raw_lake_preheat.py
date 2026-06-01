@@ -501,6 +501,8 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
             task_retry_jitter_sec=args.task_retry_jitter_sec,
             heartbeat_sec=args.heartbeat_sec,
             lane_name=lane,
+            symbol_batch_size=args.symbol_batch_size,
+            max_inflight_tasks=args.max_inflight_tasks,
             ak_module=ak,
         )
         rows = result.get("rows", [])
@@ -634,6 +636,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--long-run-max-workers", type=int, default=1)
     parser.add_argument("--deferred-max-workers", type=int, default=4)
     parser.add_argument("--heartbeat-sec", type=float, default=30)
+    parser.add_argument("--symbol-batch-size", type=int, default=180)
+    parser.add_argument("--max-inflight-tasks", type=int, default=128)
     parser.add_argument("--task-timeout-sec", type=float, default=120)
     parser.add_argument("--manual-selected-task-timeout-sec", type=float, default=180)
     parser.add_argument("--heavy-task-timeout-sec", type=float, default=300)
