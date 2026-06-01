@@ -499,6 +499,7 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
             task_retry_backoff=args.task_retry_backoff,
             task_retry_jitter_sec=args.task_retry_jitter_sec,
             heartbeat_sec=args.heartbeat_sec,
+            lane_name=lane,
         )
         finished = datetime.now(UTC)
         manifests.append(
@@ -534,20 +535,37 @@ def write_runtime_artifacts(output_root: str | Path, plan_rows: list[dict[str, A
             item["lane"] = manifest["lane"]
             result_rows.append(item)
     result_df = pd.DataFrame(result_rows)
+    if not result_df.empty:
+        dedupe_cols = [c for c in ["task_key_json", "partition_json", "status"] if c in result_df.columns]
+        if dedupe_cols:
+            result_df = result_df.drop_duplicates(subset=dedupe_cols, keep="last")
     checklist_rows: list[dict[str, Any]] = []
     for plan in plan_rows:
         subset = result_df[(result_df.get("source_family", pd.Series(dtype=str)) == plan["source_family"]) & (result_df.get("api_name", pd.Series(dtype=str)) == plan["api_name"])] if not result_df.empty else pd.DataFrame()
         status_counts = subset["status"].value_counts().to_dict() if not subset.empty and "status" in subset.columns else {}
         failed = int(status_counts.get("failed", 0))
         timeout = int(status_counts.get("timeout", 0))
+        skipped = int(status_counts.get("skipped", 0))
+        already_exists = int(status_counts.get("already_exists", 0))
+        pending_adapter = int(status_counts.get("pending_adapter", 0))
         plan_selected = bool(plan.get("selected", plan.get("enabled", False)))
         if dry_run and plan_selected:
             recovery_required = False
             recommended_action = "ready_for_execution"
             execution_status = "dry_run_not_executed"
         else:
-            recovery_required = failed > 0 or timeout > 0 or (plan_selected and subset.empty and plan.get("planned_tasks", 0) > 0)
-            recommended_action = "not_selected" if not plan_selected else ("review_recovery_tasks" if recovery_required else "ok")
+            missing_selected = plan_selected and subset.empty and plan.get("planned_tasks", 0) > 0
+            recovery_required = failed > 0 or timeout > 0 or pending_adapter > 0 or skipped > 0 or missing_selected
+            if not plan_selected:
+                recommended_action = "not_selected"
+            elif failed > 0 or timeout > 0 or missing_selected:
+                recommended_action = "review_recovery_tasks"
+            elif pending_adapter > 0:
+                recommended_action = "review_pending_adapter"
+            elif skipped > 0:
+                recommended_action = "review_skipped_tasks"
+            else:
+                recommended_action = "ok"
             execution_status = plan.get("execution_status", "not_selected") if subset.empty else "executed"
         checklist_rows.append(
             {
@@ -563,6 +581,9 @@ def write_runtime_artifacts(output_root: str | Path, plan_rows: list[dict[str, A
                 "empty_tasks": int(status_counts.get("empty", 0)),
                 "failed_tasks": failed,
                 "timeout_tasks": timeout,
+                "skipped_tasks": skipped,
+                "already_exists_tasks": already_exists,
+                "pending_adapter_tasks": pending_adapter,
                 "rows": int(pd.to_numeric(subset.get("rows", pd.Series(dtype=int)), errors="coerce").fillna(0).sum()) if not subset.empty else 0,
                 "elapsed_sec": float(pd.to_numeric(subset.get("elapsed_sec", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not subset.empty else 0.0,
                 "recovery_required": recovery_required,

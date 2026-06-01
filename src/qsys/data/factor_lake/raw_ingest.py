@@ -12,7 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -89,7 +89,7 @@ COVERAGE_API_SPECS: dict[str, list[dict[str, str]]] = {
     "corporate_action": [
         {"api_name": "stock_fhps_em", "param_mode": "none"},
         {"api_name": "stock_history_dividend", "param_mode": "symbol_only"},
-        {"api_name": "stock_history_dividend_detail", "param_mode": "symbol_report_date"},
+        {"api_name": "stock_history_dividend_detail", "param_mode": "symbol_only"},
         {"api_name": "stock_restricted_release_detail_em", "param_mode": "report_date"},
         {"api_name": "stock_restricted_release_queue_em", "param_mode": "none"},
         {"api_name": "stock_restricted_release_summary_em", "param_mode": "none"},
@@ -2191,7 +2191,86 @@ def _run_task_in_subprocess_with_timeout(
         return [_failed_row("SubprocessTaskError", str(payload))]
     return [_failed_row("NoResult", "subprocess exited without queue payload")]
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None) -> dict:
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Atomically write a JSON document for local run-progress review."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _build_progress_payload(
+    *,
+    lane: str,
+    started_at: float,
+    total_tasks: int,
+    completed_tasks: int,
+    task_status_counts: Counter[str],
+    selected_apis: list[str],
+    event: str,
+) -> dict[str, Any]:
+    """Build the canonical progress payload printed and persisted by preheat."""
+    now = time.time()
+    elapsed_sec = max(now - started_at, 0.0)
+    pending_or_running_tasks = max(total_tasks - completed_tasks, 0)
+    throughput = (completed_tasks / elapsed_sec * 60.0) if elapsed_sec > 0 and completed_tasks > 0 else 0.0
+    eta_sec = (pending_or_running_tasks / (completed_tasks / elapsed_sec)) if elapsed_sec > 0 and completed_tasks > 0 and pending_or_running_tasks > 0 else None
+    payload: dict[str, Any] = {
+        "event": event,
+        "lane": lane,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "started_at": datetime.fromtimestamp(started_at, UTC).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
+        "elapsed_sec": round(elapsed_sec, 3),
+        "total_tasks": int(total_tasks),
+        "completed_tasks": int(completed_tasks),
+        "pending_or_running_tasks": int(pending_or_running_tasks),
+        "completion_pct": round((completed_tasks / total_tasks * 100.0) if total_tasks else 100.0, 3),
+        "success_tasks": int(task_status_counts.get("success", 0)),
+        "empty_tasks": int(task_status_counts.get("empty", 0)),
+        "failed_tasks": int(task_status_counts.get("failed", 0)),
+        "timeout_tasks": int(task_status_counts.get("timeout", 0)),
+        "skipped_tasks": int(task_status_counts.get("skipped", 0)),
+        "already_exists_tasks": int(task_status_counts.get("already_exists", 0)),
+        "pending_adapter_tasks": int(task_status_counts.get("pending_adapter", 0)),
+        "throughput_tasks_per_min": round(throughput, 3),
+        "selected_apis": selected_apis,
+    }
+    if eta_sec is not None:
+        payload["eta_sec"] = round(eta_sec, 3)
+    return payload
+
+
+def _format_progress_line(payload: dict[str, Any]) -> str:
+    """Format progress fields as a grep-friendly single log line."""
+    fields = [
+        "lane",
+        "elapsed_sec",
+        "total_tasks",
+        "completed_tasks",
+        "pending_or_running_tasks",
+        "completion_pct",
+        "success_tasks",
+        "empty_tasks",
+        "failed_tasks",
+        "timeout_tasks",
+        "skipped_tasks",
+        "already_exists_tasks",
+        "pending_adapter_tasks",
+        "throughput_tasks_per_min",
+        "eta_sec",
+    ]
+    return "[heartbeat] " + " ".join(f"{field}={payload[field]}" for field in fields if field in payload)
+
+
+def _write_progress_event(op_dir: Path, payload: dict[str, Any]) -> None:
+    """Persist the current live progress snapshot and append its event stream."""
+    _atomic_write_json(op_dir / "live_progress.json", payload)
+    with open(op_dir / "progress_events.jsonl", "a", encoding="utf-8") as pf:
+        pf.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw") -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -2233,7 +2312,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
     heartbeat_enabled = heartbeat_every_sec > 0
     heartbeat_start = time.time()
+    next_heartbeat_at = heartbeat_start + heartbeat_every_sec if heartbeat_enabled else float("inf")
     completed_tasks = 0
+    task_status_counts: Counter[str] = Counter()
+    selected_api_list = sorted(selected) if selected else list(dict.fromkeys(spec["api_name"] for spec in selected_specs))
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
             api_name = spec["api_name"]
@@ -2246,6 +2328,21 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 if resume and task_key_json in completed_task_keys:
                     continue
                 tasks.append((family, api_name, params))
+
+    def _emit_progress(event: str) -> None:
+        payload = _build_progress_payload(
+            lane=lane_name,
+            started_at=heartbeat_start,
+            total_tasks=len(tasks),
+            completed_tasks=completed_tasks,
+            task_status_counts=task_status_counts,
+            selected_apis=selected_api_list,
+            event=event,
+        )
+        _write_progress_event(op_dir, payload)
+        print(_format_progress_line(payload), flush=True)
+
+    _emit_progress("lane_start")
 
     def _summarize_task(task_rows: list[dict[str, object]]) -> dict[str, object]:
         if not task_rows:
@@ -2277,7 +2374,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         event = _summarize_task(task_rows)
         with open(task_events_path, "a", encoding="utf-8") as ef:
             ef.write(json.dumps(event, ensure_ascii=False) + "\n")
-        print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}")
+        task_status_counts[str(event.get("status", ""))] += 1
+        print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}", flush=True)
         completed_tasks += 1
 
     task_attempt_records: list[dict[str, object]] = []
@@ -2341,9 +2439,14 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
     if max_workers <= 1:
         for family, api_name, params in tasks:
-            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
             task_rows = _execute_task(family, api_name, params)
             _record_task_rows(task_rows)
+            now = time.time()
+            if heartbeat_enabled and now >= next_heartbeat_at:
+                _emit_progress("heartbeat")
+                while next_heartbeat_at <= now:
+                    next_heartbeat_at += heartbeat_every_sec
             if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
                 break
             if request_sleep > 0:
@@ -2352,7 +2455,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = []
             for family, api_name, params in tasks:
-                print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}")
+                print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
                 futures.append(ex.submit(_execute_task, family, api_name, params))
             if not heartbeat_enabled:
                 for fut in futures:
@@ -2363,26 +2466,20 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             else:
                 pending = set(futures)
                 while pending:
-                    done, pending = wait(pending, timeout=heartbeat_every_sec, return_when=FIRST_COMPLETED)
-                    if not done:
-                        now = time.time()
-                        status_counts = Counter(str(r.get("status", "")) for r in rows)
-                        pending_or_running_tasks = max(len(tasks) - completed_tasks, 0)
-                        elapsed_sec = max(now - heartbeat_start, 0.0)
-                        print(
-                            "[heartbeat] "
-                            f"elapsed_sec={elapsed_sec:.1f} "
-                            f"total_tasks={len(tasks)} "
-                            f"completed_tasks={completed_tasks} "
-                            f"pending_or_running_tasks={pending_or_running_tasks} "
-                            f"status_counts={dict(status_counts)}"
-                        )
-                        continue
+                    timeout = max(next_heartbeat_at - time.time(), 0.0)
+                    done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
                     for fut in done:
                         task_rows = fut.result()
                         _record_task_rows(task_rows)
                         if request_sleep > 0:
                             time.sleep(request_sleep)
+                    now = time.time()
+                    if now >= next_heartbeat_at:
+                        _emit_progress("heartbeat")
+                        while next_heartbeat_at <= now:
+                            next_heartbeat_at += heartbeat_every_sec
+
+    _emit_progress("lane_completion")
 
     out = Path(output_root)
     out.mkdir(parents=True, exist_ok=True)
@@ -2433,7 +2530,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         "summary_path": str(summary_path),
         "checklist_path": str(checklist_path),
         "checklist_summary_path": str(checklist_summary_path),
-        "rows": df.to_dict("records"),
+        "rows": rows,
     }
 
 
