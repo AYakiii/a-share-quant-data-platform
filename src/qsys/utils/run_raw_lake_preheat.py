@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import akshare as ak
 import pandas as pd
 
 from qsys.data.factor_lake.raw_ingest import (
@@ -500,7 +501,17 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
             task_retry_jitter_sec=args.task_retry_jitter_sec,
             heartbeat_sec=args.heartbeat_sec,
             lane_name=lane,
+            ak_module=ak,
         )
+        rows = result.get("rows", [])
+        if rows and all(
+            str(row.get("status", "")) == "pending_adapter"
+            for row in rows
+        ):
+            raise RuntimeError(
+                "all selected tasks resolved to pending_adapter; "
+                "AkShare module wiring may be missing"
+            )
         finished = datetime.now(UTC)
         manifests.append(
             {
@@ -516,7 +527,7 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
                 "started_at": started.isoformat(),
                 "finished_at": finished.isoformat(),
                 "result_paths": {k: v for k, v in result.items() if k.endswith("_path")},
-                "rows": result.get("rows", []),
+                "rows": rows,
             }
         )
         executed_any = True

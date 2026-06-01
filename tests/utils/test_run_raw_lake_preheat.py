@@ -562,3 +562,72 @@ def test_checklist_exposes_pending_adapter_skipped_and_already_exists_actions(tm
     assert by_api["api_exists"]["recommended_action"] == "ok"
     recovery = pd.read_csv(output_root / "_operation_review" / "recovery_tasks.csv")
     assert {"api_failed", "api_pending", "api_skipped"} <= set(recovery["api_name"])
+
+
+def test_run_lanes_passes_ak_module_to_runner(tmp_path):
+    args = _args(tmp_path, heartbeat_sec=0, max_workers=1)
+    universe = preheat.PreheatUniverse(report_dates=["20240331"])
+    plan = [
+        {
+            "source_family": "financial_fundamental",
+            "api_name": "stock_yjyg_em",
+            "lane": "main",
+            "enabled": True,
+            "selected": True,
+        }
+    ]
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": [{"source_family": "financial_fundamental", "api_name": "stock_yjyg_em", "status": "success"}]}
+
+    preheat.run_lanes(args, universe, plan, runner=runner)
+    assert calls[0]["ak_module"] is preheat.ak
+
+
+def test_run_lanes_executes_synthetic_direct_akshare_api(monkeypatch, tmp_path):
+    class SyntheticAk:
+        def stock_yjyg_em(self, date: str):
+            return pd.DataFrame({"date": [date], "value": [1]})
+
+    monkeypatch.setattr(preheat, "ak", SyntheticAk())
+    args = _args(tmp_path, output_root=str(tmp_path / "out"), heartbeat_sec=0, max_workers=1, task_timeout_sec=0)
+    universe = preheat.PreheatUniverse(report_dates=["20240331"])
+    plan = [
+        {
+            "source_family": "financial_fundamental",
+            "api_name": "stock_yjyg_em",
+            "lane": "main",
+            "enabled": True,
+            "selected": True,
+        }
+    ]
+
+    manifests = preheat.run_lanes(args, universe, plan, runner=run_raw_coverage_ingest)
+
+    [row] = manifests[0]["rows"]
+    assert row["status"] == "success"
+    assert row["status"] != "pending_adapter"
+    assert int(row["rows"]) == 1
+    assert Path(row["output_path"]).exists()
+
+
+def test_run_lanes_raises_when_all_selected_tasks_are_pending_adapter(tmp_path):
+    args = _args(tmp_path, heartbeat_sec=0, max_workers=1)
+    universe = preheat.PreheatUniverse(report_dates=["20240331"])
+    plan = [
+        {
+            "source_family": "financial_fundamental",
+            "api_name": "stock_yjyg_em",
+            "lane": "main",
+            "enabled": True,
+            "selected": True,
+        }
+    ]
+
+    def runner(**kwargs):  # noqa: ARG001
+        return {"rows": [{"source_family": "financial_fundamental", "api_name": "stock_yjyg_em", "status": "pending_adapter"}]}
+
+    with pytest.raises(RuntimeError, match="all selected tasks resolved to pending_adapter; AkShare module wiring may be missing"):
+        preheat.run_lanes(args, universe, plan, runner=runner)
