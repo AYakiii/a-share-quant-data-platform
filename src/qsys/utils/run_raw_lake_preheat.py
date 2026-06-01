@@ -504,8 +504,14 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
             ak_module=ak,
         )
         rows = result.get("rows", [])
-        if rows and all(str(row.get("status", "")) == "pending_adapter" for row in rows):
-            raise RuntimeError("all selected tasks resolved to pending_adapter; AkShare module wiring may be missing")
+        if rows and all(
+            str(row.get("status", "")) == "pending_adapter"
+            for row in rows
+        ):
+            raise RuntimeError(
+                "all selected tasks resolved to pending_adapter; "
+                "AkShare module wiring may be missing"
+            )
         finished = datetime.now(UTC)
         manifests.append(
             {
