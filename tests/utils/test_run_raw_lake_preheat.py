@@ -631,4 +631,3 @@ def test_run_lanes_raises_when_all_selected_tasks_are_pending_adapter(tmp_path):
 
     with pytest.raises(RuntimeError, match="all selected tasks resolved to pending_adapter; AkShare module wiring may be missing"):
         preheat.run_lanes(args, universe, plan, runner=runner)
-
