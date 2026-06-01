@@ -145,8 +145,8 @@ P15P2_WAVE1_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
         "priority_tier": "P1.5",
         "data_theme": "concept_fund_flow",
         "acquisition_mode": "manual_selected_only",
-        "disabled_category": "p15p2_wave1_recovered_source",
-        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+        "disabled_category": "unstable_page_parse",
+        "disabled_reason": "failed benchmark/probe with unstable page/table parse; disabled by default pending manual diagnostics",
     },
     ("market_sentiment", "stock_fund_flow_industry"): {
         "enabled": False,
@@ -207,8 +207,8 @@ P15P2_WAVE1_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
         "data_theme": "commodity_warehouse_receipt",
         "exchange": "SHFE",
         "acquisition_mode": "manual_selected_only",
-        "disabled_category": "p15p2_wave1_recovered_source",
-        "disabled_reason": "P1.5/P2 recovered candidate; disabled by default pending manual schema review",
+        "disabled_category": "date_compatibility_investigation",
+        "disabled_reason": "current-date response can return non-JSON or empty page (JSONDecodeError); requires date compatibility investigation",
     },
     ("commodity_inventory", "futures_warehouse_receipt_czce"): {
         "enabled": False,
@@ -224,8 +224,53 @@ P15P2_WAVE1_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
 }
 
 P15P2_WAVE1_APIS: set[tuple[str, str]] = set(P15P2_WAVE1_SOURCE_METADATA)
+STRUCTURAL_MANUAL_REVIEW_SOURCE_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
+    ("industry_concept", "stock_board_concept_info_ths"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "ths_unstable_html_parse",
+        "disabled_reason": "THS page-structure drift / unstable HTML parsing observed at low concurrency (NoneType find_all/text and index errors)",
+    },
+    ("industry_concept", "stock_board_industry_info_ths"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "ths_unstable_html_parse",
+        "disabled_reason": "THS page-structure drift / unstable HTML parsing observed at low concurrency (NoneType find_all/text and index errors)",
+    },
+    ("industry_concept", "stock_board_concept_summary_ths"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "ths_unstable_html_parse",
+        "disabled_reason": "THS page-structure drift / unstable HTML parsing observed at low concurrency (NoneType find_all/text and index errors)",
+    },
+    ("industry_concept", "stock_board_industry_summary_ths"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "ths_unstable_html_parse",
+        "disabled_reason": "THS page-structure drift / unstable HTML parsing observed at low concurrency (NoneType find_all/text and index errors)",
+    },
+    ("industry_concept", "stock_industry_clf_hist_sw"): {
+        "enabled": False,
+        "default_enabled": False,
+        "manual_review_required": True,
+        "acquisition_mode": "manual_selected_only",
+        "disabled_category": "ssl_certificate_verification_failure",
+        "disabled_reason": "100% low-concurrency failure with SSLError CERTIFICATE_VERIFY_FAILED; do not bypass SSL verification permanently",
+    },
+}
+STRUCTURAL_MANUAL_REVIEW_APIS: set[tuple[str, str]] = set(STRUCTURAL_MANUAL_REVIEW_SOURCE_METADATA)
+
 MANUAL_SELECTED_ONLY_APIS: set[tuple[str, str]] = {
     *P15P2_WAVE1_APIS,
+    *STRUCTURAL_MANUAL_REVIEW_APIS,
     ("financial_fundamental", "stock_financial_analysis_indicator_em"),
     ("disclosure_ir", "stock_jgdy_detail_em"),
     ("event_ownership", "stock_gdfx_holding_analyse_em"),
@@ -238,6 +283,7 @@ WAREHOUSE_RECEIPT_EXCHANGES: dict[str, str] = {
 
 TEMP_DISABLED_APIS: set[tuple[str, str]] = {
     *P15P2_WAVE1_APIS,
+    *STRUCTURAL_MANUAL_REVIEW_APIS,
     ("market_price", "stock_zh_a_hist"),
     ("market_price", "stock_individual_info_em"),
     ("financial_fundamental", "stock_financial_analysis_indicator"),
@@ -257,6 +303,7 @@ DISABLED_API_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
     }
     for pair in TEMP_DISABLED_APIS
 }
+DISABLED_API_METADATA.update(STRUCTURAL_MANUAL_REVIEW_SOURCE_METADATA)
 DISABLED_API_METADATA[("event_ownership", "stock_gdfx_free_holding_analyse_em")] = {
     "enabled": False,
     "manual_review_required": True,
@@ -366,6 +413,7 @@ FINANCIAL_STATEMENT_POLICY_METADATA.update(
 API_POLICY_METADATA: dict[tuple[str, str], dict[str, str | bool]] = {
     **DISABLED_API_METADATA,
     **P15P2_WAVE1_SOURCE_METADATA,
+    **STRUCTURAL_MANUAL_REVIEW_SOURCE_METADATA,
     **FINANCIAL_STATEMENT_POLICY_METADATA,
     ("disclosure_ir", "stock_zh_a_disclosure_relation_cninfo"): {
         "enabled": True,
@@ -599,6 +647,29 @@ def _merge_catalog_rows(existing: pd.DataFrame, new_rows: list[dict[str, object]
         merged = merged.drop_duplicates(subset=["task_key_json", "partition_json", "status"], keep="last")
     return merged.reset_index(drop=True)
 
+
+def _stringify_mixed_object_columns_for_parquet(raw: pd.DataFrame) -> pd.DataFrame:
+    """String-normalize only mixed object columns that would confuse parquet writers."""
+    normalized = raw.copy()
+    for column in normalized.columns:
+        series = normalized[column]
+        if series.dtype != "object":
+            continue
+        non_null = series.dropna()
+        if non_null.empty:
+            continue
+        value_types = {type(value) for value in non_null}
+        has_textual_value = any(value_type in {str, bytes} for value_type in value_types)
+        if len(value_types) > 1 and has_textual_value:
+            normalized[column] = series.map(lambda value: pd.NA if pd.isna(value) else str(value)).astype("string")
+    return normalized
+
+
+def _normalize_czce_warehouse_receipt_for_parquet(raw: pd.DataFrame) -> pd.DataFrame:
+    """Make CZCE warehouse receipt mixed text columns parquet-safe without dropping columns."""
+    return _stringify_mixed_object_columns_for_parquet(raw)
+
+
 def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]) -> pd.DataFrame:
     """Normalize an AkShare raw result while preserving source columns.
 
@@ -625,10 +696,17 @@ def _normalize_raw_api_result(raw: object, api_name: str, params: dict[str, str]
             frames.append(frame)
         if not frames:
             return pd.DataFrame()
-        return pd.concat(frames, ignore_index=True, sort=False)
+        normalized = pd.concat(frames, ignore_index=True, sort=False)
+        if api_name == "futures_warehouse_receipt_czce":
+            normalized = _normalize_czce_warehouse_receipt_for_parquet(normalized)
+        return normalized
     if isinstance(raw, pd.DataFrame):
-        return raw
-    return pd.DataFrame(raw)
+        frame = raw
+    else:
+        frame = pd.DataFrame(raw)
+    if api_name == "futures_warehouse_receipt_czce":
+        frame = _normalize_czce_warehouse_receipt_for_parquet(frame)
+    return frame
 
 
 def _manual_selection_allows_disabled_source(family: str, api_name: str, manual_selected: bool) -> bool:
