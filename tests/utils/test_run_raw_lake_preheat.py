@@ -53,6 +53,8 @@ def _args(tmp_path: Path, **overrides):
         only_apis=None,
         exclude_apis=None,
         max_workers=64,
+        symbol_batch_size=180,
+        max_inflight_tasks=128,
         heavy_max_workers=16,
         long_run_max_workers=1,
         deferred_max_workers=4,
@@ -631,3 +633,27 @@ def test_run_lanes_raises_when_all_selected_tasks_are_pending_adapter(tmp_path):
 
     with pytest.raises(RuntimeError, match="all selected tasks resolved to pending_adapter; AkShare module wiring may be missing"):
         preheat.run_lanes(args, universe, plan, runner=runner)
+
+
+def test_hybrid_chunk_cli_defaults_and_forwarding(tmp_path):
+    parser = preheat.build_parser()
+    parsed = parser.parse_args([
+        "--output-root", str(tmp_path / "out"),
+        "--start-date", "20260518",
+        "--end-date", "20260529",
+    ])
+    assert parsed.symbol_batch_size == 180
+    assert parsed.max_inflight_tasks == 128
+
+    args = _args(tmp_path, symbol_batch_size=17, max_inflight_tasks=19, only_apis="stock_yjyg_em")
+    universe = _universe(tmp_path)
+    plan = preheat.build_preheat_plan(args, universe)
+    calls: list[dict[str, object]] = []
+
+    def fake_runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": [], "catalog_path": str(tmp_path / "catalog.csv"), "summary_path": str(tmp_path / "summary.csv")}
+
+    preheat.run_lanes(args, universe, plan, runner=fake_runner)
+    assert calls[0]["symbol_batch_size"] == 17
+    assert calls[0]["max_inflight_tasks"] == 19
