@@ -50,6 +50,7 @@ def test_heartbeat_prints_periodically_with_flush_and_persists_live_progress(mon
     assert len(heartbeat_calls) >= 3
     assert all(flush is True for _, flush in heartbeat_calls)
     required_fields = [
+        "event=lane_start",
         "lane=main",
         "elapsed_sec=",
         "total_tasks=2",
@@ -103,3 +104,81 @@ def test_stock_history_dividend_detail_stock_universe_v1_count_is_846() -> None:
     params = _params_for_mode(spec["param_mode"], symbols, [], ["20240331", "20240630"], [], [], [], "20240101", "20241231")
     assert len(symbols) == 846
     assert len(params) == 846
+
+
+def test_serial_lane_heartbeat_emits_before_slow_task_completion(monkeypatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    real_print = builtins.print
+
+    def spy_print(*args, **kwargs):  # noqa: ANN002, ANN003
+        text = " ".join(str(arg) for arg in args)
+        calls.append(text)
+        real_print(*args, **kwargs)
+
+    def slow_adapter(date: str) -> _Result:  # noqa: ARG001
+        time.sleep(0.12)
+        return _Result(pd.DataFrame({"date": [date], "value": [1]}))
+
+    monkeypatch.setattr(builtins, "print", spy_print)
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        report_dates=["20240331"],
+        selected_api_names=["stock_yjyg_em"],
+        adapter_map={"stock_yjyg_em": slow_adapter},
+        max_workers=1,
+        heartbeat_sec=0.03,
+        lane_name="main",
+    )
+
+    task_success_index = next(i for i, text in enumerate(calls) if text.startswith("[task] success"))
+    assert any(
+        text.startswith("[heartbeat] event=heartbeat") and "completed_tasks=0" in text
+        for text in calls[:task_success_index]
+    )
+
+
+def test_fresh_non_resume_clears_stale_progress_events(tmp_path: Path) -> None:
+    op_dir = tmp_path / "_operation_review"
+    op_dir.mkdir()
+    (op_dir / "progress_events.jsonl").write_text('{"event":"stale"}\n', encoding="utf-8")
+    (op_dir / "live_progress.json").write_text('{"event":"stale"}', encoding="utf-8")
+
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        report_dates=["20240331"],
+        selected_api_names=["stock_yjyg_em"],
+        adapter_map={"stock_yjyg_em": lambda date: _Result(pd.DataFrame({"date": [date]}))},
+        max_workers=1,
+        heartbeat_sec=0.01,
+        resume=False,
+        lane_name="main",
+    )
+
+    events = [json.loads(line) for line in (op_dir / "progress_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert events[0]["event"] == "lane_start"
+    assert all(event["event"] != "stale" for event in events)
+
+
+def test_resume_preserves_and_appends_progress_events(tmp_path: Path) -> None:
+    op_dir = tmp_path / "_operation_review"
+    op_dir.mkdir()
+    (op_dir / "progress_events.jsonl").write_text('{"event":"stale"}\n', encoding="utf-8")
+
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        report_dates=["20240331"],
+        selected_api_names=["stock_yjyg_em"],
+        adapter_map={"stock_yjyg_em": lambda date: _Result(pd.DataFrame({"date": [date]}))},
+        max_workers=1,
+        heartbeat_sec=0.01,
+        resume=True,
+        lane_name="main",
+    )
+
+    events = [json.loads(line) for line in (op_dir / "progress_events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert events[0]["event"] == "stale"
+    assert [event["event"] for event in events[1:]][0] == "lane_start"
+    assert events[-1]["event"] == "lane_completion"

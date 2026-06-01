@@ -8,6 +8,7 @@ import uuid
 from collections import Counter
 import multiprocessing as mp
 import signal
+import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -2244,6 +2245,7 @@ def _build_progress_payload(
 def _format_progress_line(payload: dict[str, Any]) -> str:
     """Format progress fields as a grep-friendly single log line."""
     fields = [
+        "event",
         "lane",
         "elapsed_sec",
         "total_tasks",
@@ -2305,16 +2307,22 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     op_dir = Path(output_root) / "_operation_review"
     op_dir.mkdir(parents=True, exist_ok=True)
     task_events_path = op_dir / "task_events.jsonl"
-    if task_events_path.exists() and not resume:
-        task_events_path.unlink()
+    progress_events_path = op_dir / "progress_events.jsonl"
+    live_progress_path = op_dir / "live_progress.json"
+    if not resume:
+        for stale_path in (task_events_path, progress_events_path, live_progress_path):
+            if stale_path.exists():
+                stale_path.unlink()
     rows: list[dict] = []
     tasks: list[tuple[str, str, dict[str, str]]] = []
     heartbeat_every_sec = float(heartbeat_sec) if heartbeat_sec is not None else 0.0
     heartbeat_enabled = heartbeat_every_sec > 0
     heartbeat_start = time.time()
-    next_heartbeat_at = heartbeat_start + heartbeat_every_sec if heartbeat_enabled else float("inf")
     completed_tasks = 0
     task_status_counts: Counter[str] = Counter()
+    progress_lock = threading.Lock()
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
     selected_api_list = sorted(selected) if selected else list(dict.fromkeys(spec["api_name"] for spec in selected_specs))
     for family in families:
         for spec in COVERAGE_API_SPECS.get(family, []):
@@ -2330,19 +2338,27 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 tasks.append((family, api_name, params))
 
     def _emit_progress(event: str) -> None:
-        payload = _build_progress_payload(
-            lane=lane_name,
-            started_at=heartbeat_start,
-            total_tasks=len(tasks),
-            completed_tasks=completed_tasks,
-            task_status_counts=task_status_counts,
-            selected_apis=selected_api_list,
-            event=event,
-        )
-        _write_progress_event(op_dir, payload)
-        print(_format_progress_line(payload), flush=True)
+        with progress_lock:
+            payload = _build_progress_payload(
+                lane=lane_name,
+                started_at=heartbeat_start,
+                total_tasks=len(tasks),
+                completed_tasks=completed_tasks,
+                task_status_counts=task_status_counts,
+                selected_apis=selected_api_list,
+                event=event,
+            )
+            _write_progress_event(op_dir, payload)
+            print(_format_progress_line(payload), flush=True)
+
+    def _heartbeat_ticker() -> None:
+        while not heartbeat_stop.wait(heartbeat_every_sec):
+            _emit_progress("heartbeat")
 
     _emit_progress("lane_start")
+    if heartbeat_enabled:
+        heartbeat_thread = threading.Thread(target=_heartbeat_ticker, name=f"raw-preheat-heartbeat-{lane_name}", daemon=True)
+        heartbeat_thread.start()
 
     def _summarize_task(task_rows: list[dict[str, object]]) -> dict[str, object]:
         if not task_rows:
@@ -2374,9 +2390,10 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         event = _summarize_task(task_rows)
         with open(task_events_path, "a", encoding="utf-8") as ef:
             ef.write(json.dumps(event, ensure_ascii=False) + "\n")
-        task_status_counts[str(event.get("status", ""))] += 1
+        with progress_lock:
+            task_status_counts[str(event.get("status", ""))] += 1
+            completed_tasks += 1
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}", flush=True)
-        completed_tasks += 1
 
     task_attempt_records: list[dict[str, object]] = []
 
@@ -2442,11 +2459,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
             task_rows = _execute_task(family, api_name, params)
             _record_task_rows(task_rows)
-            now = time.time()
-            if heartbeat_enabled and now >= next_heartbeat_at:
-                _emit_progress("heartbeat")
-                while next_heartbeat_at <= now:
-                    next_heartbeat_at += heartbeat_every_sec
             if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
                 break
             if request_sleep > 0:
@@ -2466,19 +2478,16 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             else:
                 pending = set(futures)
                 while pending:
-                    timeout = max(next_heartbeat_at - time.time(), 0.0)
-                    done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
                     for fut in done:
                         task_rows = fut.result()
                         _record_task_rows(task_rows)
                         if request_sleep > 0:
                             time.sleep(request_sleep)
-                    now = time.time()
-                    if now >= next_heartbeat_at:
-                        _emit_progress("heartbeat")
-                        while next_heartbeat_at <= now:
-                            next_heartbeat_at += heartbeat_every_sec
 
+    heartbeat_stop.set()
+    if heartbeat_thread is not None:
+        heartbeat_thread.join(timeout=max(heartbeat_every_sec, 1.0))
     _emit_progress("lane_completion")
 
     out = Path(output_root)
