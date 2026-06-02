@@ -420,7 +420,13 @@ def review_preheat_output(output_root: str | Path, *, lane_name: str = "main") -
     print("ROOT:", root)
     if not catalog_path.exists():
         raise FileNotFoundError(catalog_path)
-    catalog = pd.read_csv(catalog_path)
+    catalog = pd.read_csv(
+    catalog_path,
+    dtype={
+        "original_symbol": "string",
+        "akshare_symbol": "string",
+    },
+)
     print("\n=== CATALOG ===")
     print("rows:", len(catalog))
     duplicate_count = 0
