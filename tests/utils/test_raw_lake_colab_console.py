@@ -204,15 +204,37 @@ def test_non_zero_subprocess_result_prints_bounded_log_tail(tmp_path, capsys, mo
     assert "line 0" not in out
 
 
-def test_concise_review_reads_source_concurrency_observation(tmp_path, monkeypatch):
+def test_concise_review_reads_source_concurrency_observation(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(console, "display", lambda value: None)
     root = tmp_path / "out"
     op = root / "_operation_review"
     (op / "hybrid_batches" / "main").mkdir(parents=True)
-    pd.DataFrame({"task_key_json": ["a"], "partition_json": ["p"], "status": ["success"]}).to_csv(root / "raw_ingest_catalog.csv", index=False)
-    pd.DataFrame({"status": []}).to_csv(op / "recovery_tasks.csv", index=False)
-    pd.DataFrame({"status": ["completed"]}).to_csv(op / "hybrid_batches" / "main" / "hybrid_batch_report.csv", index=False)
-    (op / "hybrid_batches" / "main" / "hybrid_batch_checkpoint.json").write_text('{"fingerprint_payload":{"lane_name":"main"}}', encoding="utf-8")
+
+    pd.DataFrame(
+        {
+            "task_key_json": ["a"],
+            "partition_json": ["p"],
+            "status": ["success"],
+        }
+    ).to_csv(root / "raw_ingest_catalog.csv", index=False)
+
+    pd.DataFrame({"status": []}).to_csv(
+        op / "recovery_tasks.csv",
+        index=False,
+    )
+
+    pd.DataFrame({"status": ["completed"]}).to_csv(
+        op / "hybrid_batches" / "main" / "hybrid_batch_report.csv",
+        index=False,
+    )
+
+    (
+        op / "hybrid_batches" / "main" / "hybrid_batch_checkpoint.json"
+    ).write_text(
+        '{"fingerprint_payload":{"lane_name":"main"}}',
+        encoding="utf-8",
+    )
+
     pd.DataFrame(
         {
             "source_key": ["eastmoney"],
@@ -222,8 +244,16 @@ def test_concise_review_reads_source_concurrency_observation(tmp_path, monkeypat
             "median_task_elapsed_sec": [0.5],
             "p90_task_elapsed_sec": [0.9],
         }
-    ).to_csv(op / "source_concurrency_observation.csv", index=False)
+    ).to_csv(
+        op / "source_concurrency_observation.csv",
+        index=False,
+    )
+
     result = console.review_preheat_output(root, lane_name="main")
+    out = capsys.readouterr().out
+
+    assert "clean batches / total:" in out
+    assert "completed / total:" not in out
     assert result["catalog_rows"] == 1
     assert result["completed_batches"] == 1
     assert not result["source_concurrency_observation"].empty
@@ -241,9 +271,9 @@ def test_concise_review_rejects_duplicated_logical_partitions(tmp_path, monkeypa
 
 
 def test_failure_audit_writes_only_audit_csv_files(tmp_path, monkeypatch):
-    monkeypatch.setattr(console, "display", lambda value: None)
     root = tmp_path / "out"
     root.mkdir()
+
     pd.DataFrame(
         {
             "source_family": ["fam", "fam"],
@@ -252,25 +282,68 @@ def test_failure_audit_writes_only_audit_csv_files(tmp_path, monkeypatch):
             "rows": [0, 1],
             "error_type": ["ValueError", ""],
             "error_message": ["bad", ""],
-            "original_symbol": ["000001", "000002"],
-            "akshare_symbol": ["", ""],
+            "original_symbol": ["000046", "000002"],
+            "akshare_symbol": ["SZ000046", "SZ000002"],
             "params_json": ["{}", "{}"],
             "partition_json": ["{}", "{}"],
             "task_key_json": ["a", "b"],
             "elapsed_sec": [1.0, 2.0],
             "output_path": ["", "x"],
         }
-    ).to_csv(root / "raw_ingest_catalog.csv", index=False)
-    paths = console.audit_preheat_failures(root, display_limit=1)
+    ).to_csv(
+        root / "raw_ingest_catalog.csv",
+        index=False,
+    )
+
+    displayed = []
+    monkeypatch.setattr(
+        console,
+        "display",
+        lambda value: displayed.append(value),
+    )
+
+    paths = console.audit_preheat_failures(
+        root,
+        display_limit=1,
+    )
+
     audit_root = root / "_operation_review" / "failure_audit"
+
+    failure_detail = pd.read_csv(
+        audit_root / "failure_detail.csv",
+        dtype={
+            "original_symbol": str,
+            "akshare_symbol": str,
+        },
+    )
+
+    api_summary = pd.read_csv(
+        audit_root / "failure_summary_by_api.csv",
+    )
+
+    displayed_detail = next(
+        value
+        for value in displayed
+        if isinstance(value, pd.DataFrame)
+        and "original_symbol" in value.columns
+    )
+
+    assert displayed_detail.iloc[0]["original_symbol"] == "000046"
+    assert displayed_detail.iloc[0]["akshare_symbol"] == "SZ000046"
+
+    assert failure_detail.iloc[0]["original_symbol"] == "000046"
+    assert failure_detail.iloc[0]["akshare_symbol"] == "SZ000046"
+
+    assert float(api_summary.loc[0, "rows"]) == 1.0
+
     assert set(p.name for p in audit_root.iterdir()) == {
         "failure_summary_by_api.csv",
         "failure_detail.csv",
         "failure_summary_by_error_type.csv",
         "high_failure_api_shortlist.csv",
     }
-    assert all(path.parent == audit_root for path in paths.values())
 
+    assert all(path.parent == audit_root for path in paths.values())
 
 def test_clear_local_output_requires_confirm_and_rejects_drive_like_paths(tmp_path):
     with pytest.raises(ValueError, match="confirm=True"):
