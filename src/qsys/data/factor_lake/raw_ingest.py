@@ -460,218 +460,6 @@ def _effective_param_mode(family: str, api_name: str, param_mode: str) -> str:
     return param_mode
 
 
-
-
-def _source_key_for_api(api_name: str) -> str:
-    """Return conservative likely upstream source attribution for an AkShare API name."""
-    name = str(api_name).strip().lower()
-    if name.startswith("futures_gfex_"):
-        return "gfex"
-    if name.startswith("futures_shfe_"):
-        return "shfe"
-    if name.startswith("futures_") and "czce" in name:
-        return "czce"
-    if name.endswith("_sse"):
-        return "sse"
-    if name.endswith("_szse"):
-        return "szse"
-    if name.endswith("_em"):
-        return "eastmoney"
-    if name.endswith("_ths"):
-        return "ths"
-    if name.endswith("_cninfo"):
-        return "cninfo"
-    if name.endswith("_sw") or name.startswith("sw_"):
-        return "sw"
-    return "akshare_unknown"
-
-
-def _workload_class_for_api(api_name: str, family: str | None = None) -> str:
-    """Derive conservative task workload class from existing coverage API planning semantics."""
-    param_mode = ""
-    families = [family] if family else list(COVERAGE_API_SPECS)
-    for candidate_family in families:
-        if not candidate_family:
-            continue
-        for spec in COVERAGE_API_SPECS.get(candidate_family, []):
-            if spec.get("api_name") == api_name:
-                param_mode = _effective_param_mode(candidate_family, api_name, str(spec.get("param_mode", "")))
-                break
-        if param_mode:
-            break
-    if param_mode in {
-        "symbol_only",
-        "symbol_range",
-        "daily_symbol_range",
-        "daily_symbol_range_hist",
-        "symbol_report_date",
-        "financial_indicator_em",
-        "financial_statement_symbol",
-    }:
-        return "symbol_scoped"
-    if param_mode in {"report_date", "financial_statement_report_date"}:
-        return "report_date_scoped"
-    if param_mode == "trade_date":
-        return "trade_date_scoped"
-    if param_mode == "date_range":
-        return "date_range_scoped"
-    if param_mode in {"index_symbol", "index_symbol_range"}:
-        return "index_scoped"
-    if param_mode in {"industry_code", "industry_name", "industry_name_range", "concept_name", "concept_name_range"}:
-        return "taxonomy_scoped"
-    if param_mode in {"none", "manual_selected_snapshot"}:
-        return "snapshot"
-    return "other"
-
-
-SOURCE_CONCURRENCY_OBSERVATION_COLUMNS = [
-    "run_id",
-    "lane",
-    "source_key",
-    "workload_class",
-    "api_names",
-    "inflight_tasks_now",
-    "peak_inflight_tasks",
-    "completed_tasks",
-    "success_tasks",
-    "empty_tasks",
-    "failed_tasks",
-    "timeout_tasks",
-    "skipped_tasks",
-    "already_exists_tasks",
-    "pending_adapter_tasks",
-    "retry_count",
-    "latency_sample_count",
-    "median_task_elapsed_sec",
-    "p90_task_elapsed_sec",
-    "updated_at",
-]
-
-
-@dataclass
-class _SourceConcurrencyGroupState:
-    """Mutable source/workload observation counters for one run/lane group."""
-
-    api_names: set[str]
-    inflight_tasks_now: int = 0
-    peak_inflight_tasks: int = 0
-    completed_tasks: int = 0
-    status_counts: Counter[str] | None = None
-    retry_count: int = 0
-    elapsed_samples: list[float] | None = None
-    updated_at: str = ""
-
-
-class _SourceConcurrencyObserver:
-    """Thread-safe observation-only collector for source/workload task concurrency."""
-
-    _LATENCY_EXCLUDED_STATUSES = {"already_exists", "skipped", "pending_adapter"}
-
-    def __init__(self, path: Path, run_id: str, lane: str) -> None:
-        self.path = path
-        self.run_id = run_id
-        self.lane = lane
-        self._lock = threading.RLock()
-        self._groups: dict[tuple[str, str, str, str], _SourceConcurrencyGroupState] = {}
-
-    def _key(self, family: str, api_name: str) -> tuple[str, str, str, str]:
-        return (self.run_id, self.lane, _source_key_for_api(api_name), _workload_class_for_api(api_name, family))
-
-    def _state_for(self, family: str, api_name: str) -> _SourceConcurrencyGroupState:
-        key = self._key(family, api_name)
-        state = self._groups.get(key)
-        if state is None:
-            state = _SourceConcurrencyGroupState(api_names=set(), status_counts=Counter(), elapsed_samples=[])
-            self._groups[key] = state
-        state.api_names.add(api_name)
-        state.updated_at = datetime.now(UTC).isoformat()
-        return state
-
-    def on_submit(self, family: str, api_name: str) -> None:
-        with self._lock:
-            state = self._state_for(family, api_name)
-            state.inflight_tasks_now += 1
-            state.peak_inflight_tasks = max(state.peak_inflight_tasks, state.inflight_tasks_now)
-
-    def on_retry(self, family: str, api_name: str) -> None:
-        with self._lock:
-            state = self._state_for(family, api_name)
-            state.retry_count += 1
-
-    def on_complete(self, family: str, api_name: str, status: str, elapsed_sec: float) -> None:
-        with self._lock:
-            state = self._state_for(family, api_name)
-            state.inflight_tasks_now = max(state.inflight_tasks_now - 1, 0)
-            state.completed_tasks += 1
-            assert state.status_counts is not None
-            state.status_counts[str(status)] += 1
-            if str(status) not in self._LATENCY_EXCLUDED_STATUSES:
-                assert state.elapsed_samples is not None
-                state.elapsed_samples.append(max(float(elapsed_sec or 0.0), 0.0))
-
-    @staticmethod
-    def _percentile(samples: list[float], percentile: float) -> float:
-        if not samples:
-            return 0.0
-        ordered = sorted(samples)
-        if len(ordered) == 1:
-            return round(ordered[0], 6)
-        rank = (len(ordered) - 1) * percentile
-        low = int(rank)
-        high = min(low + 1, len(ordered) - 1)
-        weight = rank - low
-        return round(ordered[low] * (1.0 - weight) + ordered[high] * weight, 6)
-
-    def rows(self) -> list[dict[str, object]]:
-        with self._lock:
-            out: list[dict[str, object]] = []
-            for (run_id, lane, source_key, workload_class), state in sorted(self._groups.items()):
-                status_counts = state.status_counts or Counter()
-                samples = list(state.elapsed_samples or [])
-                out.append({
-                    "run_id": run_id,
-                    "lane": lane,
-                    "source_key": source_key,
-                    "workload_class": workload_class,
-                    "api_names": ",".join(sorted(state.api_names)),
-                    "inflight_tasks_now": int(state.inflight_tasks_now),
-                    "peak_inflight_tasks": int(state.peak_inflight_tasks),
-                    "completed_tasks": int(state.completed_tasks),
-                    "success_tasks": int(status_counts.get("success", 0)),
-                    "empty_tasks": int(status_counts.get("empty", 0)),
-                    "failed_tasks": int(status_counts.get("failed", 0)),
-                    "timeout_tasks": int(status_counts.get("timeout", 0)),
-                    "skipped_tasks": int(status_counts.get("skipped", 0)),
-                    "already_exists_tasks": int(status_counts.get("already_exists", 0)),
-                    "pending_adapter_tasks": int(status_counts.get("pending_adapter", 0)),
-                    "retry_count": int(state.retry_count),
-                    "latency_sample_count": len(samples),
-                    "median_task_elapsed_sec": self._percentile(samples, 0.5),
-                    "p90_task_elapsed_sec": self._percentile(samples, 0.9),
-                    "updated_at": state.updated_at or datetime.now(UTC).isoformat(),
-                })
-            return out
-
-    def write(self) -> None:
-        with self._lock:
-            current_rows = self.rows()
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            current_keys = {(row["run_id"], row["lane"], row["source_key"], row["workload_class"]) for row in current_rows}
-            prior = pd.read_csv(self.path) if self.path.exists() else pd.DataFrame(columns=SOURCE_CONCURRENCY_OBSERVATION_COLUMNS)
-            if not prior.empty:
-                prior = prior[[col for col in SOURCE_CONCURRENCY_OBSERVATION_COLUMNS if col in prior.columns]].copy()
-                for col in SOURCE_CONCURRENCY_OBSERVATION_COLUMNS:
-                    if col not in prior.columns:
-                        prior[col] = ""
-                prior_keys = list(zip(prior["run_id"], prior["lane"], prior["source_key"], prior["workload_class"], strict=False))
-                prior = prior[[key not in current_keys for key in prior_keys]]
-            current = pd.DataFrame(current_rows, columns=SOURCE_CONCURRENCY_OBSERVATION_COLUMNS)
-            combined = pd.concat([prior, current], ignore_index=True, sort=False) if not prior.empty else current
-            combined = combined[SOURCE_CONCURRENCY_OBSERVATION_COLUMNS]
-            tmp_path = self.path.with_name(f".{self.path.name}.{self.run_id}.tmp")
-            combined.to_csv(tmp_path, index=False, encoding="utf-8-sig")
-            tmp_path.replace(self.path)
-
 def _financial_indicator_em_symbol(symbol: str | int) -> str:
     """Convert A-share symbols to the suffixed Eastmoney form required by AkShare."""
     raw = str(symbol).strip().upper()
@@ -2892,7 +2680,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     task_events_path = op_dir / "task_events.jsonl"
     progress_events_path = op_dir / "progress_events.jsonl"
     live_progress_path = op_dir / "live_progress.json"
-    observation_path = op_dir / "source_concurrency_observation.csv"
     if not resume:
         for stale_path in (task_events_path, progress_events_path, live_progress_path):
             if stale_path.exists():
@@ -2905,7 +2692,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     completed_tasks = 0
     task_status_counts: Counter[str] = Counter()
     progress_lock = threading.Lock()
-    source_observer = _SourceConcurrencyObserver(observation_path, run_id, lane_name)
     heartbeat_stop = threading.Event()
     heartbeat_thread: threading.Thread | None = None
     selected_api_list = sorted(selected) if selected else list(dict.fromkeys(spec["api_name"] for spec in selected_specs))
@@ -3005,7 +2791,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 current_batch_completed_tasks=current_batch_completed_tasks,
             )
             _write_progress_event(op_dir, payload)
-            source_observer.write()
             print(_format_progress_line(payload), flush=True)
 
     def _heartbeat_ticker() -> None:
@@ -3026,8 +2811,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             "run_id": run_id,
             "source_family": best.get("source_family", ""),
             "api_name": best.get("api_name", ""),
-            "source_key": best.get("source_key", ""),
-            "workload_class": best.get("workload_class", ""),
             "requested_api_name": best.get("requested_api_name", ""),
             "fallback_from": best.get("fallback_from", ""),
             "original_symbol": best.get("original_symbol", ""),
@@ -3045,10 +2828,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         nonlocal completed_tasks, current_run_completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
-            source_api_name = str(row.get("requested_api_name") or row.get("api_name") or "")
-            source_family = str(row.get("source_family") or "")
-            row["source_key"] = _source_key_for_api(source_api_name)
-            row["workload_class"] = _workload_class_for_api(source_api_name, source_family)
             rows.append(row)
         event = _summarize_task(task_rows)
         with open(task_events_path, "a", encoding="utf-8") as ef:
@@ -3091,8 +2870,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     "run_id": run_id,
                     "source_family": r.get("source_family", ""),
                     "api_name": r.get("api_name", ""),
-                    "source_key": _source_key_for_api(str(r.get("requested_api_name") or r.get("api_name") or "")),
-                    "workload_class": _workload_class_for_api(str(r.get("requested_api_name") or r.get("api_name") or ""), str(r.get("source_family") or family)),
                     "requested_api_name": r.get("requested_api_name", ""),
                     "actual_api_name": r.get("actual_api_name", ""),
                     "original_symbol": r.get("original_symbol", ""),
@@ -3114,7 +2891,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     for r in rows_now:
                         r["error_message"] = f"{r.get('error_message','')}; attempts_used={max_attempts}"
                 return rows_now
-            source_observer.on_retry(family, api_name)
             sleep_sec = float(task_retry_sleep_sec) * (float(task_retry_backoff) ** (attempt_no - 1))
             if task_retry_jitter_sec > 0:
                 sleep_sec += float(task_retry_jitter_sec)
@@ -3134,10 +2910,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         if max_workers <= 1:
             for family, api_name, params in batch_tasks:
                 print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-                source_observer.on_submit(family, api_name)
                 task_rows = _execute_task(family, api_name, params)
-                event = _summarize_task(task_rows)
-                source_observer.on_complete(family, api_name, str(event.get("status", "")), float(event.get("elapsed_sec", 0.0) or 0.0))
                 _record_for_batch(task_rows)
                 if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
                     break
@@ -3155,7 +2928,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     except StopIteration:
                         return
                     print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-                    source_observer.on_submit(family, api_name)
                     pending[ex.submit(_execute_task, family, api_name, params)] = (family, api_name, params)
 
             _submit_until_full()
@@ -3163,10 +2935,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             while pending:
                 done, _ = wait(set(pending), return_when=FIRST_COMPLETED)
                 for fut in done:
-                    task_family, task_api_name, _task_params = pending.pop(fut, ("", "", {}))
+                    pending.pop(fut, None)
                     task_rows = fut.result()
-                    event = _summarize_task(task_rows)
-                    source_observer.on_complete(task_family, task_api_name, str(event.get("status", "")), float(event.get("elapsed_sec", 0.0) or 0.0))
                     _record_for_batch(task_rows)
                     if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
                         stop_batch = True
@@ -3198,7 +2968,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             completed_batches += 1
         _write_batch_report(batch_op_dir, batches, batch_status_by_id)
         _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
-        source_observer.write()
         if batch_row["status"] != "completed" and not continue_on_error:
             break
 
@@ -3261,7 +3030,6 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         "summary_path": str(summary_path),
         "checklist_path": str(checklist_path),
         "checklist_summary_path": str(checklist_summary_path),
-        "source_concurrency_observation_path": str(observation_path),
         "rows": rows,
     }
 
