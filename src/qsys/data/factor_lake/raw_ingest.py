@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import hashlib
 import inspect
 import time
 import uuid
@@ -17,7 +18,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from qsys.data.factor_lake.io import write_raw_partition
+from qsys.data.factor_lake.io import raw_partition_path, write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
 from qsys.data.factor_lake.registry import DATASET_REGISTRY, get_dataset_spec, plan_partitions
 from qsys.data.factor_lake.acquisition_universe import build_report_dates, build_trade_dates, load_concept_names, load_index_symbols, load_industry_codes, load_industry_names, load_stock_symbols
@@ -631,20 +632,47 @@ def _completed_task_keys_from_catalog(existing: pd.DataFrame) -> set[str]:
 
 
 def _merge_catalog_rows(existing: pd.DataFrame, new_rows: list[dict[str, object]], resume: bool) -> pd.DataFrame:
-    """Merge prior and new catalog rows without unbounded duplicate growth."""
+    """Merge prior and new catalog rows into one authoritative row per partition."""
     new_df = pd.DataFrame(new_rows)
     if not resume or existing.empty:
         merged = new_df
-    elif new_df.empty or "task_key_json" not in new_df.columns:
+    elif new_df.empty:
         merged = existing.copy()
     else:
-        rerun_keys = {str(k) for k in new_df["task_key_json"].fillna("").astype(str) if str(k)}
         prior = existing.copy()
-        if "task_key_json" in prior.columns and rerun_keys:
-            prior = prior[~prior["task_key_json"].fillna("").astype(str).isin(rerun_keys)]
-        merged = pd.concat([prior, new_df], ignore_index=True, sort=False)
-    if not merged.empty and {"task_key_json", "partition_json", "status"} <= set(merged.columns):
-        merged = merged.drop_duplicates(subset=["task_key_json", "partition_json", "status"], keep="last")
+        prior["_catalog_is_new"] = False
+        prior["_catalog_order"] = range(len(prior))
+        current = new_df.copy()
+        current["_catalog_is_new"] = True
+        current["_catalog_order"] = range(len(prior), len(prior) + len(current))
+        merged = pd.concat([prior, current], ignore_index=True, sort=False)
+
+    key_cols = ["task_key_json", "partition_json"]
+    if not merged.empty and set(key_cols) <= set(merged.columns):
+        if "_catalog_is_new" not in merged.columns:
+            merged["_catalog_is_new"] = True
+        if "_catalog_order" not in merged.columns:
+            merged["_catalog_order"] = range(len(merged))
+        merged["task_key_json"] = merged["task_key_json"].fillna("").astype(str)
+        merged["partition_json"] = merged["partition_json"].fillna("").astype(str)
+
+        chosen_rows: list[pd.Series] = []
+        for _, group in merged.groupby(key_cols, sort=False, dropna=False):
+            ordered = group.sort_values("_catalog_order", kind="mergesort")
+            status = ordered.get("status", pd.Series(dtype=str)).fillna("").astype(str)
+            is_new = ordered["_catalog_is_new"].astype(bool)
+            prior_landed = ordered[(~is_new) & status.isin({"success", "empty"})]
+            new_already_exists = ordered[is_new & (status == "already_exists")]
+            new_landed = ordered[is_new & status.isin({"success", "empty"})]
+            if not prior_landed.empty and not new_already_exists.empty and new_landed.empty:
+                chosen_rows.append(prior_landed.iloc[-1])
+            else:
+                chosen_rows.append(ordered.iloc[-1])
+        merged = pd.DataFrame(chosen_rows).reset_index(drop=True)
+
+    drop_cols = [c for c in ["_catalog_is_new", "_catalog_order"] if c in merged.columns]
+    if drop_cols:
+        merged = merged.drop(columns=drop_cols)
     return merged.reset_index(drop=True)
 
 
@@ -2006,6 +2034,12 @@ def _run_single_coverage_task(
                     filtered = {k: v for k, v in call_params.items() if k in allowed}
             except (TypeError, ValueError):
                 filtered = call_params
+            partition = _build_raw_partition(family, api_name, params, filtered)
+            existing_row = _check_existing_generic_partition(
+                output_root, family, api_name, params, partition, started_at, original_symbol, akshare_symbol
+            )
+            if existing_row is not None:
+                return existing_row
             if (family, api_name) == ("disclosure_ir", "stock_jgdy_detail_em"):
                 jgdy_request_get = adapters.get("__stock_jgdy_detail_em_request_get__") or adapters.get("stock_jgdy_detail_em_request_get")
                 jgdy_config = adapters.get("__stock_jgdy_detail_em_config__") or {}
@@ -2284,16 +2318,23 @@ def _build_progress_payload(
     started_at: float,
     total_tasks: int,
     completed_tasks: int,
+    current_run_completed_tasks: int,
     task_status_counts: Counter[str],
     selected_apis: list[str],
     event: str,
+    current_batch_id: int | None = None,
+    current_batch_scope: str = "",
+    completed_batches: int = 0,
+    total_batches: int = 0,
+    current_batch_task_count: int = 0,
+    current_batch_completed_tasks: int = 0,
 ) -> dict[str, Any]:
     """Build the canonical progress payload printed and persisted by preheat."""
     now = time.time()
     elapsed_sec = max(now - started_at, 0.0)
     pending_or_running_tasks = max(total_tasks - completed_tasks, 0)
-    throughput = (completed_tasks / elapsed_sec * 60.0) if elapsed_sec > 0 and completed_tasks > 0 else 0.0
-    eta_sec = (pending_or_running_tasks / (completed_tasks / elapsed_sec)) if elapsed_sec > 0 and completed_tasks > 0 and pending_or_running_tasks > 0 else None
+    throughput = (current_run_completed_tasks / elapsed_sec * 60.0) if elapsed_sec > 0 and current_run_completed_tasks > 0 else 0.0
+    eta_sec = (pending_or_running_tasks / (current_run_completed_tasks / elapsed_sec)) if elapsed_sec > 0 and current_run_completed_tasks > 0 and pending_or_running_tasks > 0 else None
     payload: dict[str, Any] = {
         "event": event,
         "lane": lane,
@@ -2314,6 +2355,12 @@ def _build_progress_payload(
         "pending_adapter_tasks": int(task_status_counts.get("pending_adapter", 0)),
         "throughput_tasks_per_min": round(throughput, 3),
         "selected_apis": selected_apis,
+        "current_batch_id": current_batch_id,
+        "current_batch_scope": current_batch_scope,
+        "completed_batches": int(completed_batches),
+        "total_batches": int(total_batches),
+        "current_batch_task_count": int(current_batch_task_count),
+        "current_batch_completed_tasks": int(current_batch_completed_tasks),
     }
     if eta_sec is not None:
         payload["eta_sec"] = round(eta_sec, 3)
@@ -2337,6 +2384,12 @@ def _format_progress_line(payload: dict[str, Any]) -> str:
         "skipped_tasks",
         "already_exists_tasks",
         "pending_adapter_tasks",
+        "current_batch_id",
+        "current_batch_scope",
+        "completed_batches",
+        "total_batches",
+        "current_batch_task_count",
+        "current_batch_completed_tasks",
         "throughput_tasks_per_min",
         "eta_sec",
     ]
@@ -2350,7 +2403,247 @@ def _write_progress_event(op_dir: Path, payload: dict[str, Any]) -> None:
         pf.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw") -> dict:
+BATCH_ARTIFACT_COLUMNS = [
+    "batch_id",
+    "batch_scope",
+    "symbol_start_index",
+    "symbol_end_index",
+    "symbol_count",
+    "task_count",
+    "status",
+    "started_at",
+    "finished_at",
+    "elapsed_sec",
+    "success_tasks",
+    "empty_tasks",
+    "failed_tasks",
+    "timeout_tasks",
+    "skipped_tasks",
+    "already_exists_tasks",
+    "pending_adapter_tasks",
+]
+
+
+def _is_symbol_scoped_task(task: tuple[str, str, dict[str, str]]) -> bool:
+    """Return True when a planned raw task is scoped by a non-empty stock symbol."""
+    return bool(str(task[2].get("symbol", "")).strip())
+
+
+def _build_hybrid_batches(
+    tasks: list[tuple[str, str, dict[str, str]]],
+    symbol_batch_size: int,
+) -> list[dict[str, object]]:
+    """Build flat or hybrid non-symbol/symbol-chunk batch descriptors."""
+    if symbol_batch_size <= 0:
+        return [{"batch_id": 0, "batch_scope": "flat", "symbol_start_index": -1, "symbol_end_index": -1, "symbols": [], "tasks": list(tasks)}]
+
+    non_symbol_tasks = [task for task in tasks if not _is_symbol_scoped_task(task)]
+    symbol_tasks = [task for task in tasks if _is_symbol_scoped_task(task)]
+    batches: list[dict[str, object]] = [
+        {"batch_id": 0, "batch_scope": "non_symbol", "symbol_start_index": -1, "symbol_end_index": -1, "symbols": [], "tasks": non_symbol_tasks}
+    ]
+
+    ordered_symbols = list(dict.fromkeys(str(task[2].get("symbol", "")).strip() for task in symbol_tasks))
+    for start in range(0, len(ordered_symbols), symbol_batch_size):
+        chunk_symbols = ordered_symbols[start : start + symbol_batch_size]
+        chunk_set = set(chunk_symbols)
+        chunk_tasks = [task for task in symbol_tasks if str(task[2].get("symbol", "")).strip() in chunk_set]
+        batches.append(
+            {
+                "batch_id": len(batches),
+                "batch_scope": "symbol_chunk",
+                "symbol_start_index": start,
+                "symbol_end_index": start + len(chunk_symbols) - 1,
+                "symbols": chunk_symbols,
+                "tasks": chunk_tasks,
+            }
+        )
+    return batches
+
+
+def _batch_plan_rows(batches: list[dict[str, object]], status_by_id: dict[int, dict[str, object]] | None = None) -> list[dict[str, object]]:
+    """Convert batch descriptors and optional runtime status into artifact rows."""
+    rows: list[dict[str, object]] = []
+    status_by_id = status_by_id or {}
+    for batch in batches:
+        batch_id = int(batch["batch_id"])
+        symbols = list(batch.get("symbols", []))
+        tasks = list(batch.get("tasks", []))
+        row = {column: "" for column in BATCH_ARTIFACT_COLUMNS}
+        row.update(
+            {
+                "batch_id": batch_id,
+                "batch_scope": str(batch["batch_scope"]),
+                "symbol_start_index": int(batch.get("symbol_start_index", -1)),
+                "symbol_end_index": int(batch.get("symbol_end_index", -1)),
+                "symbol_count": len(symbols),
+                "task_count": len(tasks),
+                "status": "planned",
+                "elapsed_sec": 0.0,
+                "success_tasks": 0,
+                "empty_tasks": 0,
+                "failed_tasks": 0,
+                "timeout_tasks": 0,
+                "skipped_tasks": 0,
+                "already_exists_tasks": 0,
+                "pending_adapter_tasks": 0,
+            }
+        )
+        row.update(status_by_id.get(batch_id, {}))
+        rows.append(row)
+    return rows
+
+
+def _write_batch_report(op_dir: Path, batches: list[dict[str, object]], status_by_id: dict[int, dict[str, object]]) -> None:
+    """Persist the batch report CSV."""
+    pd.DataFrame(_batch_plan_rows(batches, status_by_id), columns=BATCH_ARTIFACT_COLUMNS).to_csv(op_dir / "hybrid_batch_report.csv", index=False, encoding="utf-8-sig")
+
+
+def _build_plan_fingerprint_payload(
+    *,
+    families: list[str],
+    selected_api_names: list[str],
+    symbols: list[str],
+    index_symbols: list[str],
+    trade_dates: list[str],
+    report_dates: list[str],
+    industry_names: list[str],
+    concept_names: list[str],
+    industry_codes: list[str],
+    start_date: str,
+    end_date: str,
+    symbol_batch_size: int,
+    lane_name: str,
+) -> dict[str, object]:
+    """Build deterministic input material for hybrid checkpoint compatibility."""
+    return {
+        "lane_name": lane_name,
+        "families": list(families),
+        "selected_api_names": list(selected_api_names),
+        "symbols": list(symbols),
+        "index_symbols": list(index_symbols),
+        "trade_dates": list(trade_dates),
+        "report_dates": list(report_dates),
+        "industry_names": list(industry_names),
+        "concept_names": list(concept_names),
+        "industry_codes": list(industry_codes),
+        "start_date": start_date,
+        "end_date": end_date,
+        "symbol_batch_size": int(symbol_batch_size),
+    }
+
+
+def _fingerprint_payload(payload: dict[str, object]) -> str:
+    """Hash a deterministic JSON fingerprint payload."""
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_batch_checkpoint(op_dir: Path, fingerprint: str, fingerprint_payload: dict[str, object], batches: list[dict[str, object]], status_by_id: dict[int, dict[str, object]]) -> None:
+    """Atomically persist resumable hybrid batch checkpoint state."""
+    _atomic_write_json(
+        op_dir / "hybrid_batch_checkpoint.json",
+        {
+            "fingerprint": fingerprint,
+            "fingerprint_payload": fingerprint_payload,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "batches": _batch_plan_rows(batches, status_by_id),
+        },
+    )
+
+
+def _load_completed_batch_ids_for_resume(checkpoint_path: Path, expected_fingerprint: str) -> set[int]:
+    """Load completed batch IDs after validating the saved plan fingerprint."""
+    if not checkpoint_path.exists():
+        return set()
+    payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    actual = str(payload.get("fingerprint", ""))
+    if actual != expected_fingerprint:
+        raise RuntimeError(
+            "hybrid batch checkpoint fingerprint mismatch; rerun without resume or use a matching plan"
+        )
+    completed: set[int] = set()
+    for row in payload.get("batches", []):
+        if isinstance(row, dict) and row.get("status") == "completed":
+            completed.add(int(row.get("batch_id", -1)))
+    return completed
+
+
+def _summarize_batch_row(batch: dict[str, object], task_events: list[dict[str, object]], started_at: datetime, finished_at: datetime) -> dict[str, object]:
+    """Summarize one batch from per-task events."""
+    counts = Counter(str(event.get("status", "")) for event in task_events)
+    failed = int(counts.get("failed", 0))
+    timeout = int(counts.get("timeout", 0))
+    pending_adapter = int(counts.get("pending_adapter", 0))
+    return {
+        "batch_id": int(batch["batch_id"]),
+        "batch_scope": str(batch["batch_scope"]),
+        "symbol_start_index": int(batch.get("symbol_start_index", -1)),
+        "symbol_end_index": int(batch.get("symbol_end_index", -1)),
+        "symbol_count": len(list(batch.get("symbols", []))),
+        "task_count": len(list(batch.get("tasks", []))),
+        "status": "completed" if failed == 0 and timeout == 0 and pending_adapter == 0 else "failed",
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+        "success_tasks": int(counts.get("success", 0)),
+        "empty_tasks": int(counts.get("empty", 0)),
+        "failed_tasks": failed,
+        "timeout_tasks": timeout,
+        "skipped_tasks": int(counts.get("skipped", 0)),
+        "already_exists_tasks": int(counts.get("already_exists", 0)),
+        "pending_adapter_tasks": pending_adapter,
+    }
+
+
+def _check_existing_generic_partition(
+    output_root: str,
+    family: str,
+    api_name: str,
+    params: dict[str, str],
+    partition: dict[str, str],
+    started_at: datetime,
+    original_symbol: str,
+    akshare_symbol: str,
+) -> list[dict[str, object]] | None:
+    """Return a ready task row when a generic partition can be skipped or is partial."""
+    if family == "market_price" or api_name in {"stock_zh_a_daily", "stock_zh_a_hist"}:
+        return None
+    partition_dir = raw_partition_path(output_root, family, api_name, partition)
+    data_path = partition_dir / "data.parquet"
+    meta_path = partition_dir / "metadata.json"
+    data_exists = data_path.exists()
+    meta_exists = meta_path.exists()
+    if not data_exists and not meta_exists:
+        return None
+    finished_at = datetime.now(UTC)
+    partial = data_exists != meta_exists
+    status = "failed" if partial else "already_exists"
+    return [_attach_api_policy_metadata({
+        "dataset_name": "raw_source_api",
+        "partition_json": json.dumps(partition, ensure_ascii=False, sort_keys=True),
+        "params_json": json.dumps(params, ensure_ascii=False, sort_keys=True),
+        "task_key_json": _build_task_key(family, api_name, params),
+        "source_family": family,
+        "api_name": api_name,
+        "requested_api_name": api_name,
+        "actual_api_name": api_name,
+        "fallback_from": "",
+        "original_symbol": original_symbol,
+        "akshare_symbol": akshare_symbol,
+        "status": status,
+        "rows": 0,
+        "error_type": "partial_partition_state" if partial else "",
+        "error_message": f"partial raw partition state: {partition_dir}" if partial else "",
+        "output_path": str(data_path) if data_exists else "",
+        "metadata_path": str(meta_path) if meta_exists else "",
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat(),
+        "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
+    }, family, api_name)]
+
+
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw", symbol_batch_size: int = 0, max_inflight_tasks: int | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -2411,9 +2704,73 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             params_list = _params_for_mode(param_mode, symbols, index_symbols, report_dates, trade_dates, industry_names, concept_names, start_date, end_date, industry_codes=industry_codes)
             for params in params_list:
                 task_key_json = _build_task_key(family, api_name, params)
-                if resume and task_key_json in completed_task_keys:
+                if resume and symbol_batch_size <= 0 and task_key_json in completed_task_keys:
                     continue
                 tasks.append((family, api_name, params))
+
+    if max_inflight_tasks is None:
+        max_inflight_tasks = max(max_workers * 2, max_workers)
+    max_inflight_tasks = int(max_inflight_tasks)
+    if max_inflight_tasks < max_workers:
+        raise ValueError("max_inflight_tasks must be greater than or equal to max_workers")
+
+    batches = _build_hybrid_batches(tasks, int(symbol_batch_size))
+    fingerprint_payload = _build_plan_fingerprint_payload(
+        families=families,
+        selected_api_names=selected_api_list,
+        symbols=symbols,
+        index_symbols=index_symbols,
+        trade_dates=trade_dates,
+        report_dates=report_dates,
+        industry_names=industry_names,
+        concept_names=concept_names,
+        industry_codes=industry_codes,
+        start_date=start_date,
+        end_date=end_date,
+        symbol_batch_size=int(symbol_batch_size),
+        lane_name=lane_name,
+    )
+    plan_fingerprint = _fingerprint_payload(fingerprint_payload)
+    batch_op_dir = op_dir / "hybrid_batches" / lane_name
+    batch_op_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = batch_op_dir / "hybrid_batch_checkpoint.json"
+    completed_batch_ids = _load_completed_batch_ids_for_resume(checkpoint_path, plan_fingerprint) if resume else set()
+    batch_status_by_id: dict[int, dict[str, object]] = {}
+    if resume and checkpoint_path.exists():
+        checkpoint_payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        for row in checkpoint_payload.get("batches", []):
+            if isinstance(row, dict):
+                batch_status_by_id[int(row.get("batch_id", -1))] = row
+    else:
+        for stale_path in (batch_op_dir / "hybrid_batch_plan.csv", checkpoint_path, batch_op_dir / "hybrid_batch_report.csv"):
+            if stale_path.exists():
+                stale_path.unlink()
+    pd.DataFrame(_batch_plan_rows(batches), columns=BATCH_ARTIFACT_COLUMNS).to_csv(batch_op_dir / "hybrid_batch_plan.csv", index=False, encoding="utf-8-sig")
+    _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+    _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+
+    if int(symbol_batch_size) > 0:
+        for completed_row in batch_status_by_id.values():
+            if completed_row.get("status") != "completed":
+                continue
+            completed_tasks += int(completed_row.get("task_count", 0) or 0)
+            for status_name, column_name in (
+                ("success", "success_tasks"),
+                ("empty", "empty_tasks"),
+                ("failed", "failed_tasks"),
+                ("timeout", "timeout_tasks"),
+                ("skipped", "skipped_tasks"),
+                ("already_exists", "already_exists_tasks"),
+                ("pending_adapter", "pending_adapter_tasks"),
+            ):
+                task_status_counts[status_name] += int(completed_row.get(column_name, 0) or 0)
+    current_run_completed_tasks = 0
+
+    current_batch_id: int | None = None
+    current_batch_scope = ""
+    current_batch_task_count = 0
+    current_batch_completed_tasks = 0
+    completed_batches = len(completed_batch_ids)
 
     def _emit_progress(event: str) -> None:
         with progress_lock:
@@ -2422,9 +2779,16 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 started_at=heartbeat_start,
                 total_tasks=len(tasks),
                 completed_tasks=completed_tasks,
+                current_run_completed_tasks=current_run_completed_tasks,
                 task_status_counts=task_status_counts,
                 selected_apis=selected_api_list,
                 event=event,
+                current_batch_id=current_batch_id,
+                current_batch_scope=current_batch_scope,
+                completed_batches=completed_batches,
+                total_batches=len(batches),
+                current_batch_task_count=current_batch_task_count,
+                current_batch_completed_tasks=current_batch_completed_tasks,
             )
             _write_progress_event(op_dir, payload)
             print(_format_progress_line(payload), flush=True)
@@ -2460,8 +2824,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             "elapsed_sec": max(float(r.get("elapsed_sec", 0.0) or 0.0) for r in task_rows),
         }
 
-    def _record_task_rows(task_rows: list[dict[str, object]]) -> None:
-        nonlocal completed_tasks
+    def _record_task_rows(task_rows: list[dict[str, object]]) -> dict[str, object]:
+        nonlocal completed_tasks, current_run_completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
             rows.append(row)
@@ -2471,7 +2835,9 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         with progress_lock:
             task_status_counts[str(event.get("status", ""))] += 1
             completed_tasks += 1
+            current_run_completed_tasks += 1
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}", flush=True)
+        return event
 
     task_attempt_records: list[dict[str, object]] = []
 
@@ -2532,41 +2898,88 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 time.sleep(sleep_sec)
         return last_rows
 
-    if max_workers <= 1:
-        for family, api_name, params in tasks:
-            print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-            task_rows = _execute_task(family, api_name, params)
-            _record_task_rows(task_rows)
-            if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
-                break
-            if request_sleep > 0:
-                time.sleep(request_sleep)
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = []
-            for family, api_name, params in tasks:
+    def _run_task_batch(batch_tasks: list[tuple[str, str, dict[str, str]]]) -> list[dict[str, object]]:
+        batch_events: list[dict[str, object]] = []
+
+        def _record_for_batch(task_rows: list[dict[str, object]]) -> None:
+            nonlocal current_batch_completed_tasks
+            event = _record_task_rows(task_rows)
+            batch_events.append(event)
+            current_batch_completed_tasks += 1
+
+        if max_workers <= 1:
+            for family, api_name, params in batch_tasks:
                 print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
-                futures.append(ex.submit(_execute_task, family, api_name, params))
-            if not heartbeat_enabled:
-                for fut in futures:
+                task_rows = _execute_task(family, api_name, params)
+                _record_for_batch(task_rows)
+                if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
+                    break
+                if request_sleep > 0:
+                    time.sleep(request_sleep)
+            return batch_events
+
+        task_iter = iter(batch_tasks)
+        pending: dict[object, tuple[str, str, dict[str, str]]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            def _submit_until_full() -> None:
+                while len(pending) < max_inflight_tasks:
+                    try:
+                        family, api_name, params = next(task_iter)
+                    except StopIteration:
+                        return
+                    print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
+                    pending[ex.submit(_execute_task, family, api_name, params)] = (family, api_name, params)
+
+            _submit_until_full()
+            stop_batch = False
+            while pending:
+                done, _ = wait(set(pending), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    pending.pop(fut, None)
                     task_rows = fut.result()
-                    _record_task_rows(task_rows)
+                    _record_for_batch(task_rows)
+                    if any(row.get("status") in {"failed", "timeout"} for row in task_rows) and not continue_on_error:
+                        stop_batch = True
                     if request_sleep > 0:
                         time.sleep(request_sleep)
-            else:
-                pending = set(futures)
-                while pending:
-                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        task_rows = fut.result()
-                        _record_task_rows(task_rows)
-                        if request_sleep > 0:
-                            time.sleep(request_sleep)
+                if not stop_batch:
+                    _submit_until_full()
+            return batch_events
+
+    for batch in batches:
+        batch_id = int(batch["batch_id"])
+        if batch_id in completed_batch_ids:
+            continue
+        current_batch_id = batch_id
+        current_batch_scope = str(batch["batch_scope"])
+        batch_tasks = list(batch.get("tasks", []))
+        current_batch_task_count = len(batch_tasks)
+        current_batch_completed_tasks = 0
+        batch_started = datetime.now(UTC)
+        running_row = {**_batch_plan_rows([batch])[0], "status": "running", "started_at": batch_started.isoformat()}
+        batch_status_by_id[batch_id] = running_row
+        _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+        _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+        batch_events = _run_task_batch(batch_tasks)
+        batch_finished = datetime.now(UTC)
+        batch_row = _summarize_batch_row(batch, batch_events, batch_started, batch_finished)
+        batch_status_by_id[batch_id] = batch_row
+        if batch_row["status"] == "completed":
+            completed_batches += 1
+        _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+        _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+        if batch_row["status"] != "completed" and not continue_on_error:
+            break
 
     heartbeat_stop.set()
     if heartbeat_thread is not None:
         heartbeat_thread.join(timeout=max(heartbeat_every_sec, 1.0))
     _emit_progress("lane_completion")
+
+    task_order_by_key = {_build_task_key(family, api_name, params): idx for idx, (family, api_name, params) in enumerate(tasks)}
+    indexed_rows = list(enumerate(rows))
+    indexed_rows.sort(key=lambda item: (task_order_by_key.get(str(item[1].get("task_key_json", "")), len(task_order_by_key)), item[0]))
+    rows = [row for _, row in indexed_rows]
 
     out = Path(output_root)
     out.mkdir(parents=True, exist_ok=True)

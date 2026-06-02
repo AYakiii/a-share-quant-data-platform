@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -57,6 +58,8 @@ def _args(tmp_path: Path, **overrides):
         long_run_max_workers=1,
         deferred_max_workers=4,
         heartbeat_sec=30,
+        symbol_batch_size=180,
+        max_inflight_tasks=128,
         task_timeout_sec=120,
         manual_selected_task_timeout_sec=180,
         heavy_task_timeout_sec=300,
@@ -242,6 +245,78 @@ def test_resume_is_forwarded_to_official_raw_ingest_runner(tmp_path):
 
     preheat.run_lanes(args, universe, plan, runner=runner)
     assert calls[0]["resume"] is True
+
+
+def test_hybrid_batch_cli_defaults_and_forwarding(tmp_path):
+    parser = preheat.build_parser()
+    parsed = parser.parse_args([
+        "--output-root", str(tmp_path / "out"),
+        "--start-date", "20260518",
+        "--end-date", "20260529",
+    ])
+    assert parsed.symbol_batch_size == 180
+    assert parsed.max_inflight_tasks == 128
+
+    args = _args(tmp_path, only_apis="stock_zcfz_em")
+    universe = _universe(tmp_path)
+    plan = [{"source_family": "financial_fundamental", "api_name": "stock_zcfz_em", "lane": "main", "enabled": True, "selected": True}]
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": []}
+
+    preheat.run_lanes(args, universe, plan, runner=runner)
+    assert calls[0]["symbol_batch_size"] == 180
+    assert calls[0]["max_inflight_tasks"] == 128
+
+
+
+def test_run_lanes_uses_lane_scoped_hybrid_checkpoints_for_effective_resume(monkeypatch, tmp_path):
+    args = _args(tmp_path, lanes="main,manual_selected", symbol_batch_size=2, max_workers=1)
+    universe = preheat.PreheatUniverse(stock_symbols=["000001"])
+    output_root = Path(args.output_root)
+    plan = [
+        {
+            "source_family": "corporate_action",
+            "api_name": "stock_fhps_em",
+            "lane": "main",
+            "enabled": True,
+            "selected": True,
+            "priority_tier": "P1",
+            "data_theme": "dividend",
+            "acquisition_mode": "stable",
+            "planned_tasks": 1,
+        },
+        {
+            "source_family": "financial_fundamental",
+            "api_name": "stock_financial_analysis_indicator_em",
+            "lane": "manual_selected",
+            "enabled": True,
+            "selected": True,
+            "priority_tier": "P1",
+            "data_theme": "indicator",
+            "acquisition_mode": "manual_selected_only",
+            "planned_tasks": 1,
+        },
+    ]
+
+    fake_ak = SimpleNamespace(
+        stock_fhps_em=lambda: pd.DataFrame({"value": [1]}),
+        stock_financial_analysis_indicator_em=lambda symbol: pd.DataFrame({"symbol": [symbol], "value": [2]}),
+    )
+    monkeypatch.setattr(preheat, "ak", fake_ak)
+
+    manifests = preheat.run_lanes(args, universe, plan, runner=run_raw_coverage_ingest)
+
+    assert [manifest["lane"] for manifest in manifests] == ["main", "manual_selected"]
+    assert manifests[1]["effective_resume"] is True
+    main_checkpoint = output_root / "_operation_review" / "hybrid_batches" / "main" / "hybrid_batch_checkpoint.json"
+    manual_checkpoint = output_root / "_operation_review" / "hybrid_batches" / "manual_selected" / "hybrid_batch_checkpoint.json"
+    assert main_checkpoint.exists()
+    assert manual_checkpoint.exists()
+    assert json.loads(main_checkpoint.read_text(encoding="utf-8"))["fingerprint_payload"]["lane_name"] == "main"
+    assert json.loads(manual_checkpoint.read_text(encoding="utf-8"))["fingerprint_payload"]["lane_name"] == "manual_selected"
 
 
 def test_checklist_artifact_created_from_synthetic_lane_outputs(tmp_path):
