@@ -347,3 +347,113 @@ def test_existing_partition_skip_and_partial_partition_state(tmp_path):
     assert calls["fhps"] == 0
     assert out["rows"][0]["status"] == "failed"
     assert out["rows"][0]["error_type"] == "partial_partition_state"
+
+
+def test_source_attribution_and_workload_classification():
+    assert raw_ingest._source_key_for_api("stock_balance_sheet_by_report_em") == "eastmoney"
+    assert raw_ingest._workload_class_for_api("stock_balance_sheet_by_report_em") == "symbol_scoped"
+    assert raw_ingest._source_key_for_api("stock_zh_a_disclosure_relation_cninfo") == "cninfo"
+    assert raw_ingest._workload_class_for_api("stock_zh_a_disclosure_relation_cninfo") == "symbol_scoped"
+    assert raw_ingest._source_key_for_api("futures_shfe_warehouse_receipt") == "shfe"
+    assert raw_ingest._workload_class_for_api("futures_shfe_warehouse_receipt") == "trade_date_scoped"
+    assert raw_ingest._source_key_for_api("unknown_api_name") == "akshare_unknown"
+    assert raw_ingest._workload_class_for_api("unknown_api_name") == "other"
+
+
+def test_source_concurrency_observation_csv_written_without_heartbeat(tmp_path):
+    calls: list[str] = []
+
+    def indicator(symbol: str):
+        calls.append(symbol)
+        return _Result()
+
+    out = run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=["000001", "000002"],
+        adapter_map={"stock_financial_analysis_indicator": indicator},
+        max_workers=1,
+        include_disabled=True,
+        heartbeat_sec=0,
+    )
+    observation_path = tmp_path / "_operation_review" / "source_concurrency_observation.csv"
+    assert Path(out["source_concurrency_observation_path"]) == observation_path
+    assert observation_path.exists()
+    observation = pd.read_csv(observation_path)
+    required_columns = set(raw_ingest.SOURCE_CONCURRENCY_OBSERVATION_COLUMNS)
+    assert required_columns.issubset(observation.columns)
+    assert int(observation["completed_tasks"].sum()) == len(calls)
+
+
+def test_source_concurrency_observation_bounded_inflight(tmp_path):
+    def slow_indicator(symbol: str):
+        time.sleep(0.02)
+        return _Result()
+
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=[f"00000{i}" for i in range(8)],
+        adapter_map={"stock_financial_analysis_indicator": slow_indicator},
+        max_workers=3,
+        max_inflight_tasks=4,
+        include_disabled=True,
+        heartbeat_sec=0,
+    )
+    observation = pd.read_csv(tmp_path / "_operation_review" / "source_concurrency_observation.csv")
+    assert int(observation["peak_inflight_tasks"].max()) <= 4
+    assert int(observation["completed_tasks"].sum()) == 8
+
+
+def test_already_exists_excluded_from_source_latency_samples(tmp_path):
+    calls = {"fhps": 0}
+
+    def stock_fhps_em():
+        calls["fhps"] += 1
+        return _Result()
+
+    partition = {"api_name": "stock_fhps_em"}
+    out_dir = raw_partition_path(tmp_path, "corporate_action", "stock_fhps_em", partition)
+    pd.DataFrame({"x": [1]}).to_parquet(out_dir / "data.parquet", index=False)
+    (out_dir / "metadata.json").write_text("{}", encoding="utf-8")
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["corporate_action"],
+        selected_api_names=["stock_fhps_em"],
+        adapter_map={"stock_fhps_em": stock_fhps_em},
+        max_workers=1,
+        heartbeat_sec=0,
+    )
+    assert calls["fhps"] == 0
+    observation = pd.read_csv(tmp_path / "_operation_review" / "source_concurrency_observation.csv")
+    assert int(observation["already_exists_tasks"].sum()) > 0
+    assert int(observation["latency_sample_count"].sum()) == 0
+
+
+def test_retry_count_and_attempt_numbers_remain_auditable(tmp_path):
+    calls = {"count": 0}
+
+    def flaky_indicator(symbol: str):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionError("temporary upstream disconnect")
+        return _Result(pd.DataFrame({"symbol": [symbol], "value": [1]}))
+
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=["000001"],
+        adapter_map={"stock_financial_analysis_indicator": flaky_indicator},
+        max_workers=1,
+        task_retry_attempts=1,
+        include_disabled=True,
+        heartbeat_sec=0,
+    )
+    observation = pd.read_csv(tmp_path / "_operation_review" / "source_concurrency_observation.csv")
+    assert int(observation["retry_count"].sum()) == 1
+    attempts = pd.read_csv(tmp_path / "_operation_review" / "task_attempts.csv")
+    assert set(attempts["attempt_no"].astype(int)) == {1, 2}
+    assert {"source_key", "workload_class"}.issubset(attempts.columns)
