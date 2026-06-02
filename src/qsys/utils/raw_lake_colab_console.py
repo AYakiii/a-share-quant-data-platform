@@ -444,7 +444,7 @@ def review_preheat_output(output_root: str | Path, *, lane_name: str = "main") -
         report = pd.read_csv(report_path)
         total_batches = len(report)
         completed_batches = int((report.get("status", pd.Series(dtype=str)) == "completed").sum())
-        print("completed / total:", f"{completed_batches} / {total_batches}")
+        print("clean batches / total:", f"{completed_batches} / {total_batches}")
     else:
         print("report missing:", report_path)
     if checkpoint_path.exists():
