@@ -135,14 +135,18 @@ def test_checkpoint_artifacts_and_heartbeat_fields(tmp_path):
         heartbeat_sec=0,
     )
     op = tmp_path / "_operation_review"
-    plan = pd.read_csv(op / "hybrid_batch_plan.csv")
-    report = pd.read_csv(op / "hybrid_batch_report.csv")
-    checkpoint = json.loads((op / "hybrid_batch_checkpoint.json").read_text(encoding="utf-8"))
+    batch_op = op / "hybrid_batches" / "raw"
+    plan = pd.read_csv(batch_op / "hybrid_batch_plan.csv")
+    report = pd.read_csv(batch_op / "hybrid_batch_report.csv")
+    checkpoint = json.loads((batch_op / "hybrid_batch_checkpoint.json").read_text(encoding="utf-8"))
     required = set(raw_ingest.BATCH_ARTIFACT_COLUMNS)
     assert required.issubset(plan.columns)
     assert required.issubset(report.columns)
     assert "fingerprint" in checkpoint
     assert "fingerprint_payload" in checkpoint
+    assert checkpoint["fingerprint_payload"]["lane_name"] == "raw"
+    assert set(plan["status"]).issubset({"planned", "running", "completed", "failed"})
+    assert set(report["status"]).issubset({"planned", "running", "completed", "failed"})
 
     live = json.loads((op / "live_progress.json").read_text(encoding="utf-8"))
     for field in ["event", "lane", "total_tasks", "completed_tasks", "success_tasks"]:
@@ -173,7 +177,7 @@ def test_resume_skips_completed_and_reruns_failed_or_incomplete_batches(tmp_path
     run_raw_coverage_ingest(**kwargs, resume=True)
     assert calls == []
 
-    checkpoint_path = tmp_path / "_operation_review" / "hybrid_batch_checkpoint.json"
+    checkpoint_path = tmp_path / "_operation_review" / "hybrid_batches" / "raw" / "hybrid_batch_checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     checkpoint["batches"][0]["status"] = "completed"
     checkpoint["batches"][1]["status"] = "failed"
@@ -183,6 +187,58 @@ def test_resume_skips_completed_and_reruns_failed_or_incomplete_batches(tmp_path
 
     with pytest.raises(RuntimeError, match="fingerprint mismatch"):
         run_raw_coverage_ingest(**{**kwargs, "symbol_batch_size": 1}, resume=True)
+
+
+
+def test_completed_resume_progress_is_truthful_and_uses_no_remote_calls(tmp_path):
+    calls: list[str] = []
+
+    def indicator(symbol: str):
+        calls.append(symbol)
+        return _Result()
+
+    kwargs = dict(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=["000001", "000002", "000003"],
+        adapter_map={"stock_financial_analysis_indicator": indicator},
+        max_workers=1,
+        symbol_batch_size=2,
+        include_disabled=True,
+    )
+    run_raw_coverage_ingest(**kwargs)
+    calls.clear()
+    run_raw_coverage_ingest(**kwargs, resume=True)
+
+    assert calls == []
+    live = json.loads((tmp_path / "_operation_review" / "live_progress.json").read_text(encoding="utf-8"))
+    assert live["completed_tasks"] == live["total_tasks"]
+    assert live["completion_pct"] == 100
+    assert live["throughput_tasks_per_min"] == 0.0
+
+
+def test_pending_adapter_batch_is_failed_and_not_skipped_on_resume(tmp_path):
+    kwargs = dict(
+        output_root=str(tmp_path),
+        families=["corporate_action"],
+        selected_api_names=["stock_fhps_em"],
+        max_workers=1,
+        symbol_batch_size=2,
+    )
+    run_raw_coverage_ingest(**kwargs)
+    batch_op = tmp_path / "_operation_review" / "hybrid_batches" / "raw"
+    report = pd.read_csv(batch_op / "hybrid_batch_report.csv")
+    assert report.loc[0, "pending_adapter_tasks"] == 1
+    assert report.loc[0, "status"] == "failed"
+
+    events_path = tmp_path / "_operation_review" / "task_events.jsonl"
+    first_event_count = len(events_path.read_text(encoding="utf-8").splitlines())
+    run_raw_coverage_ingest(**kwargs, resume=True)
+    second_event_count = len(events_path.read_text(encoding="utf-8").splitlines())
+    assert second_event_count == first_event_count + 1
+    report = pd.read_csv(batch_op / "hybrid_batch_report.csv")
+    assert report.loc[0, "status"] == "failed"
 
 
 def test_existing_partition_skip_and_partial_partition_state(tmp_path):

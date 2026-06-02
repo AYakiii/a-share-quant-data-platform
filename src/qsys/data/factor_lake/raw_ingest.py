@@ -646,15 +646,6 @@ def _merge_catalog_rows(existing: pd.DataFrame, new_rows: list[dict[str, object]
         merged = pd.concat([prior, new_df], ignore_index=True, sort=False)
     if not merged.empty and {"task_key_json", "partition_json", "status"} <= set(merged.columns):
         merged = merged.drop_duplicates(subset=["task_key_json", "partition_json", "status"], keep="last")
-    if not merged.empty and "status" in merged.columns:
-        status_rank = {"pending_adapter": 0, "skipped": 1, "empty": 2, "already_exists": 2, "success": 3, "timeout": 4, "failed": 5}
-        merged = merged.assign(_status_rank=merged["status"].astype(str).map(status_rank).fillna(0))
-        sort_cols = ["_status_rank"]
-        ascending = [False]
-        if "started_at" in merged.columns:
-            sort_cols.append("started_at")
-            ascending.append(True)
-        merged = merged.sort_values(sort_cols, ascending=ascending, kind="mergesort").drop(columns=["_status_rank"])
     return merged.reset_index(drop=True)
 
 
@@ -2300,6 +2291,7 @@ def _build_progress_payload(
     started_at: float,
     total_tasks: int,
     completed_tasks: int,
+    current_run_completed_tasks: int,
     task_status_counts: Counter[str],
     selected_apis: list[str],
     event: str,
@@ -2314,8 +2306,8 @@ def _build_progress_payload(
     now = time.time()
     elapsed_sec = max(now - started_at, 0.0)
     pending_or_running_tasks = max(total_tasks - completed_tasks, 0)
-    throughput = (completed_tasks / elapsed_sec * 60.0) if elapsed_sec > 0 and completed_tasks > 0 else 0.0
-    eta_sec = (pending_or_running_tasks / (completed_tasks / elapsed_sec)) if elapsed_sec > 0 and completed_tasks > 0 and pending_or_running_tasks > 0 else None
+    throughput = (current_run_completed_tasks / elapsed_sec * 60.0) if elapsed_sec > 0 and current_run_completed_tasks > 0 else 0.0
+    eta_sec = (pending_or_running_tasks / (current_run_completed_tasks / elapsed_sec)) if elapsed_sec > 0 and current_run_completed_tasks > 0 and pending_or_running_tasks > 0 else None
     payload: dict[str, Any] = {
         "event": event,
         "lane": lane,
@@ -2459,7 +2451,7 @@ def _batch_plan_rows(batches: list[dict[str, object]], status_by_id: dict[int, d
                 "symbol_end_index": int(batch.get("symbol_end_index", -1)),
                 "symbol_count": len(symbols),
                 "task_count": len(tasks),
-                "status": "pending",
+                "status": "planned",
                 "elapsed_sec": 0.0,
                 "success_tasks": 0,
                 "empty_tasks": 0,
@@ -2494,9 +2486,11 @@ def _build_plan_fingerprint_payload(
     start_date: str,
     end_date: str,
     symbol_batch_size: int,
+    lane_name: str,
 ) -> dict[str, object]:
     """Build deterministic input material for hybrid checkpoint compatibility."""
     return {
+        "lane_name": lane_name,
         "families": list(families),
         "selected_api_names": list(selected_api_names),
         "symbols": list(symbols),
@@ -2553,6 +2547,7 @@ def _summarize_batch_row(batch: dict[str, object], task_events: list[dict[str, o
     counts = Counter(str(event.get("status", "")) for event in task_events)
     failed = int(counts.get("failed", 0))
     timeout = int(counts.get("timeout", 0))
+    pending_adapter = int(counts.get("pending_adapter", 0))
     return {
         "batch_id": int(batch["batch_id"]),
         "batch_scope": str(batch["batch_scope"]),
@@ -2560,7 +2555,7 @@ def _summarize_batch_row(batch: dict[str, object], task_events: list[dict[str, o
         "symbol_end_index": int(batch.get("symbol_end_index", -1)),
         "symbol_count": len(list(batch.get("symbols", []))),
         "task_count": len(list(batch.get("tasks", []))),
-        "status": "completed" if failed == 0 and timeout == 0 else "failed",
+        "status": "completed" if failed == 0 and timeout == 0 and pending_adapter == 0 else "failed",
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "elapsed_sec": max((finished_at - started_at).total_seconds(), 0.0),
@@ -2570,7 +2565,7 @@ def _summarize_batch_row(batch: dict[str, object], task_events: list[dict[str, o
         "timeout_tasks": timeout,
         "skipped_tasks": int(counts.get("skipped", 0)),
         "already_exists_tasks": int(counts.get("already_exists", 0)),
-        "pending_adapter_tasks": int(counts.get("pending_adapter", 0)),
+        "pending_adapter_tasks": pending_adapter,
     }
 
 
@@ -2706,9 +2701,12 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         start_date=start_date,
         end_date=end_date,
         symbol_batch_size=int(symbol_batch_size),
+        lane_name=lane_name,
     )
     plan_fingerprint = _fingerprint_payload(fingerprint_payload)
-    checkpoint_path = op_dir / "hybrid_batch_checkpoint.json"
+    batch_op_dir = op_dir / "hybrid_batches" / lane_name
+    batch_op_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = batch_op_dir / "hybrid_batch_checkpoint.json"
     completed_batch_ids = _load_completed_batch_ids_for_resume(checkpoint_path, plan_fingerprint) if resume else set()
     batch_status_by_id: dict[int, dict[str, object]] = {}
     if resume and checkpoint_path.exists():
@@ -2717,12 +2715,28 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
             if isinstance(row, dict):
                 batch_status_by_id[int(row.get("batch_id", -1))] = row
     else:
-        for stale_path in (op_dir / "hybrid_batch_plan.csv", checkpoint_path, op_dir / "hybrid_batch_report.csv"):
+        for stale_path in (batch_op_dir / "hybrid_batch_plan.csv", checkpoint_path, batch_op_dir / "hybrid_batch_report.csv"):
             if stale_path.exists():
                 stale_path.unlink()
-    pd.DataFrame(_batch_plan_rows(batches), columns=BATCH_ARTIFACT_COLUMNS).to_csv(op_dir / "hybrid_batch_plan.csv", index=False, encoding="utf-8-sig")
-    _write_batch_report(op_dir, batches, batch_status_by_id)
-    _write_batch_checkpoint(op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+    pd.DataFrame(_batch_plan_rows(batches), columns=BATCH_ARTIFACT_COLUMNS).to_csv(batch_op_dir / "hybrid_batch_plan.csv", index=False, encoding="utf-8-sig")
+    _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+    _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+
+    for completed_row in batch_status_by_id.values():
+        if completed_row.get("status") != "completed":
+            continue
+        completed_tasks += int(completed_row.get("task_count", 0) or 0)
+        for status_name, column_name in (
+            ("success", "success_tasks"),
+            ("empty", "empty_tasks"),
+            ("failed", "failed_tasks"),
+            ("timeout", "timeout_tasks"),
+            ("skipped", "skipped_tasks"),
+            ("already_exists", "already_exists_tasks"),
+            ("pending_adapter", "pending_adapter_tasks"),
+        ):
+            task_status_counts[status_name] += int(completed_row.get(column_name, 0) or 0)
+    current_run_completed_tasks = 0
 
     current_batch_id: int | None = None
     current_batch_scope = ""
@@ -2737,6 +2751,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 started_at=heartbeat_start,
                 total_tasks=len(tasks),
                 completed_tasks=completed_tasks,
+                current_run_completed_tasks=current_run_completed_tasks,
                 task_status_counts=task_status_counts,
                 selected_apis=selected_api_list,
                 event=event,
@@ -2782,7 +2797,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         }
 
     def _record_task_rows(task_rows: list[dict[str, object]]) -> dict[str, object]:
-        nonlocal completed_tasks
+        nonlocal completed_tasks, current_run_completed_tasks
         for row in task_rows:
             row["run_id"] = run_id
             rows.append(row)
@@ -2792,6 +2807,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         with progress_lock:
             task_status_counts[str(event.get("status", ""))] += 1
             completed_tasks += 1
+            current_run_completed_tasks += 1
         print(f"[task] {event['status']} family={event['source_family']} api={event['api_name']} symbol={event['original_symbol']} elapsed={event['elapsed_sec']}", flush=True)
         return event
 
@@ -2912,14 +2928,18 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
         current_batch_task_count = len(batch_tasks)
         current_batch_completed_tasks = 0
         batch_started = datetime.now(UTC)
+        running_row = {**_batch_plan_rows([batch])[0], "status": "running", "started_at": batch_started.isoformat()}
+        batch_status_by_id[batch_id] = running_row
+        _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+        _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
         batch_events = _run_task_batch(batch_tasks)
         batch_finished = datetime.now(UTC)
         batch_row = _summarize_batch_row(batch, batch_events, batch_started, batch_finished)
         batch_status_by_id[batch_id] = batch_row
         if batch_row["status"] == "completed":
             completed_batches += 1
-        _write_batch_report(op_dir, batches, batch_status_by_id)
-        _write_batch_checkpoint(op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
+        _write_batch_report(batch_op_dir, batches, batch_status_by_id)
+        _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
         if batch_row["status"] != "completed" and not continue_on_error:
             break
 
@@ -2927,6 +2947,11 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     if heartbeat_thread is not None:
         heartbeat_thread.join(timeout=max(heartbeat_every_sec, 1.0))
     _emit_progress("lane_completion")
+
+    task_order_by_key = {_build_task_key(family, api_name, params): idx for idx, (family, api_name, params) in enumerate(tasks)}
+    indexed_rows = list(enumerate(rows))
+    indexed_rows.sort(key=lambda item: (task_order_by_key.get(str(item[1].get("task_key_json", "")), len(task_order_by_key)), item[0]))
+    rows = [row for _, row in indexed_rows]
 
     out = Path(output_root)
     out.mkdir(parents=True, exist_ok=True)
