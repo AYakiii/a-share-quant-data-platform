@@ -241,6 +241,79 @@ def test_pending_adapter_batch_is_failed_and_not_skipped_on_resume(tmp_path):
     assert report.loc[0, "status"] == "failed"
 
 
+
+def test_failed_batch_resume_catalog_keeps_one_authoritative_partition_row(tmp_path):
+    calls: list[str] = []
+    fail_once = {"000002": True}
+
+    def indicator(symbol: str):
+        calls.append(symbol)
+        if symbol == "000002" and fail_once["000002"]:
+            fail_once["000002"] = False
+            raise RuntimeError("temporary failure")
+        return _Result(pd.DataFrame({"symbol": [symbol], "value": [1]}))
+
+    kwargs = dict(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=["000001", "000002"],
+        adapter_map={"stock_financial_analysis_indicator": indicator},
+        max_workers=1,
+        symbol_batch_size=2,
+        include_disabled=True,
+    )
+    run_raw_coverage_ingest(**kwargs)
+    first_catalog = pd.read_csv(tmp_path / "raw_ingest_catalog.csv")
+    assert set(first_catalog["status"]) == {"success", "failed"}
+
+    calls.clear()
+    run_raw_coverage_ingest(**kwargs, resume=True)
+    assert calls == ["000002"]
+
+    catalog = pd.read_csv(tmp_path / "raw_ingest_catalog.csv")
+    assert len(catalog[["task_key_json", "partition_json"]].drop_duplicates()) == 2
+    assert len(catalog) == 2
+    assert "failed" not in set(catalog["status"])
+    assert not (
+        catalog.duplicated(subset=["task_key_json", "partition_json"], keep=False)
+        & catalog["status"].isin(["success", "already_exists"])
+    ).any()
+    assert set(catalog["status"]) == {"success"}
+
+    attempts = pd.read_csv(tmp_path / "_operation_review" / "task_attempts.csv")
+    assert len(attempts) >= 4
+    assert {"failed", "already_exists", "success"} <= set(attempts["status"])
+
+
+def test_flat_resume_progress_does_not_restore_hybrid_counts(tmp_path):
+    calls: list[str] = []
+
+    def indicator(symbol: str):
+        calls.append(symbol)
+        return _Result()
+
+    kwargs = dict(
+        output_root=str(tmp_path),
+        families=["financial_fundamental"],
+        selected_api_names=["stock_financial_analysis_indicator"],
+        symbols=["000001"],
+        adapter_map={"stock_financial_analysis_indicator": indicator},
+        max_workers=1,
+        symbol_batch_size=0,
+        include_disabled=True,
+    )
+    run_raw_coverage_ingest(**kwargs)
+    calls.clear()
+    run_raw_coverage_ingest(**kwargs, resume=True)
+
+    assert calls == []
+    live = json.loads((tmp_path / "_operation_review" / "live_progress.json").read_text(encoding="utf-8"))
+    assert live["completed_tasks"] <= live["total_tasks"]
+    assert live["completion_pct"] == 100
+    assert live["pending_or_running_tasks"] >= 0
+
+
 def test_existing_partition_skip_and_partial_partition_state(tmp_path):
     calls = {"fhps": 0}
 

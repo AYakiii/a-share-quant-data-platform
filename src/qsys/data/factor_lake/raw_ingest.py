@@ -632,20 +632,47 @@ def _completed_task_keys_from_catalog(existing: pd.DataFrame) -> set[str]:
 
 
 def _merge_catalog_rows(existing: pd.DataFrame, new_rows: list[dict[str, object]], resume: bool) -> pd.DataFrame:
-    """Merge prior and new catalog rows without unbounded duplicate growth."""
+    """Merge prior and new catalog rows into one authoritative row per partition."""
     new_df = pd.DataFrame(new_rows)
     if not resume or existing.empty:
         merged = new_df
-    elif new_df.empty or "task_key_json" not in new_df.columns:
+    elif new_df.empty:
         merged = existing.copy()
     else:
-        rerun_keys = {str(k) for k in new_df["task_key_json"].fillna("").astype(str) if str(k)}
         prior = existing.copy()
-        if "task_key_json" in prior.columns and rerun_keys:
-            prior = prior[~prior["task_key_json"].fillna("").astype(str).isin(rerun_keys)]
-        merged = pd.concat([prior, new_df], ignore_index=True, sort=False)
-    if not merged.empty and {"task_key_json", "partition_json", "status"} <= set(merged.columns):
-        merged = merged.drop_duplicates(subset=["task_key_json", "partition_json", "status"], keep="last")
+        prior["_catalog_is_new"] = False
+        prior["_catalog_order"] = range(len(prior))
+        current = new_df.copy()
+        current["_catalog_is_new"] = True
+        current["_catalog_order"] = range(len(prior), len(prior) + len(current))
+        merged = pd.concat([prior, current], ignore_index=True, sort=False)
+
+    key_cols = ["task_key_json", "partition_json"]
+    if not merged.empty and set(key_cols) <= set(merged.columns):
+        if "_catalog_is_new" not in merged.columns:
+            merged["_catalog_is_new"] = True
+        if "_catalog_order" not in merged.columns:
+            merged["_catalog_order"] = range(len(merged))
+        merged["task_key_json"] = merged["task_key_json"].fillna("").astype(str)
+        merged["partition_json"] = merged["partition_json"].fillna("").astype(str)
+
+        chosen_rows: list[pd.Series] = []
+        for _, group in merged.groupby(key_cols, sort=False, dropna=False):
+            ordered = group.sort_values("_catalog_order", kind="mergesort")
+            status = ordered.get("status", pd.Series(dtype=str)).fillna("").astype(str)
+            is_new = ordered["_catalog_is_new"].astype(bool)
+            prior_landed = ordered[(~is_new) & status.isin({"success", "empty"})]
+            new_already_exists = ordered[is_new & (status == "already_exists")]
+            new_landed = ordered[is_new & status.isin({"success", "empty"})]
+            if not prior_landed.empty and not new_already_exists.empty and new_landed.empty:
+                chosen_rows.append(prior_landed.iloc[-1])
+            else:
+                chosen_rows.append(ordered.iloc[-1])
+        merged = pd.DataFrame(chosen_rows).reset_index(drop=True)
+
+    drop_cols = [c for c in ["_catalog_is_new", "_catalog_order"] if c in merged.columns]
+    if drop_cols:
+        merged = merged.drop(columns=drop_cols)
     return merged.reset_index(drop=True)
 
 
@@ -2722,20 +2749,21 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     _write_batch_report(batch_op_dir, batches, batch_status_by_id)
     _write_batch_checkpoint(batch_op_dir, plan_fingerprint, fingerprint_payload, batches, batch_status_by_id)
 
-    for completed_row in batch_status_by_id.values():
-        if completed_row.get("status") != "completed":
-            continue
-        completed_tasks += int(completed_row.get("task_count", 0) or 0)
-        for status_name, column_name in (
-            ("success", "success_tasks"),
-            ("empty", "empty_tasks"),
-            ("failed", "failed_tasks"),
-            ("timeout", "timeout_tasks"),
-            ("skipped", "skipped_tasks"),
-            ("already_exists", "already_exists_tasks"),
-            ("pending_adapter", "pending_adapter_tasks"),
-        ):
-            task_status_counts[status_name] += int(completed_row.get(column_name, 0) or 0)
+    if int(symbol_batch_size) > 0:
+        for completed_row in batch_status_by_id.values():
+            if completed_row.get("status") != "completed":
+                continue
+            completed_tasks += int(completed_row.get("task_count", 0) or 0)
+            for status_name, column_name in (
+                ("success", "success_tasks"),
+                ("empty", "empty_tasks"),
+                ("failed", "failed_tasks"),
+                ("timeout", "timeout_tasks"),
+                ("skipped", "skipped_tasks"),
+                ("already_exists", "already_exists_tasks"),
+                ("pending_adapter", "pending_adapter_tasks"),
+            ):
+                task_status_counts[status_name] += int(completed_row.get(column_name, 0) or 0)
     current_run_completed_tasks = 0
 
     current_batch_id: int | None = None
