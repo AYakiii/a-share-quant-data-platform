@@ -524,6 +524,24 @@ def _workload_class_for_api(api_name: str, family: str | None = None) -> str:
     return "other"
 
 
+def _admission_group_for_api(family: str, api_name: str) -> tuple[str, str]:
+    """Return the source/workload group used by scheduler-level admission control."""
+    return (_source_key_for_api(api_name), _workload_class_for_api(api_name, family))
+
+
+def _admission_limit_for_api(family: str, api_name: str) -> int | None:
+    """Return the narrow local inflight cap for a source/workload group, if any."""
+    return SOURCE_WORKLOAD_ADMISSION_OVERRIDES.get(_admission_group_for_api(family, api_name))
+
+
+SOURCE_WORKLOAD_ADMISSION_OVERRIDES: dict[tuple[str, str], int] = {
+    # Narrow scheduler-level guard: SZSE trade-date detail calls can be much
+    # heavier than peer raw lake tasks during resume, so keep at most two
+    # submitted/running while the shared global inflight window remains intact.
+    ("szse", "trade_date_scoped"): 2,
+}
+
+
 SOURCE_CONCURRENCY_OBSERVATION_COLUMNS = [
     "run_id",
     "lane",
@@ -532,6 +550,7 @@ SOURCE_CONCURRENCY_OBSERVATION_COLUMNS = [
     "api_names",
     "inflight_tasks_now",
     "peak_inflight_tasks",
+    "blocked_by_admission_control",
     "completed_tasks",
     "success_tasks",
     "empty_tasks",
@@ -555,6 +574,7 @@ class _SourceConcurrencyGroupState:
     api_names: set[str]
     inflight_tasks_now: int = 0
     peak_inflight_tasks: int = 0
+    blocked_by_admission_control: int = 0
     completed_tasks: int = 0
     status_counts: Counter[str] | None = None
     retry_count: int = 0
@@ -598,6 +618,11 @@ class _SourceConcurrencyObserver:
             state = self._state_for(family, api_name)
             state.retry_count += 1
 
+    def on_blocked_by_admission_control(self, family: str, api_name: str) -> None:
+        with self._lock:
+            state = self._state_for(family, api_name)
+            state.blocked_by_admission_control += 1
+
     def on_complete(self, family: str, api_name: str, status: str, elapsed_sec: float) -> None:
         with self._lock:
             state = self._state_for(family, api_name)
@@ -636,6 +661,7 @@ class _SourceConcurrencyObserver:
                     "api_names": ",".join(sorted(state.api_names)),
                     "inflight_tasks_now": int(state.inflight_tasks_now),
                     "peak_inflight_tasks": int(state.peak_inflight_tasks),
+                    "blocked_by_admission_control": int(state.blocked_by_admission_control),
                     "completed_tasks": int(state.completed_tasks),
                     "success_tasks": int(status_counts.get("success", 0)),
                     "empty_tasks": int(status_counts.get("empty", 0)),
@@ -3145,25 +3171,43 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     time.sleep(request_sleep)
             return batch_events
 
-        task_iter = iter(batch_tasks)
+        queued_tasks = list(batch_tasks)
         pending: dict[object, tuple[str, str, dict[str, str]]] = {}
+        admission_inflight: Counter[tuple[str, str]] = Counter()
+
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             def _submit_until_full() -> None:
-                while len(pending) < max_inflight_tasks:
-                    try:
-                        family, api_name, params = next(task_iter)
-                    except StopIteration:
-                        return
+                nonlocal queued_tasks
+                retained: list[tuple[str, str, dict[str, str]]] = []
+                for task_index, (family, api_name, params) in enumerate(queued_tasks):
+                    if len(pending) >= max_inflight_tasks:
+                        retained.extend(queued_tasks[task_index:])
+                        break
+                    admission_group = _admission_group_for_api(family, api_name)
+                    local_limit = _admission_limit_for_api(family, api_name)
+                    if local_limit is not None and admission_inflight[admission_group] >= local_limit:
+                        source_observer.on_blocked_by_admission_control(family, api_name)
+                        retained.append((family, api_name, params))
+                        continue
                     print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
                     source_observer.on_submit(family, api_name)
+                    admission_inflight[admission_group] += 1
                     pending[ex.submit(_execute_task, family, api_name, params)] = (family, api_name, params)
+                queued_tasks = retained
 
             _submit_until_full()
             stop_batch = False
-            while pending:
+            while pending or (queued_tasks and not stop_batch):
+                if not pending:
+                    _submit_until_full()
+                    if not pending:
+                        break
                 done, _ = wait(set(pending), return_when=FIRST_COMPLETED)
                 for fut in done:
                     task_family, task_api_name, _task_params = pending.pop(fut, ("", "", {}))
+                    admission_group = _admission_group_for_api(task_family, task_api_name) if task_api_name else ("", "")
+                    if admission_group in admission_inflight:
+                        admission_inflight[admission_group] = max(admission_inflight[admission_group] - 1, 0)
                     task_rows = fut.result()
                     event = _summarize_task(task_rows)
                     source_observer.on_complete(task_family, task_api_name, str(event.get("status", "")), float(event.get("elapsed_sec", 0.0) or 0.0))
