@@ -420,6 +420,13 @@ Targeted filters are supported for debug/recovery (not default semantics):
 
 Default policy keeps disabled sources skipped unless `--include-disabled` is set.
 
+Admission-control tuning is configured explicitly at the API level when needed:
+
+    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+      --api-inflight-limits stock_margin_detail_szse=2
+
+The same compact form is accepted by the preheat CLI. In the Colab console, set `API_INFLIGHT_LIMITS` to a Python dict such as `{"stock_margin_detail_szse": 2}`; use `{}` for no API-specific cap. Active API limits are written to `_operation_review/admission_control_manifest.json` for audit and are intentionally excluded from hybrid checkpoint fingerprints so existing staging remains resumable.
+
 Notes for Phase 18A-18 recovery:
 - `raw_ingest_catalog.csv` records the **actual run result** (e.g., success/empty/failed/skipped).
 - `raw_source_acquisition_checklist.csv` records the **default acquisition policy view** (`获取` / `暂停获取` / `排除`) and keeps base schema:

@@ -14,7 +14,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import pandas as pd
 
@@ -529,17 +529,67 @@ def _admission_group_for_api(family: str, api_name: str) -> tuple[str, str]:
     return (_source_key_for_api(api_name), _workload_class_for_api(api_name, family))
 
 
-def _admission_limit_for_api(family: str, api_name: str) -> int | None:
-    """Return the narrow local inflight cap for a source/workload group, if any."""
-    return SOURCE_WORKLOAD_ADMISSION_OVERRIDES.get(_admission_group_for_api(family, api_name))
+def normalize_api_inflight_limits(value: Mapping[str, object] | str | None) -> dict[str, int]:
+    """Normalize optional per-API scheduler inflight caps.
+
+    Empty input means no API-specific admission control. String input uses the
+    compact CLI form: ``api_name=2,another_api=4``.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        parsed: dict[str, object] = {}
+        for item in text.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "=" not in item:
+                raise ValueError("api_inflight_limits entries must use api_name=positive_integer")
+            api_name, raw_limit = item.split("=", 1)
+            api_name = api_name.strip()
+            raw_limit = raw_limit.strip()
+            if not api_name:
+                raise ValueError("api_inflight_limits entries must include a non-empty api_name")
+            if api_name in parsed:
+                raise ValueError(f"duplicate api_inflight_limits entry for {api_name!r}")
+            parsed[api_name] = raw_limit
+        value = parsed
+    if not isinstance(value, Mapping):
+        raise ValueError("api_inflight_limits must be a mapping or compact string")
+
+    normalized: dict[str, int] = {}
+    for raw_api_name, raw_limit in value.items():
+        api_name = str(raw_api_name).strip()
+        if not api_name:
+            raise ValueError("api_inflight_limits keys must be non-empty API names")
+        if api_name in normalized:
+            raise ValueError(f"duplicate api_inflight_limits entry for {api_name!r}")
+        try:
+            if isinstance(raw_limit, bool):
+                raise TypeError
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"api_inflight_limits[{api_name!r}] must be a positive integer") from exc
+        if isinstance(raw_limit, str) and raw_limit.strip() != str(limit):
+            raise ValueError(f"api_inflight_limits[{api_name!r}] must be a positive integer")
+        if limit < 1:
+            raise ValueError(f"api_inflight_limits[{api_name!r}] must be greater than or equal to 1")
+        normalized[api_name] = limit
+    return dict(sorted(normalized.items()))
 
 
-SOURCE_WORKLOAD_ADMISSION_OVERRIDES: dict[tuple[str, str], int] = {
-    # Narrow scheduler-level guard: SZSE trade-date detail calls can be much
-    # heavier than peer raw lake tasks during resume, so keep at most two
-    # submitted/running while the shared global inflight window remains intact.
-    ("szse", "trade_date_scoped"): 2,
-}
+def format_api_inflight_limits_compact(value: Mapping[str, object] | str | None) -> str:
+    """Return normalized API inflight caps as compact CLI text."""
+    limits = normalize_api_inflight_limits(value)
+    return ",".join(f"{api_name}={limit}" for api_name, limit in limits.items())
+
+
+def _admission_limit_for_api(api_name: str, api_inflight_limits: Mapping[str, int]) -> int | None:
+    """Return the configured local inflight cap for an API, if any."""
+    return api_inflight_limits.get(api_name)
 
 
 SOURCE_CONCURRENCY_OBSERVATION_COLUMNS = [
@@ -2881,7 +2931,7 @@ def _check_existing_generic_partition(
     }, family, api_name)]
 
 
-def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw", symbol_batch_size: int = 0, max_inflight_tasks: int | None = None) -> dict:
+def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list[str] | None = None, index_symbols: list[str] | None = None, report_dates: list[str] | None = None, trade_dates: list[str] | None = None, industry_names: list[str] | None = None, concept_names: list[str] | None = None, industry_codes: list[str] | None = None, start_date: str = "20100101", end_date: str = "20101231", adapter_map: dict[str, AdapterFn] | None = None, ak_module: object | None = None, request_sleep: float = 0.0, continue_on_error: bool = True, include_disabled: bool = False, max_workers: int = 2, selected_api_names: list[str] | None = None, resume: bool = False, universe_root: str | Path = "config/factor_sources/acquisition_universe", task_timeout_sec: float | None = None, task_retry_attempts: int = 0, task_retry_sleep_sec: float = 0.0, task_retry_backoff: float = 1.0, task_retry_jitter_sec: float = 0.0, heartbeat_sec: float | None = None, lane_name: str = "raw", symbol_batch_size: int = 0, max_inflight_tasks: int | None = None, api_inflight_limits: Mapping[str, object] | str | None = None) -> dict:
     selected = {x.strip() for x in (selected_api_names or []) if x and x.strip()}
     selected_specs: list[dict[str, str]] = []
     for family in families:
@@ -2953,6 +3003,28 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
     max_inflight_tasks = int(max_inflight_tasks)
     if max_inflight_tasks < max_workers:
         raise ValueError("max_inflight_tasks must be greater than or equal to max_workers")
+    normalized_api_inflight_limits = normalize_api_inflight_limits(api_inflight_limits)
+    active_api_inflight_limits = {
+        api_name: limit
+        for api_name, limit in normalized_api_inflight_limits.items()
+        if any(task_api == api_name for _, task_api, _ in tasks)
+    }
+    (op_dir / "admission_control_manifest.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "lane": lane_name,
+                "max_workers": int(max_workers),
+                "max_inflight_tasks": int(max_inflight_tasks),
+                "api_inflight_limits": active_api_inflight_limits,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     batches = _build_hybrid_batches(tasks, int(symbol_batch_size))
     fingerprint_payload = _build_plan_fingerprint_payload(
@@ -3173,7 +3245,7 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
 
         queued_tasks = list(batch_tasks)
         pending: dict[object, tuple[str, str, dict[str, str]]] = {}
-        admission_inflight: Counter[tuple[str, str]] = Counter()
+        admission_inflight: Counter[str] = Counter()
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             def _submit_until_full() -> None:
@@ -3183,15 +3255,14 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                     if len(pending) >= max_inflight_tasks:
                         retained.extend(queued_tasks[task_index:])
                         break
-                    admission_group = _admission_group_for_api(family, api_name)
-                    local_limit = _admission_limit_for_api(family, api_name)
-                    if local_limit is not None and admission_inflight[admission_group] >= local_limit:
+                    local_limit = _admission_limit_for_api(api_name, normalized_api_inflight_limits)
+                    if local_limit is not None and admission_inflight[api_name] >= local_limit:
                         source_observer.on_blocked_by_admission_control(family, api_name)
                         retained.append((family, api_name, params))
                         continue
                     print(f"[task] start family={family} api={api_name} symbol={params.get('symbol','')}", flush=True)
                     source_observer.on_submit(family, api_name)
-                    admission_inflight[admission_group] += 1
+                    admission_inflight[api_name] += 1
                     pending[ex.submit(_execute_task, family, api_name, params)] = (family, api_name, params)
                 queued_tasks = retained
 
@@ -3205,9 +3276,8 @@ def run_raw_coverage_ingest(output_root: str, families: list[str], symbols: list
                 done, _ = wait(set(pending), return_when=FIRST_COMPLETED)
                 for fut in done:
                     task_family, task_api_name, _task_params = pending.pop(fut, ("", "", {}))
-                    admission_group = _admission_group_for_api(task_family, task_api_name) if task_api_name else ("", "")
-                    if admission_group in admission_inflight:
-                        admission_inflight[admission_group] = max(admission_inflight[admission_group] - 1, 0)
+                    if task_api_name in admission_inflight:
+                        admission_inflight[task_api_name] = max(admission_inflight[task_api_name] - 1, 0)
                     task_rows = fut.result()
                     event = _summarize_task(task_rows)
                     source_observer.on_complete(task_family, task_api_name, str(event.get("status", "")), float(event.get("elapsed_sec", 0.0) or 0.0))

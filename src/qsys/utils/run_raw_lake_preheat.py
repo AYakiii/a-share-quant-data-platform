@@ -12,6 +12,7 @@ import akshare as ak
 import pandas as pd
 
 from qsys.data.factor_lake.raw_ingest import (
+    format_api_inflight_limits_compact,
     API_POLICY_METADATA,
     COVERAGE_API_SPECS,
     EXCLUDED_APIS,
@@ -503,6 +504,7 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
             lane_name=lane,
             symbol_batch_size=args.symbol_batch_size,
             max_inflight_tasks=args.max_inflight_tasks,
+            api_inflight_limits=args.api_inflight_limits,
             ak_module=ak,
         )
         rows = result.get("rows", [])
@@ -524,6 +526,7 @@ def run_lanes(args: argparse.Namespace, universe: PreheatUniverse, plan_rows: li
                 "request_sleep": cfg.request_sleep,
                 "task_timeout_sec": cfg.task_timeout_sec,
                 "include_disabled": cfg.include_disabled,
+                "api_inflight_limits": format_api_inflight_limits_compact(args.api_inflight_limits),
                 "requested_resume": bool(args.resume),
                 "effective_resume": effective_resume,
                 "started_at": started.isoformat(),
@@ -638,6 +641,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--heartbeat-sec", type=float, default=30)
     parser.add_argument("--symbol-batch-size", type=int, default=180)
     parser.add_argument("--max-inflight-tasks", type=int, default=128)
+    parser.add_argument("--api-inflight-limits", default="", help="Per-API inflight caps as api_name=2,another_api=4")
     parser.add_argument("--task-timeout-sec", type=float, default=120)
     parser.add_argument("--manual-selected-task-timeout-sec", type=float, default=180)
     parser.add_argument("--heavy-task-timeout-sec", type=float, default=300)
@@ -672,6 +676,7 @@ def main(argv: list[str] | None = None, *, ak_module: object | None = None, runn
     parser = build_parser()
     args = parser.parse_args(argv)
     _normalize_legacy_args(args)
+    args.api_inflight_limits = format_api_inflight_limits_compact(args.api_inflight_limits)
     reject_drive_output_root(args.output_root)
     skeleton_plan = build_preheat_plan(args, PreheatUniverse())
     universe = discover_universe_for_plan(args, skeleton_plan, ak_module=ak_module)

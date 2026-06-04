@@ -60,6 +60,7 @@ def _args(tmp_path: Path, **overrides):
         heartbeat_sec=30,
         symbol_batch_size=180,
         max_inflight_tasks=128,
+        api_inflight_limits="",
         task_timeout_sec=120,
         manual_selected_task_timeout_sec=180,
         heavy_task_timeout_sec=300,
@@ -256,6 +257,7 @@ def test_hybrid_batch_cli_defaults_and_forwarding(tmp_path):
     ])
     assert parsed.symbol_batch_size == 180
     assert parsed.max_inflight_tasks == 128
+    assert parsed.api_inflight_limits == ""
 
     args = _args(tmp_path, only_apis="stock_zcfz_em")
     universe = _universe(tmp_path)
@@ -269,7 +271,7 @@ def test_hybrid_batch_cli_defaults_and_forwarding(tmp_path):
     preheat.run_lanes(args, universe, plan, runner=runner)
     assert calls[0]["symbol_batch_size"] == 180
     assert calls[0]["max_inflight_tasks"] == 128
-
+    assert calls[0]["api_inflight_limits"] == ""
 
 
 def test_run_lanes_uses_lane_scoped_hybrid_checkpoints_for_effective_resume(monkeypatch, tmp_path):
@@ -706,3 +708,18 @@ def test_run_lanes_raises_when_all_selected_tasks_are_pending_adapter(tmp_path):
 
     with pytest.raises(RuntimeError, match="all selected tasks resolved to pending_adapter; AkShare module wiring may be missing"):
         preheat.run_lanes(args, universe, plan, runner=runner)
+
+
+def test_preheat_cli_forwards_api_inflight_limits_and_records_lane_manifest(tmp_path):
+    args = _args(tmp_path, only_apis="stock_zcfz_em", api_inflight_limits="stock_zcfz_em=2")
+    universe = _universe(tmp_path)
+    plan = [{"source_family": "financial_fundamental", "api_name": "stock_zcfz_em", "lane": "main", "enabled": True, "selected": True}]
+    calls = []
+
+    def runner(**kwargs):
+        calls.append(kwargs)
+        return {"rows": []}
+
+    manifests = preheat.run_lanes(args, universe, plan, runner=runner)
+    assert calls[0]["api_inflight_limits"] == "stock_zcfz_em=2"
+    assert manifests[0]["api_inflight_limits"] == "stock_zcfz_em=2"
