@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,13 +11,29 @@ from typing import Any
 import pandas as pd
 
 from qsys.data.factor_lake.raw_compact import (
-    RAW_RELATIVE_ROOT,
+    COMPACT_ROOT_PARENT,
+    DRIVE_RAW_RELATIVE_ROOT,
+    LOCAL_COMPACT_ASSET_RELATIVE_ROOT,
     REVIEW_REQUIRED_BUCKET_KINDS,
+    assert_path_within,
     compact_raw_lake,
     file_sha256,
     load_manifest,
+    resolve_compact_parent,
+    validate_promotion_name,
     verify_parquet_asset,
 )
+
+IMMUTABLE_CATALOG_ARTIFACTS = [
+    "compact_manifest.json",
+    "compact_qa_report.csv",
+    "raw_asset_inventory.csv",
+    "compact_source_lineage.csv",
+    "known_gap_manifest.json",
+    "raw_compact_classification.csv",
+    "READY_FOR_PROMOTION.json",
+    "_LOCAL_COMPACT_READY.txt",
+]
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -24,23 +41,62 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _require_drive_root(path: str | Path) -> Path:
-    root = Path(path)
+    root = Path(path).resolve()
     if not root.exists() or not root.is_dir():
         raise FileNotFoundError(f"Drive DWH root is unavailable: {root}")
+    # Colab Drive-like paths must be backed by the mounted /content/gdrive root.
+    try:
+        root.relative_to(Path("/content/gdrive"))
+    except ValueError:
+        return root
+    if not os.path.ismount("/content/gdrive"):
+        raise FileNotFoundError("Drive root is under /content/gdrive but /content/gdrive is not an active mountpoint; mount Drive explicitly before running")
     return root
 
 
+def _resolve_package_root(package_root: str | Path) -> Path:
+    return assert_path_within(Path(package_root), resolve_compact_parent(), label="package_root")
+
+
+def _safe_manifest_relative_path(relative_path: str, expected_root: Path) -> Path:
+    rel = Path(relative_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"unsafe compact asset relative path: {relative_path}")
+    if rel.parts[: len(expected_root.parts)] != expected_root.parts:
+        raise ValueError(f"compact asset must be under {expected_root}: {relative_path}")
+    return rel
+
+
+def _package_asset_path(package_root: Path, relative_path: str) -> Path:
+    rel = _safe_manifest_relative_path(relative_path, LOCAL_COMPACT_ASSET_RELATIVE_ROOT)
+    return assert_path_within(package_root / rel, package_root, label="local compact asset")
+
+
 def _drive_raw_path(drive_root: Path, relative_path: str) -> Path:
-    return drive_root / Path(relative_path)
+    rel = _safe_manifest_relative_path(relative_path, DRIVE_RAW_RELATIVE_ROOT)
+    raw_root = drive_root / DRIVE_RAW_RELATIVE_ROOT
+    return assert_path_within(drive_root / rel, raw_root, label="Drive Raw target")
+
+
+def _catalog_dir(drive_root: Path, promotion_name: str) -> Path:
+    name = validate_promotion_name(promotion_name)
+    return drive_root / "catalog" / "promotions" / name
+
+
+def _validate_local_package(package_root: Path, manifest: dict[str, Any]) -> None:
+    for asset in manifest.get("compact_assets", []):
+        src = _package_asset_path(package_root, str(asset["relative_path"]))
+        verify_parquet_asset(src, expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
 
 
 def build_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -> list[dict[str, Any]]:
-    manifest = load_manifest(package_root)
+    pkg = _resolve_package_root(package_root)
+    manifest = load_manifest(pkg)
     drive_root = _require_drive_root(drive_dwh_root)
     rows: list[dict[str, Any]] = []
     for asset in manifest.get("compact_assets", []):
         rel = str(asset["relative_path"])
-        src = Path(package_root) / rel
+        src = _package_asset_path(pkg, rel)
         dst = _drive_raw_path(drive_root, rel)
         src_sha = file_sha256(src)
         if not dst.exists():
@@ -56,8 +112,9 @@ def build_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -
 
 
 def write_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -> list[dict[str, Any]]:
-    rows = build_collision_plan(package_root, drive_dwh_root)
-    pd.DataFrame(rows, columns=["relative_path", "source_path", "drive_path", "source_sha256", "drive_sha256", "exists_on_drive", "identical", "action"]).to_csv(Path(package_root) / "drive_collision_plan.csv", index=False, encoding="utf-8-sig")
+    pkg = _resolve_package_root(package_root)
+    rows = build_collision_plan(pkg, drive_dwh_root)
+    pd.DataFrame(rows, columns=["relative_path", "source_path", "drive_path", "source_sha256", "drive_sha256", "exists_on_drive", "identical", "action"]).to_csv(pkg / "drive_collision_plan.csv", index=False, encoding="utf-8-sig")
     return rows
 
 
@@ -79,6 +136,7 @@ def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]
         "acquisition_window": manifest.get("acquisition_window", {}),
         "compact_assets": assets,
         "total_rows": int(manifest.get("total_rows", 0)),
+        "failed_backlog_task_count": int(manifest.get("failed_backlog_task_count", 0)),
         "failed_backlog_tasks": manifest.get("failed_backlog_tasks", []),
         "known_gap_policy": manifest.get("known_gap_policy", ""),
         "blocked_collisions": blocked,
@@ -90,8 +148,9 @@ def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]
 
 def prepare(args: argparse.Namespace) -> int:
     drive_root = _require_drive_root(args.drive_dwh_root)
-    manifest = compact_raw_lake(args.output_root, promotion_name=args.promotion_name, start_date=args.start_date, end_date=args.end_date)
-    package_root = Path(manifest["package_root"])
+    promotion_name = validate_promotion_name(args.promotion_name) if args.promotion_name is not None else None
+    manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package))
+    package_root = _resolve_package_root(manifest["package_root"])
     collisions = write_collision_plan(package_root, drive_root)
     ready = _ready_payload(manifest, collisions)
     _write_json(package_root / "READY_FOR_PROMOTION.json", ready)
@@ -110,43 +169,69 @@ def _parse_reviewed(value: str | None) -> set[str]:
     return {part.strip() for part in (value or "").split(",") if part.strip()}
 
 
-def _copy_audit_artifacts(package_root: Path, drive_root: Path, promotion_name: str) -> None:
-    target = drive_root / "catalog" / "promotions" / promotion_name
+def _validate_ready_against_manifest(ready: dict[str, Any], manifest: dict[str, Any], package_root: Path) -> None:
+    if ready.get("promotion_name") != manifest.get("promotion_name"):
+        raise ValueError("READY_FOR_PROMOTION.json promotion_name does not match compact_manifest.json")
+    if Path(str(ready.get("package_root", ""))).resolve() != package_root.resolve() or Path(str(manifest.get("package_root", ""))).resolve() != package_root.resolve():
+        raise ValueError("READY_FOR_PROMOTION.json package_root does not match compact_manifest.json and CLI package root")
+    if ready.get("ready_for_promotion") is not True:
+        raise ValueError("READY_FOR_PROMOTION.json does not mark this package ready_for_promotion=true")
+
+
+def _copy_immutable_file(src: Path, dst: Path) -> str:
+    if not src.exists():
+        return "missing_source"
+    if dst.exists():
+        if file_sha256(src) == file_sha256(dst):
+            return "skip_identical"
+        raise FileExistsError(f"non-identical Drive catalog artifact overwrite is forbidden: {dst}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return "copy_new"
+
+
+
+def _check_immutable_catalog_artifacts(package_root: Path, drive_root: Path, promotion_name: str) -> None:
+    target = _catalog_dir(drive_root, promotion_name)
+    for filename in IMMUTABLE_CATALOG_ARTIFACTS:
+        src = package_root / filename
+        dst = target / filename
+        if src.exists() and dst.exists() and file_sha256(src) != file_sha256(dst):
+            raise FileExistsError(f"non-identical Drive catalog artifact overwrite is forbidden: {dst}")
+
+def _copy_audit_artifacts(package_root: Path, drive_root: Path, promotion_name: str, collision_plan_path: Path) -> dict[str, str]:
+    target = _catalog_dir(drive_root, promotion_name)
     target.mkdir(parents=True, exist_ok=True)
-    for filename in [
-        "compact_manifest.json",
-        "compact_qa_report.csv",
-        "raw_asset_inventory.csv",
-        "compact_source_lineage.csv",
-        "known_gap_manifest.json",
-        "raw_compact_classification.csv",
-        "drive_collision_plan.csv",
-        "READY_FOR_PROMOTION.json",
-        "_LOCAL_COMPACT_READY.txt",
-        "promotion_report.json",
-    ]:
+    actions: dict[str, str] = {}
+    for filename in IMMUTABLE_CATALOG_ARTIFACTS:
         src = package_root / filename
         if src.exists():
-            shutil.copy2(src, target / filename)
+            actions[filename] = _copy_immutable_file(src, target / filename)
+    actions[collision_plan_path.name] = _copy_immutable_file(collision_plan_path, target / collision_plan_path.name)
+    return actions
 
 
 def promote(args: argparse.Namespace) -> int:
-    package_root = Path(args.package_root)
+    package_root = _resolve_package_root(args.package_root)
     drive_root = _require_drive_root(args.drive_dwh_root)
     ready = _load_ready(package_root)
     manifest = load_manifest(package_root)
-    promotion_name = str(manifest["promotion_name"])
+    promotion_name = validate_promotion_name(str(manifest["promotion_name"]))
+    _validate_ready_against_manifest(ready, manifest, package_root)
     if not args.confirm_promotion:
         raise ValueError("--confirm-promotion is required")
     if args.confirm_promotion != promotion_name:
         raise ValueError("--confirm-promotion must exactly match promotion_name")
-    if not ready.get("ready_for_promotion"):
-        raise ValueError("READY_FOR_PROMOTION.json does not mark this package ready_for_promotion=true")
-    required_review = set(ready.get("review_required_bucket_kinds", []))
+
+    _validate_local_package(package_root, manifest)
+
+    required_review = sorted({a.get("bucket_kind") for a in manifest.get("compact_assets", []) if a.get("bucket_kind") in REVIEW_REQUIRED_BUCKET_KINDS})
     allowed_review = _parse_reviewed(args.allow_reviewed_bucket_kinds)
-    missing_review = sorted(required_review - allowed_review)
+    missing_review = sorted(set(required_review) - allowed_review)
     if missing_review:
         raise ValueError(f"bucket kinds require explicit review opt-in: {missing_review}")
+
+    _check_immutable_catalog_artifacts(package_root, drive_root, promotion_name)
 
     collisions = write_collision_plan(package_root, drive_root)
     blocked = [r for r in collisions if r["action"] == "block_non_identical"]
@@ -158,6 +243,8 @@ def promote(args: argparse.Namespace) -> int:
     for row in collisions:
         src = Path(row["source_path"])
         dst = Path(row["drive_path"])
+        _package_asset_path(package_root, row["relative_path"])
+        _drive_raw_path(drive_root, row["relative_path"])
         if row["action"] == "copy_new":
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
@@ -170,16 +257,23 @@ def promote(args: argparse.Namespace) -> int:
     for asset in manifest.get("compact_assets", []):
         verify_parquet_asset(_drive_raw_path(drive_root, asset["relative_path"]), expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
 
-    report = {"promotion_name": promotion_name, "promoted_at": datetime.now(UTC).isoformat(), "copied": copied, "skipped_identical": skipped, "verified_assets": len(manifest.get("compact_assets", []))}
-    _write_json(package_root / "promotion_report.json", report)
-    _copy_audit_artifacts(package_root, drive_root, promotion_name)
+    attempt_name = datetime.now(UTC).strftime("promotion_attempt_%Y%m%dT%H%M%S%fZ")
+    report = {"promotion_name": promotion_name, "promoted_at": datetime.now(UTC).isoformat(), "copied": copied, "skipped_identical": skipped, "verified_assets": len(manifest.get("compact_assets", [])), "review_required_bucket_kinds": required_review}
+    report_path = package_root / f"{attempt_name}.json"
+    collision_attempt_path = package_root / f"{attempt_name}_drive_collision_plan.csv"
+    pd.DataFrame(collisions).to_csv(collision_attempt_path, index=False, encoding="utf-8-sig")
+    catalog_actions = _copy_audit_artifacts(package_root, drive_root, promotion_name, collision_attempt_path)
+    report["drive_catalog_actions"] = catalog_actions
+    _write_json(report_path, report)
+    _copy_immutable_file(report_path, _catalog_dir(drive_root, promotion_name) / report_path.name)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
 
 def audit(args: argparse.Namespace) -> int:
     drive_root = _require_drive_root(args.drive_dwh_root)
-    promo_dir = drive_root / "catalog" / "promotions" / args.promotion_name
+    promotion_name = validate_promotion_name(args.promotion_name)
+    promo_dir = _catalog_dir(drive_root, promotion_name)
     manifest = json.loads((promo_dir / "compact_manifest.json").read_text(encoding="utf-8"))
     summary: dict[str, int] = {}
     for asset in manifest.get("compact_assets", []):
@@ -202,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--promotion-name")
     p.add_argument("--start-date")
     p.add_argument("--end-date")
+    p.add_argument("--replace-local-package", action="store_true", help=f"Replace an existing local package under {COMPACT_ROOT_PARENT}; never affects Drive")
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("promote", help="Human-gated Drive promotion of a ready compact package.")

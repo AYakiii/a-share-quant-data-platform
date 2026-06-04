@@ -458,7 +458,7 @@ PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
 
 `--report-dates` and `--auto-quarter-end-report-dates` are mutually exclusive, and omitting both preserves the previous no-default behavior.
 
-Prepare is local-only for compact parquet assets. It scans already-landed Raw parquet files under `<output-root>/data/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
+Prepare is local-only for compact parquet assets. It scans already-landed local ingest Raw parquet files under `<output-root>/data/raw/akshare`, writes compact package assets under `<package-root>/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
@@ -466,7 +466,7 @@ PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
   --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data
 ```
 
-Promote is the only command that writes Drive Raw assets. It requires exact human confirmation, immediately rebuilds the collision plan, refuses every non-identical overwrite, copies only new files, skips byte-identical files, reopens all promoted parquet files from Drive, and verifies rows, columns, and SHA-256. Buckets classified as `scope` or `snapshot` require explicit operator opt-in via `--allow-reviewed-bucket-kinds`.
+Promote is the only command that writes Drive Raw assets. Canonical Drive Raw storage is `<drive-dwh-root>/raw/akshare/...`; the workflow must never create `<drive-dwh-root>/data/raw/akshare/...`. Promotion requires exact human confirmation, validates the local package before the first Drive write, immediately rebuilds the collision plan, refuses every non-identical Raw or catalog artifact overwrite, copies only new files, skips byte-identical files, reopens all promoted parquet files from Drive, and verifies rows, columns, and SHA-256. Buckets classified as `scope` or `snapshot` require explicit operator opt-in via `--allow-reviewed-bucket-kinds`.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli promote \
@@ -483,4 +483,4 @@ PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli audit \
   --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data
 ```
 
-Raw compact is inventory-driven and lineage-driven: it uses generic partition keys such as `snapshot`, `year`, `trade_date`, `report_date`, `date`, `start_date`/`end_date`, and `since_date`. It intentionally avoids API-name-specific compact rules, parquet-body business-date repartitioning, normalization, silent deduplication, row deletion, and column deletion.
+Raw compact is inventory-driven and lineage-driven: it uses generic partition keys such as `snapshot`, `year`, `trade_date`, `report_date`, `date`, `start_date`/`end_date`, and `since_date`. It intentionally avoids API-name-specific compact rules, parquet-body business-date repartitioning, normalization, silent deduplication, row deletion, and column deletion. Failed-task backlog counts are task-level rows from `raw_ingest_catalog.csv`, not API-level recovery summaries.

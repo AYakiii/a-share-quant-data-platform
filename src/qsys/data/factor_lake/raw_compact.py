@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -10,10 +11,30 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-RAW_RELATIVE_ROOT = Path("data") / "raw" / "akshare"
+LOCAL_INGEST_RAW_RELATIVE_ROOT = Path("data") / "raw" / "akshare"
+LOCAL_COMPACT_ASSET_RELATIVE_ROOT = Path("raw") / "akshare"
+DRIVE_RAW_RELATIVE_ROOT = Path("raw") / "akshare"
+# Backward-compatible alias for callers/tests that imported the original name.
+RAW_RELATIVE_ROOT = LOCAL_INGEST_RAW_RELATIVE_ROOT
 COMPACT_ROOT_PARENT = Path("outputs") / "raw_acquisition_compact"
+SAFE_PROMOTION_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 TIME_KEYS = ("snapshot", "year", "trade_date", "report_date", "date", "start_date", "end_date", "since_date")
 REVIEW_REQUIRED_BUCKET_KINDS = {"scope", "snapshot"}
+FAILED_BACKLOG_STATUSES = {"failed", "timeout", "pending_adapter", "skipped"}
+FAILED_BACKLOG_FIELDS = [
+    "source_family",
+    "api_name",
+    "status",
+    "original_symbol",
+    "akshare_symbol",
+    "params_json",
+    "partition_json",
+    "task_key_json",
+    "error_type",
+    "error_message",
+    "elapsed_sec",
+    "output_path",
+]
 
 
 @dataclass(frozen=True)
@@ -57,6 +78,28 @@ def file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def validate_promotion_name(name: str) -> str:
+    """Validate a promotion name as a conservative filesystem slug."""
+    text = str(name or "").strip()
+    if not text or text in {"."} or ".." in text or not SAFE_PROMOTION_NAME_RE.fullmatch(text):
+        raise ValueError("promotion_name must match [A-Za-z0-9._-]+ and must not be empty, absolute, contain '..', or contain path separators")
+    if Path(text).is_absolute() or ".." in Path(text).parts or "/" in text or "\\" in text:
+        raise ValueError("promotion_name must be a safe slug without absolute paths, '..', or path separators")
+    return text
+
+
+def resolve_compact_parent() -> Path:
+    """Resolve the configured local compact parent."""
+    return COMPACT_ROOT_PARENT.resolve()
+
+
+def assert_path_within(path: str | Path, parent: str | Path, *, label: str) -> Path:
+    """Resolve and assert that a path remains within a parent directory."""
+    resolved = Path(path).resolve()
+    resolved.relative_to(Path(parent).resolve())
+    return resolved
 
 
 def parse_partition_segments(relative_path: str | Path) -> dict[str, str]:
@@ -107,7 +150,7 @@ def classify_bucket(partitions: dict[str, str], *, start_date: str, end_date: st
 def scan_raw_assets(output_root: str | Path) -> list[RawAsset]:
     """Scan already-landed Raw parquet files below <output_root>/data/raw/akshare."""
     root = Path(output_root)
-    raw_root = root / RAW_RELATIVE_ROOT
+    raw_root = root / LOCAL_INGEST_RAW_RELATIVE_ROOT
     if not raw_root.exists():
         return []
     assets: list[RawAsset] = []
@@ -146,35 +189,43 @@ def classify_raw_assets(assets: Iterable[RawAsset], *, start_date: str, end_date
 
 
 def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str) -> Path:
-    return package_root / RAW_RELATIVE_ROOT / source_family / api_name / f"{bucket_kind}={bucket_value}" / "data.parquet"
+    return package_root / LOCAL_COMPACT_ASSET_RELATIVE_ROOT / source_family / api_name / f"{bucket_kind}={bucket_value}" / "data.parquet"
 
 
 def _infer_window(output_root: Path) -> tuple[str, str]:
     text = output_root.name
-    import re
-
     m = re.search(r"(\d{8})_(\d{8})", text)
     if m:
         return m.group(1), m.group(2)
     return "unknown", "unknown"
 
 
-def _read_failed_backlog(output_root: Path) -> list[dict[str, Any]]:
-    candidates = [
-        output_root / "_operation_review" / "recovery_tasks.csv",
-        output_root / "p0_recovery_tasks.csv",
-        output_root / "recovery_tasks.csv",
-    ]
-    frames: list[pd.DataFrame] = []
-    for path in candidates:
-        if path.exists():
-            frame = pd.read_csv(path)
-            if not frame.empty:
-                frame["backlog_source"] = str(path.relative_to(output_root))
-                frames.append(frame)
-    if not frames:
+def _read_api_recovery_summary(output_root: Path) -> list[dict[str, Any]]:
+    path = output_root / "_operation_review" / "recovery_tasks.csv"
+    if not path.exists():
         return []
-    return pd.concat(frames, ignore_index=True).fillna("").to_dict("records")
+    frame = pd.read_csv(path)
+    if frame.empty:
+        return []
+    return frame.fillna("").to_dict("records")
+
+
+def _read_failed_backlog(output_root: Path) -> list[dict[str, Any]]:
+    """Read task-level failed backlog from raw_ingest_catalog.csv only."""
+    path = output_root / "raw_ingest_catalog.csv"
+    if not path.exists():
+        return []
+    frame = pd.read_csv(path)
+    if frame.empty or "status" not in frame.columns:
+        return []
+    status = frame["status"].fillna("").astype(str)
+    backlog = frame[status.isin(FAILED_BACKLOG_STATUSES)].copy()
+    if backlog.empty:
+        return []
+    for col in FAILED_BACKLOG_FIELDS:
+        if col not in backlog.columns:
+            backlog[col] = ""
+    return backlog[FAILED_BACKLOG_FIELDS].fillna("").to_dict("records")
 
 
 def _write_empty_or_rows_csv(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
@@ -184,7 +235,15 @@ def _write_empty_or_rows_csv(path: Path, rows: list[dict[str, Any]], columns: li
     frame.to_csv(path, index=False, encoding="utf-8-sig")
 
 
-def compact_raw_lake(output_root: str | Path, package_root: str | Path | None = None, *, promotion_name: str | None = None, start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+def compact_raw_lake(
+    output_root: str | Path,
+    package_root: str | Path | None = None,
+    *,
+    promotion_name: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    replace_existing: bool = False,
+) -> dict[str, Any]:
     """Compact local Raw parquet files into one parquet per source_family/api_name/bucket.
 
     The compaction is inventory-driven and lineage-driven. It does not deduplicate,
@@ -194,9 +253,14 @@ def compact_raw_lake(output_root: str | Path, package_root: str | Path | None = 
     inferred_start, inferred_end = _infer_window(out_root)
     start = start_date or inferred_start
     end = end_date or inferred_end
-    name = promotion_name or f"raw_lake_{out_root.name}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-    pkg = Path(package_root) if package_root is not None else COMPACT_ROOT_PARENT / name
+    name = validate_promotion_name(promotion_name or f"raw_lake_{out_root.name}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+    compact_parent = resolve_compact_parent()
+    compact_parent.mkdir(parents=True, exist_ok=True)
+    pkg = Path(package_root) if package_root is not None else compact_parent / name
+    pkg = assert_path_within(pkg, compact_parent, label="package_root")
     if pkg.exists():
+        if not replace_existing:
+            raise FileExistsError(f"local compact package already exists: {pkg}")
         shutil.rmtree(pkg)
     pkg.mkdir(parents=True, exist_ok=True)
 
@@ -254,16 +318,27 @@ def compact_raw_lake(output_root: str | Path, package_root: str | Path | None = 
         manifest_assets.append({"relative_path": rel_dst, "source_family": source_family, "api_name": api_name, "bucket_kind": bucket_kind, "bucket_value": bucket_value, "rows": rows, "columns": columns, "column_count": len(columns), "sha256": digest, "source_files": source_files})
 
     failed_backlog = _read_failed_backlog(out_root)
-    known_gap_manifest = {"policy": "failed_tasks_preserved_as_recovery_backlog", "failed_backlog_tasks": failed_backlog}
+    api_recovery_summary = _read_api_recovery_summary(out_root)
+    known_gap_manifest = {
+        "policy": "task_level_failed_statuses_preserved_from_raw_ingest_catalog",
+        "failed_backlog_task_count": len(failed_backlog),
+        "failed_backlog_tasks": failed_backlog,
+        "api_recovery_summary": api_recovery_summary,
+    }
     manifest: dict[str, Any] = {
         "promotion_name": name,
         "package_root": str(pkg),
         "output_root": str(out_root),
         "acquisition_window": {"start_date": start, "end_date": end},
         "created_at": datetime.now(UTC).isoformat(),
+        "local_ingest_raw_relative_root": str(LOCAL_INGEST_RAW_RELATIVE_ROOT),
+        "local_compact_asset_relative_root": str(LOCAL_COMPACT_ASSET_RELATIVE_ROOT),
+        "drive_raw_relative_root": str(DRIVE_RAW_RELATIVE_ROOT),
         "compact_assets": manifest_assets,
         "total_rows": int(sum(int(a["rows"]) for a in manifest_assets)),
+        "failed_backlog_task_count": len(failed_backlog),
         "failed_backlog_tasks": failed_backlog,
+        "api_recovery_summary": api_recovery_summary,
         "known_gap_policy": known_gap_manifest["policy"],
         "review_required_bucket_kinds": sorted({a["bucket_kind"] for a in manifest_assets if a["bucket_kind"] in REVIEW_REQUIRED_BUCKET_KINDS}),
     }

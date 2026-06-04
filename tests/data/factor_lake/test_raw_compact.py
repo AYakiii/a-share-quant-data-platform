@@ -30,13 +30,14 @@ def test_classifies_trade_date_report_date_same_year_range_cross_year_snapshot_s
     assert classify_bucket({"symbol": "000001"}, start_date="20220101", end_date="20241231") == ("scope", "run_20220101_20241231")
 
 
-def test_compact_preserves_rows_columns_writes_one_parquet_and_lineage(tmp_path):
+def test_compact_preserves_rows_columns_writes_one_parquet_and_lineage(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     root = tmp_path / "wave_20220101_20241231"
     _raw(root, family="fam", api="api", parts={"trade_date": "20220103"}, rows=2)
     _raw(root, family="fam", api="api", parts={"trade_date": "20220506"}, rows=3)
     _raw(root, family="fam", api="api", parts={"trade_date": "20230103"}, rows=1)
-    pkg = tmp_path / "pkg"
-    manifest = compact_raw_lake(root, pkg, promotion_name="promo")
+    pkg = Path("outputs/raw_acquisition_compact/promo").resolve()
+    manifest = compact_raw_lake(root, promotion_name="promo")
     assets = manifest["compact_assets"]
     assert len([a for a in assets if a["source_family"] == "fam" and a["api_name"] == "api"]) == 2
     year2022 = next(a for a in assets if a["bucket_value"] == "2022")
@@ -60,3 +61,34 @@ def test_scan_raw_assets_parses_key_value_segments(tmp_path):
     _raw(root, parts={"symbol": "000001", "year": "2024"})
     assets = scan_raw_assets(root)
     assert assets[0].partitions == {"symbol": "000001", "year": "2024"}
+
+
+def test_failed_backlog_uses_task_level_raw_ingest_catalog_not_api_summary(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "wave_20220101_20241231"
+    _raw(root, parts={"trade_date": "20220103"})
+    rows = []
+    for idx, status in enumerate(["failed", "timeout", "pending_adapter", "skipped", "success"], start=1):
+        rows.append({
+            "source_family": "fam",
+            "api_name": "api",
+            "status": status,
+            "original_symbol": f"00000{idx}",
+            "akshare_symbol": f"00000{idx}",
+            "params_json": "{}",
+            "partition_json": "{}",
+            "task_key_json": f"task-{idx}",
+            "error_type": "err" if status != "success" else "",
+            "error_message": "bad" if status != "success" else "",
+            "elapsed_sec": idx,
+            "output_path": "",
+        })
+    pd.DataFrame(rows).to_csv(root / "raw_ingest_catalog.csv", index=False)
+    op = root / "_operation_review"
+    op.mkdir(parents=True)
+    pd.DataFrame({"api_name": [f"api{i}" for i in range(6)], "status": ["failed"] * 6}).to_csv(op / "recovery_tasks.csv", index=False)
+
+    manifest = compact_raw_lake(root, promotion_name="task_backlog")
+    assert manifest["failed_backlog_task_count"] == 4
+    assert len(manifest["failed_backlog_tasks"]) == 4
+    assert {row["task_key_json"] for row in manifest["failed_backlog_tasks"]} == {"task-1", "task-2", "task-3", "task-4"}
