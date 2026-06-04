@@ -177,3 +177,74 @@ def test_drive_catalog_artifact_overwrite_is_immutable(tmp_path, monkeypatch):
     with pytest.raises(FileExistsError, match="catalog artifact"):
         cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "promo"])
     assert not (drive / "raw" / "akshare").exists()
+
+
+def test_prepare_rejects_empty_staging_without_ready_or_drive_write(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    (out / "data" / "raw" / "akshare").mkdir(parents=True)
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    with pytest.raises(FileNotFoundError, match="No landed Raw parquet assets found under"):
+        cli.main(["prepare", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "empty"])
+    assert not (Path("outputs/raw_acquisition_compact/empty") / "READY_FOR_PROMOTION.json").exists()
+    assert not (drive / "raw" / "akshare").exists()
+
+
+def test_prepare_rejects_unknown_window_without_explicit_dates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "plain_output_root"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"symbol": "000001"})
+    with pytest.raises(ValueError, match="acquisition window"):
+        cli.main(["prepare", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "unknown_window"])
+    assert not (Path("outputs/raw_acquisition_compact/unknown_window") / "compact_manifest.json").exists()
+
+
+def test_prepare_accepts_explicit_dates_when_output_root_has_no_embedded_window(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "plain_output_root"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"symbol": "000001"})
+    assert cli.main([
+        "prepare",
+        "--output-root",
+        str(out),
+        "--drive-dwh-root",
+        str(drive),
+        "--promotion-name",
+        "explicit_window",
+        "--start-date",
+        "20220101",
+        "--end-date",
+        "20241231",
+    ]) == 0
+    manifest = _manifest(Path("outputs/raw_acquisition_compact/explicit_window"))
+    assert manifest["acquisition_window"] == {"start_date": "20220101", "end_date": "20241231"}
+    assert manifest["compact_assets"][0]["bucket_kind"] == "scope"
+    assert manifest["compact_assets"][0]["bucket_value"] == "run_20220101_20241231"
+
+
+def test_prepare_rejects_start_date_after_end_date(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "plain_output_root"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"symbol": "000001"})
+    with pytest.raises(ValueError, match="start_date must be <= end_date"):
+        cli.main([
+            "prepare",
+            "--output-root",
+            str(out),
+            "--drive-dwh-root",
+            str(drive),
+            "--promotion-name",
+            "bad_window",
+            "--start-date",
+            "20241231",
+            "--end-date",
+            "20220101",
+        ])
+    assert not (Path("outputs/raw_acquisition_compact/bad_window") / "compact_manifest.json").exists()

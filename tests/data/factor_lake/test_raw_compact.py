@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from qsys.data.factor_lake.raw_compact import classify_bucket, compact_raw_lake, scan_raw_assets
 
@@ -92,3 +93,12 @@ def test_failed_backlog_uses_task_level_raw_ingest_catalog_not_api_summary(tmp_p
     assert manifest["failed_backlog_task_count"] == 4
     assert len(manifest["failed_backlog_tasks"]) == 4
     assert {row["task_key_json"] for row in manifest["failed_backlog_tasks"]} == {"task-1", "task-2", "task-3", "task-4"}
+
+
+def test_compact_rejects_unknown_window_and_never_emits_scope_unknown(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "plain_output_root"
+    _raw(root, parts={"symbol": "000001"})
+    with pytest.raises(ValueError, match="acquisition window"):
+        compact_raw_lake(root, promotion_name="unknown_scope")
+    assert not (Path("outputs/raw_acquisition_compact/unknown_scope") / "compact_manifest.json").exists()

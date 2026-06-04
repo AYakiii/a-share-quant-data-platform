@@ -200,6 +200,17 @@ def _infer_window(output_root: Path) -> tuple[str, str]:
     return "unknown", "unknown"
 
 
+def _validate_acquisition_window(start_date: str, end_date: str, *, output_root: Path) -> tuple[str, str]:
+    if not re.fullmatch(r"\d{8}", start_date or "") or not re.fullmatch(r"\d{8}", end_date or ""):
+        raise ValueError(
+            "acquisition window must be explicit YYYYMMDD start_date/end_date or inferred from "
+            f"<output-root> name containing YYYYMMDD_YYYYMMDD: {output_root}"
+        )
+    if start_date > end_date:
+        raise ValueError(f"acquisition window start_date must be <= end_date: {start_date} > {end_date}")
+    return start_date, end_date
+
+
 def _read_api_recovery_summary(output_root: Path) -> list[dict[str, Any]]:
     path = output_root / "_operation_review" / "recovery_tasks.csv"
     if not path.exists():
@@ -253,7 +264,13 @@ def compact_raw_lake(
     inferred_start, inferred_end = _infer_window(out_root)
     start = start_date or inferred_start
     end = end_date or inferred_end
+    start, end = _validate_acquisition_window(start, end, output_root=out_root)
     name = validate_promotion_name(promotion_name or f"raw_lake_{out_root.name}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
+
+    assets = scan_raw_assets(out_root)
+    if not assets:
+        raise FileNotFoundError(f"No landed Raw parquet assets found under {out_root / LOCAL_INGEST_RAW_RELATIVE_ROOT}")
+
     compact_parent = resolve_compact_parent()
     compact_parent.mkdir(parents=True, exist_ok=True)
     pkg = Path(package_root) if package_root is not None else compact_parent / name
@@ -264,7 +281,6 @@ def compact_raw_lake(
         shutil.rmtree(pkg)
     pkg.mkdir(parents=True, exist_ok=True)
 
-    assets = scan_raw_assets(out_root)
     classified = classify_raw_assets(assets, start_date=start, end_date=end)
 
     inventory_rows: list[dict[str, Any]] = []

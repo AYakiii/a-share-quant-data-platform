@@ -458,7 +458,7 @@ PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
 
 `--report-dates` and `--auto-quarter-end-report-dates` are mutually exclusive, and omitting both preserves the previous no-default behavior.
 
-Prepare is local-only for compact parquet assets. It scans already-landed local ingest Raw parquet files under `<output-root>/data/raw/akshare`, writes compact package assets under `<package-root>/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
+Prepare is local-only for compact parquet assets. It scans already-landed local ingest Raw parquet files under `<output-root>/data/raw/akshare`, writes compact package assets under `<package-root>/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. Empty staging is rejected before manifest/readiness files are written. Acquisition windows are inferred from an output-root name containing `YYYYMMDD_YYYYMMDD`, or supplied explicitly with `--start-date` and `--end-date`; unknown or inverted windows are rejected. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
