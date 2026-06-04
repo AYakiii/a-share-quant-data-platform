@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence
 
 import pandas as pd
 
+from qsys.data.factor_lake.raw_ingest import format_api_inflight_limits_compact
+
 try:  # pragma: no cover - exercised in notebooks, monkeypatched in tests.
     from IPython.display import clear_output, display
 except ImportError:  # pragma: no cover
@@ -36,6 +38,7 @@ REQUIRED_NOTEBOOK_VARIABLES = (
     "HEARTBEAT_SEC",
     "SYMBOL_BATCH_SIZE",
     "MAX_INFLIGHT_TASKS",
+    "API_INFLIGHT_LIMITS",
     "TASK_TIMEOUT_SEC",
     "MANUAL_SELECTED_TASK_TIMEOUT_SEC",
     "HEAVY_TASK_TIMEOUT_SEC",
@@ -77,6 +80,7 @@ class RawLakeConsoleConfig:
     heartbeat_sec: Any
     symbol_batch_size: Any
     max_inflight_tasks: Any
+    api_inflight_limits: Any
     task_timeout_sec: Any
     manual_selected_task_timeout_sec: Any
     heavy_task_timeout_sec: Any
@@ -126,6 +130,7 @@ class RawLakeConsoleConfig:
             heartbeat_sec=namespace["HEARTBEAT_SEC"],
             symbol_batch_size=namespace["SYMBOL_BATCH_SIZE"],
             max_inflight_tasks=namespace["MAX_INFLIGHT_TASKS"],
+            api_inflight_limits=namespace["API_INFLIGHT_LIMITS"],
             task_timeout_sec=namespace["TASK_TIMEOUT_SEC"],
             manual_selected_task_timeout_sec=namespace["MANUAL_SELECTED_TASK_TIMEOUT_SEC"],
             heavy_task_timeout_sec=namespace["HEAVY_TASK_TIMEOUT_SEC"],
@@ -198,6 +203,8 @@ def build_preheat_command(config: RawLakeConsoleConfig) -> list[str]:
         str(config.symbol_batch_size),
         "--max-inflight-tasks",
         str(config.max_inflight_tasks),
+        "--api-inflight-limits",
+        format_api_inflight_limits_compact(config.api_inflight_limits),
         "--task-timeout-sec",
         str(config.task_timeout_sec),
         "--manual-selected-task-timeout-sec",
@@ -357,6 +364,7 @@ def run_preheat_with_compact_dashboard(
     cmd = build_preheat_command(config)
     assert "--symbol-batch-size" in cmd
     assert "--max-inflight-tasks" in cmd
+    assert "--api-inflight-limits" in cmd
 
     print("=== RAW LAKE PREHEAT COMMAND ===")
     print()
@@ -365,6 +373,7 @@ def run_preheat_with_compact_dashboard(
     print("Hybrid Chunk controls:")
     print("  SYMBOL_BATCH_SIZE: ", config.symbol_batch_size)
     print("  MAX_INFLIGHT_TASKS:", config.max_inflight_tasks)
+    print("  API_INFLIGHT_LIMITS:", format_api_inflight_limits_compact(config.api_inflight_limits) or "{}")
     print()
     print("OUTPUT_ROOT:")
     print(" ", config.output_root)
@@ -516,7 +525,7 @@ def audit_preheat_failures(output_root: str | Path, *, display_limit: int = 200)
     print(" ", task_events_path)
     if not catalog_path.exists():
         raise FileNotFoundError("raw_ingest_catalog.csv was not found. Run this audit after the acquisition lane has completed.")
-    catalog = pd.read_csv(catalog_path)
+    catalog = pd.read_csv(catalog_path, dtype={"original_symbol": str, "akshare_symbol": str})
     print("\n=== CATALOG LOADED ===")
     print("rows:", len(catalog))
     print("columns:", len(catalog.columns))

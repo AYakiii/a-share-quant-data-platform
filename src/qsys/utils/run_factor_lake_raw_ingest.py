@@ -10,7 +10,7 @@ from pathlib import Path
 import akshare as ak
 import pandas as pd
 
-from qsys.data.factor_lake.raw_ingest import run_raw_ingest_official
+from qsys.data.factor_lake.raw_ingest import format_api_inflight_limits_compact, run_raw_ingest_official
 
 
 def _split_csv(v: str) -> list[str]:
@@ -107,6 +107,7 @@ def _run_without_batching(args: argparse.Namespace) -> dict:
         task_retry_backoff=args.task_retry_backoff,
         task_retry_jitter_sec=args.task_retry_jitter_sec,
         heartbeat_sec=getattr(args, "heartbeat_sec", None),
+        api_inflight_limits=getattr(args, "api_inflight_limits", ""),
     )
 
 
@@ -147,6 +148,9 @@ def _build_child_cmd(args: argparse.Namespace, batch_output_root: Path, batch_sy
     ]
     if args.task_timeout_sec is not None:
         cmd.extend(["--task-timeout-sec", str(args.task_timeout_sec)])
+    api_inflight_limits = format_api_inflight_limits_compact(getattr(args, "api_inflight_limits", ""))
+    if api_inflight_limits:
+        cmd.extend(["--api-inflight-limits", api_inflight_limits])
     cmd.extend(["--task-retry-attempts", str(args.task_retry_attempts)])
     cmd.extend(["--task-retry-sleep-sec", str(args.task_retry_sleep_sec)])
     cmd.extend(["--task-retry-backoff", str(args.task_retry_backoff)])
@@ -183,6 +187,7 @@ def _run_with_symbol_batching(args: argparse.Namespace) -> dict:
         "symbols_tail": symbols[-10:] if len(symbols) > 10 else symbols,
         "symbols_arg_length": len(args.symbols or ""),
         "n_batches": len(batches),
+        "api_inflight_limits": format_api_inflight_limits_compact(getattr(args, "api_inflight_limits", "")),
         "batches": [
             {"batch_label": _batch_label(start, end), "start_index": start, "end_index": end, "n_symbols": len(chunk)}
             for start, end, chunk in batches
@@ -325,6 +330,7 @@ def main() -> None:
     p.add_argument("--task-retry-backoff", type=float, default=1.0)
     p.add_argument("--task-retry-jitter-sec", type=float, default=0.0)
     p.add_argument("--heartbeat-sec", type=float, default=None)
+    p.add_argument("--api-inflight-limits", default="", help="Per-API inflight caps as api_name=2,another_api=4")
     args = p.parse_args()
 
     should_batch = (not args.disable_symbol_batching) and int(args.symbol_batch_size or 0) > 0

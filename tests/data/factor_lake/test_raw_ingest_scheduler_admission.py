@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from qsys.data.factor_lake import raw_ingest
 from qsys.data.factor_lake.io import raw_partition_path
@@ -18,7 +19,7 @@ class _Result:
         self.raw = raw if raw is not None else pd.DataFrame({"value": [1]})
 
 
-def test_szse_trade_date_admission_cap_does_not_block_healthy_sources(tmp_path: Path) -> None:
+def test_api_inflight_limit_cap_does_not_block_healthy_sources(tmp_path: Path) -> None:
     lock = threading.Lock()
     szse_running = 0
     max_szse_running = 0
@@ -52,6 +53,7 @@ def test_szse_trade_date_admission_cap_does_not_block_healthy_sources(tmp_path: 
         },
         max_workers=4,
         max_inflight_tasks=4,
+        api_inflight_limits={"stock_margin_detail_szse": 2},
         symbol_batch_size=0,
         include_disabled=True,
     )
@@ -107,6 +109,7 @@ def test_scheduler_admission_preserves_global_inflight_window(tmp_path: Path, mo
         },
         max_workers=3,
         max_inflight_tasks=4,
+        api_inflight_limits={"stock_margin_detail_szse": 2},
         symbol_batch_size=0,
         include_disabled=True,
     )
@@ -133,6 +136,7 @@ def test_admission_control_preserves_resume_fingerprint_and_existing_partition_s
         adapter_map={"stock_margin_detail_szse": stock_margin_detail_szse},
         max_workers=2,
         max_inflight_tasks=2,
+        api_inflight_limits={"stock_margin_detail_szse": 2},
         symbol_batch_size=0,
     )
     first = run_raw_coverage_ingest(**kwargs)
@@ -141,11 +145,75 @@ def test_admission_control_preserves_resume_fingerprint_and_existing_partition_s
 
     checkpoint_path = tmp_path / "_operation_review" / "hybrid_batches" / "raw" / "hybrid_batch_checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    assert "SOURCE_WORKLOAD_ADMISSION_OVERRIDES" not in json.dumps(checkpoint["fingerprint_payload"])
+    assert "api_inflight_limits" not in json.dumps(checkpoint["fingerprint_payload"])
     first_fingerprint = checkpoint["fingerprint"]
 
     calls.clear()
-    run_raw_coverage_ingest(**kwargs, resume=True)
+    run_raw_coverage_ingest(**{**kwargs, "api_inflight_limits": {"stock_margin_detail_szse": 1}}, resume=True)
     resumed_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert calls == []
     assert resumed_checkpoint["fingerprint"] == first_fingerprint
+
+
+def test_api_without_override_uses_global_inflight_and_empty_config_has_no_hidden_szse_rule(tmp_path: Path) -> None:
+    lock = threading.Lock()
+    running = 0
+    max_running = 0
+
+    def stock_margin_detail_szse(date: str) -> _Result:
+        nonlocal running, max_running
+        with lock:
+            running += 1
+            max_running = max(max_running, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return _Result(pd.DataFrame({"date": [date]}))
+
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["margin_leverage"],
+        selected_api_names=["stock_margin_detail_szse"],
+        trade_dates=["20240102", "20240103", "20240104", "20240105"],
+        adapter_map={"stock_margin_detail_szse": stock_margin_detail_szse},
+        max_workers=4,
+        max_inflight_tasks=4,
+        api_inflight_limits={},
+        symbol_batch_size=0,
+        include_disabled=True,
+    )
+
+    assert max_running > 2
+    observation = pd.read_csv(tmp_path / "_operation_review" / "source_concurrency_observation.csv")
+    szse = observation[(observation["source_key"] == "szse") & (observation["workload_class"] == "trade_date_scoped")].iloc[0]
+    assert int(szse["peak_inflight_tasks"]) > 2
+    assert int(szse["blocked_by_admission_control"]) == 0
+
+
+def test_invalid_api_inflight_limit_values_fail_clearly(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="api_inflight_limits.*positive integer|greater than or equal"):
+        run_raw_coverage_ingest(
+            output_root=str(tmp_path),
+            families=["margin_leverage"],
+            selected_api_names=["stock_margin_detail_szse"],
+            trade_dates=["20240102"],
+            adapter_map={"stock_margin_detail_szse": lambda date: _Result(pd.DataFrame({"date": [date]}))},
+            max_workers=1,
+            api_inflight_limits={"stock_margin_detail_szse": 0},
+            include_disabled=True,
+        )
+
+
+def test_active_api_inflight_limits_are_written_to_manifest(tmp_path: Path) -> None:
+    run_raw_coverage_ingest(
+        output_root=str(tmp_path),
+        families=["margin_leverage"],
+        selected_api_names=["stock_margin_detail_szse"],
+        trade_dates=["20240102"],
+        adapter_map={"stock_margin_detail_szse": lambda date: _Result(pd.DataFrame({"date": [date]}))},
+        max_workers=1,
+        api_inflight_limits={"stock_margin_detail_szse": 2, "unused_api": 4},
+        include_disabled=True,
+    )
+    manifest = json.loads((tmp_path / "_operation_review" / "admission_control_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["api_inflight_limits"] == {"stock_margin_detail_szse": 2}

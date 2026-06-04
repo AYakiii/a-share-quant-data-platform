@@ -26,6 +26,7 @@ def _namespace(tmp_path: Path, **overrides):
         "HEARTBEAT_SEC": 30,
         "SYMBOL_BATCH_SIZE": 10,
         "MAX_INFLIGHT_TASKS": 12,
+        "API_INFLIGHT_LIMITS": {},
         "TASK_TIMEOUT_SEC": 120,
         "MANUAL_SELECTED_TASK_TIMEOUT_SEC": 180,
         "HEAVY_TASK_TIMEOUT_SEC": 300,
@@ -56,6 +57,7 @@ def test_config_reads_existing_notebook_variables_and_lanes_pass_through(tmp_pat
     assert config.output_root == tmp_path / "out"
     assert config.lanes == "main,heavy"
     assert config.max_inflight_tasks == 12
+    assert config.api_inflight_limits == {}
 
 
 def test_missing_required_variable_raises_clear_error(tmp_path):
@@ -361,3 +363,11 @@ def test_clear_local_output_deletes_only_explicit_output_root(tmp_path):
     console.clear_local_output(root, confirm=True)
     assert not root.exists()
     assert sibling.exists()
+
+
+def test_colab_console_passes_api_inflight_limits_dict_as_compact_cli(tmp_path):
+    config = RawLakeConsoleConfig.from_namespace(
+        _namespace(tmp_path, API_INFLIGHT_LIMITS={"stock_margin_detail_szse": 2})
+    )
+    cmd = console.build_preheat_command(config)
+    assert cmd[cmd.index("--api-inflight-limits") + 1] == "stock_margin_detail_szse=2"
