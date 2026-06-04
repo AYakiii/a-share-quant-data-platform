@@ -104,6 +104,29 @@ def parse_report_dates(value: str | None) -> list[str]:
     return dates
 
 
+
+def derive_quarter_end_report_dates(start_date: str, end_date: str) -> list[str]:
+    """Derive quarter-end report dates inside an inclusive YYYYMMDD window."""
+    if not re.fullmatch(r"\d{8}", start_date) or not re.fullmatch(r"\d{8}", end_date):
+        raise ValueError("--start-date and --end-date must be YYYYMMDD for automatic report dates")
+    if start_date > end_date:
+        raise ValueError("--start-date must be <= --end-date")
+    quarter_ends = ("0331", "0630", "0930", "1231")
+    dates = [f"{year}{suffix}" for year in range(int(start_date[:4]), int(end_date[:4]) + 1) for suffix in quarter_ends]
+    return [date for date in dates if start_date <= date <= end_date]
+
+
+def resolve_report_dates(args: argparse.Namespace) -> list[str] | None:
+    """Resolve explicit or automatic report-date CLI modes without changing defaults."""
+    auto = bool(getattr(args, "auto_quarter_end_report_dates", False))
+    if getattr(args, "report_dates", None) and auto:
+        raise ValueError("--report-dates and --auto-quarter-end-report-dates cannot be combined")
+    if auto:
+        return derive_quarter_end_report_dates(args.start_date, args.end_date)
+    if getattr(args, "report_dates", None) is not None:
+        return parse_report_dates(args.report_dates)
+    return None
+
 def _yyyymmdd(value: Any) -> str:
     if pd.isna(value):
         return ""
@@ -362,7 +385,8 @@ def discover_universe_for_plan(args: argparse.Namespace, plan_rows: list[dict[st
 
     if need_symbols and not args.symbols_file and not existing.stock_symbols:
         raise ValueError("--symbols-file is required by selected stock-symbol APIs")
-    if need_report and args.report_dates is None and not existing.report_dates:
+    resolved_report_dates = resolve_report_dates(args)
+    if need_report and resolved_report_dates is None and not existing.report_dates:
         raise ValueError("--report-dates is required by selected report-date APIs")
 
     return PreheatUniverse(
@@ -371,7 +395,7 @@ def discover_universe_for_plan(args: argparse.Namespace, plan_rows: list[dict[st
         industry_names=existing.industry_names if existing.industry_names else (discover_industry_names(ak_module) if need_industry_names else []),
         concept_names=existing.concept_names if existing.concept_names else (discover_concept_names(ak_module) if need_concept_names else []),
         trading_dates=existing.trading_dates if existing.trading_dates else (discover_trading_dates(ak_module, args.start_date, args.end_date) if need_trade else []),
-        report_dates=existing.report_dates if existing.report_dates else (parse_report_dates(args.report_dates) if need_report else []),
+        report_dates=existing.report_dates if existing.report_dates else (resolved_report_dates if need_report and resolved_report_dates is not None else []),
         industry_codes=existing.industry_codes if existing.industry_codes else (discover_sw_industry_codes(ak_module) if need_industry_codes else []),
     )
 
@@ -629,6 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--report-dates")
+    parser.add_argument("--auto-quarter-end-report-dates", action="store_true", help="Derive quarter-end report dates inside --start-date/--end-date; mutually exclusive with --report-dates")
     parser.add_argument("--lanes", default="main")
     parser.add_argument("--only-families")
     parser.add_argument("--exclude-families")
@@ -676,6 +701,8 @@ def main(argv: list[str] | None = None, *, ak_module: object | None = None, runn
     parser = build_parser()
     args = parser.parse_args(argv)
     _normalize_legacy_args(args)
+    if args.report_dates and args.auto_quarter_end_report_dates:
+        parser.error("--report-dates and --auto-quarter-end-report-dates cannot be combined")
     args.api_inflight_limits = format_api_inflight_limits_compact(args.api_inflight_limits)
     reject_drive_output_root(args.output_root)
     skeleton_plan = build_preheat_plan(args, PreheatUniverse())

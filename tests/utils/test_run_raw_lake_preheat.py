@@ -723,3 +723,18 @@ def test_preheat_cli_forwards_api_inflight_limits_and_records_lane_manifest(tmp_
     manifests = preheat.run_lanes(args, universe, plan, runner=runner)
     assert calls[0]["api_inflight_limits"] == "stock_zcfz_em=2"
     assert manifests[0]["api_inflight_limits"] == "stock_zcfz_em=2"
+
+
+def test_auto_quarter_end_report_dates_derives_requested_window():
+    assert preheat.derive_quarter_end_report_dates("20220101", "20241231") == [
+        "20220331", "20220630", "20220930", "20221231",
+        "20230331", "20230630", "20230930", "20231231",
+        "20240331", "20240630", "20240930", "20241231",
+    ]
+
+
+def test_report_dates_explicit_and_auto_cannot_be_combined(tmp_path):
+    parser = preheat.build_parser()
+    args = parser.parse_args(["--output-root", str(tmp_path), "--start-date", "20220101", "--end-date", "20241231", "--report-dates", "20221231", "--auto-quarter-end-report-dates"])
+    with pytest.raises(ValueError, match="cannot be combined"):
+        preheat.resolve_report_dates(args)
