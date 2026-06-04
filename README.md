@@ -433,3 +433,54 @@ Notes for Phase 18A-18 recovery:
   `api_name,source_family,acquisition_status`.
 - For disabled heavy/detail sources (for example `stock_gpzy_pledge_ratio_detail_em`, `stock_jgdy_detail_em`), checklist may remain `暂停获取` even if an include-disabled probe was run.
 - Default queue restored for Colab-verified sources: `stock_margin_detail_szse`, `stock_industry_clf_hist_sw`, and canonical `trading_attention/stock_jgdy_tj_em` (while duplicate `disclosure_ir/stock_jgdy_tj_em` remains paused to avoid duplicate default ingestion).
+
+## Controlled Raw Lake compact and Drive promotion workflow
+
+This workflow consolidates the validated post-acquisition Raw Lake flow into reusable modules and human-gated CLI commands. It is limited to local Raw Factor/Data Lake acquisition outputs and promotion of compact Raw parquet assets; it does not create normalized panels, feature stores, signals, backtests, or models.
+
+Preheat report-date modes:
+
+```bash
+# Existing explicit mode remains supported.
+PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
+  --output-root outputs/raw_acquisition_local/wave_20220101_20241231 \
+  --start-date 20220101 \
+  --end-date 20241231 \
+  --report-dates 20220331,20220630,20220930,20221231
+
+# Optional automatic mode derives 0331/0630/0930/1231 dates inside the window.
+PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
+  --output-root outputs/raw_acquisition_local/wave_20220101_20241231 \
+  --start-date 20220101 \
+  --end-date 20241231 \
+  --auto-quarter-end-report-dates
+```
+
+`--report-dates` and `--auto-quarter-end-report-dates` are mutually exclusive, and omitting both preserves the previous no-default behavior.
+
+Prepare is local-only for compact parquet assets. It scans already-landed Raw parquet files under `<output-root>/data/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
+
+```bash
+PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
+  --output-root outputs/raw_acquisition_local/wave_20220101_20241231 \
+  --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data
+```
+
+Promote is the only command that writes Drive Raw assets. It requires exact human confirmation, immediately rebuilds the collision plan, refuses every non-identical overwrite, copies only new files, skips byte-identical files, reopens all promoted parquet files from Drive, and verifies rows, columns, and SHA-256. Buckets classified as `scope` or `snapshot` require explicit operator opt-in via `--allow-reviewed-bucket-kinds`.
+
+```bash
+PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli promote \
+  --package-root outputs/raw_acquisition_compact/<PROMOTION_NAME> \
+  --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data \
+  --confirm-promotion <PROMOTION_NAME>
+```
+
+Audit is independent and read-only. It loads Drive promotion artifacts from `catalog/promotions/<PROMOTION_NAME>`, reopens every promoted Drive parquet, verifies rows, columns, and SHA-256, and prints a bucket summary without writes or deletions.
+
+```bash
+PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli audit \
+  --promotion-name <PROMOTION_NAME> \
+  --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data
+```
+
+Raw compact is inventory-driven and lineage-driven: it uses generic partition keys such as `snapshot`, `year`, `trade_date`, `report_date`, `date`, `start_date`/`end_date`, and `since_date`. It intentionally avoids API-name-specific compact rules, parquet-body business-date repartitioning, normalization, silent deduplication, row deletion, and column deletion.
