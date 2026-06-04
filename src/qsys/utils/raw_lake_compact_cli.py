@@ -35,6 +35,24 @@ IMMUTABLE_CATALOG_ARTIFACTS = [
     "_LOCAL_COMPACT_READY.txt",
 ]
 
+COLLISION_PLAN_COLUMNS = [
+    "source_family",
+    "api_name",
+    "bucket_kind",
+    "bucket_value",
+    "rows",
+    "relative_path",
+    "source_path",
+    "drive_path",
+    "exists_on_drive",
+    "identical",
+    "action",
+    "source_sha256",
+    "drive_sha256",
+]
+
+DRIVE_ROOT_CHANGED_ERROR = "Drive DWH root differs from the operator-reviewed prepare plan. Rerun prepare for the new Drive root before promotion."
+
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -107,14 +125,14 @@ def build_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -
             dst_sha = file_sha256(dst)
             identical = src_sha == dst_sha
             action = "skip_identical" if identical else "block_non_identical"
-        rows.append({"relative_path": rel, "source_path": str(src), "drive_path": str(dst), "source_sha256": src_sha, "drive_sha256": dst_sha, "exists_on_drive": dst.exists(), "identical": identical, "action": action})
+        rows.append({"source_family": asset.get("source_family", ""), "api_name": asset.get("api_name", ""), "bucket_kind": asset.get("bucket_kind", ""), "bucket_value": asset.get("bucket_value", ""), "rows": int(asset.get("rows", 0)), "relative_path": rel, "source_path": str(src), "drive_path": str(dst), "exists_on_drive": dst.exists(), "identical": identical, "action": action, "source_sha256": src_sha, "drive_sha256": dst_sha})
     return rows
 
 
 def write_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -> list[dict[str, Any]]:
     pkg = _resolve_package_root(package_root)
     rows = build_collision_plan(pkg, drive_dwh_root)
-    pd.DataFrame(rows, columns=["relative_path", "source_path", "drive_path", "source_sha256", "drive_sha256", "exists_on_drive", "identical", "action"]).to_csv(pkg / "drive_collision_plan.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(rows, columns=COLLISION_PLAN_COLUMNS).to_csv(pkg / "drive_collision_plan.csv", index=False, encoding="utf-8-sig")
     return rows
 
 
@@ -126,9 +144,14 @@ def _bucket_asset_counts(assets: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _planned_count(collision_rows: list[dict[str, Any]], action: str) -> int:
+    return sum(1 for row in collision_rows if row.get("action") == action)
+
+
+def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]], *, drive_root: Path, package_root: Path, collision_plan_path: Path) -> dict[str, Any]:
     assets = list(manifest.get("compact_assets", []))
     blocked = [r for r in collision_rows if r.get("action") == "block_non_identical"]
+    promotion_name = validate_promotion_name(str(manifest["promotion_name"]))
     return {
         "promotion_name": manifest["promotion_name"],
         "package_root": manifest["package_root"],
@@ -142,7 +165,36 @@ def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]
         "blocked_collisions": blocked,
         "bucket_asset_counts": _bucket_asset_counts(assets),
         "review_required_bucket_kinds": sorted({a.get("bucket_kind") for a in assets if a.get("bucket_kind") in REVIEW_REQUIRED_BUCKET_KINDS}),
+        "prepared_drive_dwh_root": str(drive_root.resolve()),
+        "prepared_drive_raw_root": str((drive_root / DRIVE_RAW_RELATIVE_ROOT).resolve()),
+        "prepared_drive_catalog_root": str(_catalog_dir(drive_root, promotion_name).resolve()),
+        "drive_collision_plan_path": str(collision_plan_path.resolve()),
+        "drive_collision_plan_sha256": file_sha256(collision_plan_path),
+        "planned_asset_count": len(collision_rows),
+        "planned_copy_new_count": _planned_count(collision_rows, "copy_new"),
+        "planned_skip_identical_count": _planned_count(collision_rows, "skip_identical"),
+        "planned_block_non_identical_count": _planned_count(collision_rows, "block_non_identical"),
         "ready_for_promotion": not blocked,
+    }
+
+
+def _prepare_review_summary(ready: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: ready[key]
+        for key in [
+            "promotion_name",
+            "package_root",
+            "prepared_drive_dwh_root",
+            "prepared_drive_raw_root",
+            "prepared_drive_catalog_root",
+            "drive_collision_plan_path",
+            "drive_collision_plan_sha256",
+            "planned_asset_count",
+            "planned_copy_new_count",
+            "planned_skip_identical_count",
+            "planned_block_non_identical_count",
+            "ready_for_promotion",
+        ]
     }
 
 
@@ -152,9 +204,10 @@ def prepare(args: argparse.Namespace) -> int:
     manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package))
     package_root = _resolve_package_root(manifest["package_root"])
     collisions = write_collision_plan(package_root, drive_root)
-    ready = _ready_payload(manifest, collisions)
+    collision_plan_path = package_root / "drive_collision_plan.csv"
+    ready = _ready_payload(manifest, collisions, drive_root=drive_root, package_root=package_root, collision_plan_path=collision_plan_path)
     _write_json(package_root / "READY_FOR_PROMOTION.json", ready)
-    print(json.dumps({"package_root": str(package_root), "ready_for_promotion": ready["ready_for_promotion"], "blocked_collisions": len(ready["blocked_collisions"])}, ensure_ascii=False, indent=2))
+    print(json.dumps(_prepare_review_summary(ready), ensure_ascii=False, indent=2))
     return 0
 
 
@@ -176,6 +229,55 @@ def _validate_ready_against_manifest(ready: dict[str, Any], manifest: dict[str, 
         raise ValueError("READY_FOR_PROMOTION.json package_root does not match compact_manifest.json and CLI package root")
     if ready.get("ready_for_promotion") is not True:
         raise ValueError("READY_FOR_PROMOTION.json does not mark this package ready_for_promotion=true")
+
+
+def _validate_prepared_drive_root(ready: dict[str, Any], drive_root: Path) -> None:
+    prepared = Path(str(ready.get("prepared_drive_dwh_root", ""))).resolve()
+    if prepared != drive_root.resolve():
+        raise ValueError(DRIVE_ROOT_CHANGED_ERROR)
+
+
+def _load_reviewed_collision_plan(ready: dict[str, Any], package_root: Path) -> pd.DataFrame:
+    plan_path = Path(str(ready.get("drive_collision_plan_path", ""))).resolve()
+    if plan_path != (package_root / "drive_collision_plan.csv").resolve():
+        raise ValueError("READY_FOR_PROMOTION.json drive_collision_plan_path does not match the local package plan")
+    expected_sha = str(ready.get("drive_collision_plan_sha256", ""))
+    if not plan_path.exists() or not expected_sha:
+        raise FileNotFoundError("operator-reviewed drive_collision_plan.csv and SHA256 are required before promotion")
+    actual_sha = file_sha256(plan_path)
+    if actual_sha != expected_sha:
+        raise ValueError("operator-reviewed drive_collision_plan.csv SHA256 mismatch. Rerun prepare before promotion.")
+    return pd.read_csv(plan_path).fillna("")
+
+
+def _target_path_set(rows: list[dict[str, Any]] | pd.DataFrame) -> set[str]:
+    if isinstance(rows, pd.DataFrame):
+        return {str(v) for v in rows.get("drive_path", pd.Series(dtype=str)).tolist()}
+    return {str(row.get("drive_path", "")) for row in rows}
+
+
+def _plan_state_signature(rows: list[dict[str, Any]] | pd.DataFrame) -> set[tuple[str, str, str, str, str]]:
+    if isinstance(rows, pd.DataFrame):
+        records = rows.to_dict("records")
+    else:
+        records = rows
+    return {
+        (
+            str(row.get("drive_path", "")),
+            str(row.get("action", "")),
+            str(row.get("exists_on_drive", "")),
+            str(row.get("identical", "")),
+            str(row.get("drive_sha256", "")),
+        )
+        for row in records
+    }
+
+
+def _validate_current_plan_matches_reviewed(reviewed_plan: pd.DataFrame, current_rows: list[dict[str, Any]]) -> None:
+    if _target_path_set(reviewed_plan) != _target_path_set(current_rows):
+        raise ValueError("Current Drive target path set differs from the operator-reviewed prepare plan. Rerun prepare before promotion.")
+    if _plan_state_signature(reviewed_plan) != _plan_state_signature(current_rows):
+        raise ValueError("Current Drive collision plan differs from the operator-reviewed prepare plan. Rerun prepare before promotion.")
 
 
 def _copy_immutable_file(src: Path, dst: Path) -> str:
@@ -218,6 +320,8 @@ def promote(args: argparse.Namespace) -> int:
     manifest = load_manifest(package_root)
     promotion_name = validate_promotion_name(str(manifest["promotion_name"]))
     _validate_ready_against_manifest(ready, manifest, package_root)
+    _validate_prepared_drive_root(ready, drive_root)
+    reviewed_plan = _load_reviewed_collision_plan(ready, package_root)
     if not args.confirm_promotion:
         raise ValueError("--confirm-promotion is required")
     if args.confirm_promotion != promotion_name:
@@ -233,7 +337,8 @@ def promote(args: argparse.Namespace) -> int:
 
     _check_immutable_catalog_artifacts(package_root, drive_root, promotion_name)
 
-    collisions = write_collision_plan(package_root, drive_root)
+    collisions = build_collision_plan(package_root, drive_root)
+    _validate_current_plan_matches_reviewed(reviewed_plan, collisions)
     blocked = [r for r in collisions if r["action"] == "block_non_identical"]
     if blocked:
         raise FileExistsError("non-identical Drive overwrite is forbidden")

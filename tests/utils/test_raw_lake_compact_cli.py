@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,14 @@ def _manifest(pkg: Path) -> dict:
 
 def _ready(pkg: Path) -> dict:
     return json.loads((pkg / "READY_FOR_PROMOTION.json").read_text())
+
+
+def _rewrite_ready_from_current_plan(pkg: Path, drive: Path) -> dict:
+    manifest = _manifest(pkg)
+    collisions = cli.write_collision_plan(pkg, drive)
+    ready = cli._ready_payload(manifest, collisions, drive_root=drive.resolve(), package_root=pkg.resolve(), collision_plan_path=(pkg / "drive_collision_plan.csv").resolve())
+    (pkg / "READY_FOR_PROMOTION.json").write_text(json.dumps(ready), encoding="utf-8")
+    return ready
 
 
 def test_prepare_writes_ready_and_never_writes_drive_raw_parquet(tmp_path, monkeypatch):
@@ -86,6 +95,10 @@ def test_promote_permits_copy_new_skip_identical_uses_canonical_drive_raw_and_au
     assert asset["relative_path"].startswith("raw/akshare/")
     assert not (drive / "data" / "raw" / "akshare").exists()
 
+    # A skip-identical promotion remains supported when the operator-reviewed
+    # prepare plan already observed the byte-identical Drive asset.
+    shutil.rmtree(drive / "catalog")
+    _rewrite_ready_from_current_plan(pkg, drive)
     assert cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "promo"]) == 0
     reports = sorted(pkg.glob("promotion_attempt_*.json"))
     report = json.loads(reports[-1].read_text())
@@ -103,7 +116,7 @@ def test_promote_refuses_non_identical_overwrite(tmp_path, monkeypatch):
     dst = drive / rel
     dst.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"a": [9], "b": [9]}).to_parquet(dst, index=False)
-    with pytest.raises(FileExistsError, match="non-identical"):
+    with pytest.raises(ValueError, match="collision plan differs"):
         cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "promo"])
 
 
@@ -248,3 +261,67 @@ def test_prepare_rejects_start_date_after_end_date(tmp_path, monkeypatch):
             "20220101",
         ])
     assert not (Path("outputs/raw_acquisition_compact/bad_window") / "compact_manifest.json").exists()
+
+
+def test_prepare_binds_custom_drive_roots_and_semantic_collision_plan(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "custom_drive_root"
+    drive.mkdir()
+    _raw(out)
+    assert cli.main(["prepare", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "custom_drive"]) == 0
+    pkg = Path("outputs/raw_acquisition_compact/custom_drive")
+    ready = _ready(pkg)
+    assert ready["prepared_drive_dwh_root"] == str(drive.resolve())
+    assert ready["prepared_drive_raw_root"] == str((drive / "raw" / "akshare").resolve())
+    assert ready["prepared_drive_catalog_root"] == str((drive / "catalog" / "promotions" / "custom_drive").resolve())
+    assert ready["drive_collision_plan_path"] == str((pkg / "drive_collision_plan.csv").resolve())
+    assert ready["drive_collision_plan_sha256"] == cli.file_sha256(pkg / "drive_collision_plan.csv")
+    assert ready["planned_asset_count"] == 1
+    assert ready["planned_copy_new_count"] == 1
+    assert ready["planned_skip_identical_count"] == 0
+    assert ready["planned_block_non_identical_count"] == 0
+
+    plan = pd.read_csv(pkg / "drive_collision_plan.csv")
+    for col in ["source_family", "api_name", "bucket_kind", "bucket_value", "rows", "relative_path", "drive_path"]:
+        assert col in plan.columns
+    assert plan.loc[0, "drive_path"] == str(drive.resolve() / "raw" / "akshare" / "fam" / "api" / "year=2022" / "data.parquet")
+    assert not (drive / "raw" / "akshare").exists()
+
+
+def test_promote_refuses_drive_root_changed_after_prepare_before_raw_write(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _rc, _out, drive_a, pkg = _prepare(tmp_path, promotion="bound_root")
+    drive_b = tmp_path / "drive_b"
+    drive_b.mkdir()
+    with pytest.raises(ValueError, match="Drive DWH root differs"):
+        cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive_b), "--confirm-promotion", "bound_root"])
+    assert not (drive_a / "raw" / "akshare").exists()
+    assert not (drive_b / "raw" / "akshare").exists()
+
+
+def test_promote_refuses_mutated_reviewed_collision_plan_before_raw_write(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _rc, _out, drive, pkg = _prepare(tmp_path, promotion="mutated_plan")
+    plan_path = pkg / "drive_collision_plan.csv"
+    plan_path.write_text(plan_path.read_text(encoding="utf-8") + "\n# mutated", encoding="utf-8")
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "mutated_plan"])
+    assert not (drive / "raw" / "akshare").exists()
+
+
+def test_promote_refuses_rebuilt_target_set_change_before_raw_write(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _rc, _out, drive, pkg = _prepare(tmp_path, promotion="target_set")
+    original = cli.build_collision_plan
+
+    def changed_plan(package_root, drive_dwh_root):
+        rows = original(package_root, drive_dwh_root)
+        rows[0] = dict(rows[0])
+        rows[0]["drive_path"] = str((drive / "raw" / "akshare" / "different" / "data.parquet").resolve())
+        return rows
+
+    monkeypatch.setattr(cli, "build_collision_plan", changed_plan)
+    with pytest.raises(ValueError, match="target path set differs"):
+        cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "target_set"])
+    assert not (drive / "raw" / "akshare").exists()
