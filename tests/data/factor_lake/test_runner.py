@@ -6,7 +6,7 @@ import pandas as pd
 
 from qsys.data.factor_lake.local_api import read_partition_metadata, read_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
-from qsys.data.factor_lake.raw_ingest import run_raw_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import run_raw_ingest
 
 
 class _Result:
@@ -56,3 +56,16 @@ def test_raw_ingest_and_local_api_with_synthetic_adapters(tmp_path):
         logs = conn.execute("select count(*) from ingest_run_log").fetchone()[0]
     assert inv >= 4
     assert logs >= 4
+
+
+def test_local_api_can_read_explicit_provider(tmp_path):
+    root = tmp_path / "lake"
+    p = root / "data" / "raw" / "tushare" / "market_price" / "stock_zh_a_hist" / "symbol=000001" / "year=2024"
+    p.mkdir(parents=True)
+    pd.DataFrame({"x": [1]}).to_parquet(p / "data.parquet", index=False)
+    (p / "metadata.json").write_text('{"provider":"tushare"}', encoding="utf-8")
+
+    ddf = read_raw_partition(root, "daily_bar_raw", "stock_zh_a_hist", {"symbol": "000001", "year": "2024"}, provider="tushare")
+    assert ddf.to_dict("records") == [{"x": 1}]
+    meta = read_partition_metadata(root, "daily_bar_raw", "stock_zh_a_hist", {"symbol": "000001", "year": "2024"}, provider="tushare")
+    assert meta["provider"] == "tushare"

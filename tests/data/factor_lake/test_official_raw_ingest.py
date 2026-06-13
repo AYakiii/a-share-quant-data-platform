@@ -5,7 +5,7 @@ import json
 import inspect
 
 from qsys.data.factor_lake import raw_ingest
-from qsys.data.factor_lake.raw_ingest import _to_akshare_daily_symbol, run_raw_ingest_official
+from qsys.data.factor_lake.akshare_raw_ingest import _to_akshare_daily_symbol, run_raw_ingest_official
 
 
 class _Result:

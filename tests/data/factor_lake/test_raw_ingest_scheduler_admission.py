@@ -11,7 +11,7 @@ import pytest
 
 from qsys.data.factor_lake import raw_ingest
 from qsys.data.factor_lake.io import raw_partition_path
-from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import run_raw_coverage_ingest
 
 
 class _Result:

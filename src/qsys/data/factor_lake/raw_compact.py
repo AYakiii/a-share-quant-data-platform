@@ -11,9 +11,34 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-LOCAL_INGEST_RAW_RELATIVE_ROOT = Path("data") / "raw" / "akshare"
-LOCAL_COMPACT_ASSET_RELATIVE_ROOT = Path("raw") / "akshare"
-DRIVE_RAW_RELATIVE_ROOT = Path("raw") / "akshare"
+DEFAULT_PROVIDER = "akshare"
+DEFAULT_STORAGE_SCHEMA_VERSION: str | None = None
+PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+def validate_path_segment(value: str | None, *, label: str, allow_empty: bool = False) -> str:
+    """Validate a provider/schema path segment as a conservative slug."""
+    text = str(value or "").strip()
+    if allow_empty and text == "":
+        return ""
+    if not text or text in {".", ".."} or "/" in text or "\\" in text or ".." in Path(text).parts or Path(text).is_absolute() or not PATH_SEGMENT_RE.fullmatch(text):
+        raise ValueError(f"{label} must be a non-empty safe path segment matching [A-Za-z0-9._-]+")
+    return text
+
+def local_ingest_raw_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
+    return Path("data") / "raw" / provider
+
+def compact_asset_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
+    return Path("raw") / provider
+
+def drive_raw_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
+    return Path("raw") / provider
+
+LOCAL_INGEST_RAW_RELATIVE_ROOT = local_ingest_raw_relative_root()
+LOCAL_COMPACT_ASSET_RELATIVE_ROOT = compact_asset_relative_root()
+DRIVE_RAW_RELATIVE_ROOT = drive_raw_relative_root()
 # Backward-compatible alias for callers/tests that imported the original name.
 RAW_RELATIVE_ROOT = LOCAL_INGEST_RAW_RELATIVE_ROOT
 COMPACT_ROOT_PARENT = Path("outputs") / "raw_acquisition_compact"
@@ -26,7 +51,7 @@ FAILED_BACKLOG_FIELDS = [
     "api_name",
     "status",
     "original_symbol",
-    "akshare_symbol",
+    "source_symbol",
     "params_json",
     "partition_json",
     "task_key_json",
@@ -147,10 +172,10 @@ def classify_bucket(partitions: dict[str, str], *, start_date: str, end_date: st
     return "scope", f"run_{start_date}_{end_date}"
 
 
-def scan_raw_assets(output_root: str | Path) -> list[RawAsset]:
-    """Scan already-landed Raw parquet files below <output_root>/data/raw/akshare."""
+def scan_raw_assets(output_root: str | Path, *, provider: str = DEFAULT_PROVIDER) -> list[RawAsset]:
+    """Scan already-landed Raw parquet files below <output_root>/data/raw/<provider>."""
     root = Path(output_root)
-    raw_root = root / LOCAL_INGEST_RAW_RELATIVE_ROOT
+    raw_root = root / local_ingest_raw_relative_root(provider)
     if not raw_root.exists():
         return []
     assets: list[RawAsset] = []
@@ -188,8 +213,12 @@ def classify_raw_assets(assets: Iterable[RawAsset], *, start_date: str, end_date
     return out
 
 
-def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str) -> Path:
-    return package_root / LOCAL_COMPACT_ASSET_RELATIVE_ROOT / source_family / api_name / f"{bucket_kind}={bucket_value}" / "data.parquet"
+def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str, *, provider: str = DEFAULT_PROVIDER, storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION) -> Path:
+    path = package_root / compact_asset_relative_root(provider) / source_family / api_name
+    schema = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True)
+    if schema:
+        path = path / schema
+    return path / f"{bucket_kind}={bucket_value}" / "data.parquet"
 
 
 def _infer_window(output_root: Path) -> tuple[str, str]:
@@ -254,12 +283,16 @@ def compact_raw_lake(
     start_date: str | None = None,
     end_date: str | None = None,
     replace_existing: bool = False,
+    provider: str = DEFAULT_PROVIDER,
+    storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Compact local Raw parquet files into one parquet per source_family/api_name/bucket.
 
     The compaction is inventory-driven and lineage-driven. It does not deduplicate,
     normalize, delete rows, or delete columns.
     """
+    provider = validate_path_segment(provider, label="provider")
+    storage_schema_version = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True) or None
     out_root = Path(output_root)
     inferred_start, inferred_end = _infer_window(out_root)
     start = start_date or inferred_start
@@ -267,9 +300,9 @@ def compact_raw_lake(
     start, end = _validate_acquisition_window(start, end, output_root=out_root)
     name = validate_promotion_name(promotion_name or f"raw_lake_{out_root.name}_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
 
-    assets = scan_raw_assets(out_root)
+    assets = scan_raw_assets(out_root, provider=provider)
     if not assets:
-        raise FileNotFoundError(f"No landed Raw parquet assets found under {out_root / LOCAL_INGEST_RAW_RELATIVE_ROOT}")
+        raise FileNotFoundError(f"No landed Raw parquet assets found under {out_root / local_ingest_raw_relative_root(provider)}")
 
     compact_parent = resolve_compact_parent()
     compact_parent.mkdir(parents=True, exist_ok=True)
@@ -317,7 +350,7 @@ def compact_raw_lake(
         compact_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=expected_columns or [])
         if len(compact_df) != expected_rows:
             raise ValueError("compact row preservation check failed before write")
-        dst = _bucket_path(pkg, source_family, api_name, bucket_kind, bucket_value)
+        dst = _bucket_path(pkg, source_family, api_name, bucket_kind, bucket_value, provider=provider, storage_schema_version=storage_schema_version)
         dst.parent.mkdir(parents=True, exist_ok=True)
         compact_df.to_parquet(dst, index=False)
         reopened = pd.read_parquet(dst)
@@ -347,9 +380,11 @@ def compact_raw_lake(
         "output_root": str(out_root),
         "acquisition_window": {"start_date": start, "end_date": end},
         "created_at": datetime.now(UTC).isoformat(),
-        "local_ingest_raw_relative_root": str(LOCAL_INGEST_RAW_RELATIVE_ROOT),
-        "local_compact_asset_relative_root": str(LOCAL_COMPACT_ASSET_RELATIVE_ROOT),
-        "drive_raw_relative_root": str(DRIVE_RAW_RELATIVE_ROOT),
+        "provider": provider,
+        "storage_schema_version": storage_schema_version or "",
+        "local_ingest_raw_relative_root": str(local_ingest_raw_relative_root(provider)),
+        "local_compact_asset_relative_root": str(compact_asset_relative_root(provider)),
+        "drive_raw_relative_root": str(drive_raw_relative_root(provider)),
         "compact_assets": manifest_assets,
         "total_rows": int(sum(int(a["rows"]) for a in manifest_assets)),
         "failed_backlog_task_count": len(failed_backlog),

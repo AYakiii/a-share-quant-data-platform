@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from qsys.utils import raw_lake_colab_console as console
-from qsys.utils.raw_lake_colab_console import RawLakeConsoleConfig
+from qsys.utils import akshare_raw_lake_colab_console as console
+from qsys.utils.akshare_raw_lake_colab_console import RawLakeConsoleConfig
 
 
 def _namespace(tmp_path: Path, **overrides):
