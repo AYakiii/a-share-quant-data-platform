@@ -117,3 +117,19 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 - Full suite rerun: `PYTHONPATH=src pytest -q` → 607 passed, 1 skipped, 20 warnings.
 - Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
 - Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.
+
+
+## PR136 Final Backfill/Tushare Validation Follow-up
+
+- Added `qsys.utils.run_akshare_backfill_tasks` as the explicit AkShare backfill CLI and converted `qsys.utils.run_factor_lake_backfill_tasks` into a deprecated forwarding shell with a clear migration message.
+- Added explicit `provider` parameters to shared `execute_backfill_task()` and `execute_backfill_tasks()`; non-dry-run shared execution now requires both an adapter registry and provider, and passes `provider` to `write_raw_partition()`.
+- AkShare backfill wrappers now explicitly pass `provider="akshare"`.
+- Added tests proving shared backfill with `provider="tushare"` writes under `data/raw/tushare/...` and does not silently write AkShare paths.
+- Added Tushare dry-run validation for YYYYMMDD dates, ordered date range, non-empty safe schema version, positive expected symbol count, and non-empty universe name.
+- Local API provider read coverage remains in place for `provider="tushare"`.
+
+### Final follow-up tests
+
+- Full suite rerun: `PYTHONPATH=src pytest -q` → 617 passed, 1 skipped, 20 warnings.
+- Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
+- Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.

@@ -94,3 +94,27 @@ def test_tushare_cli_does_not_accept_provider_override(tmp_path: Path, monkeypat
     ], capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": "src"})
     assert proc.returncode != 0
     assert "unrecognized arguments: --provider" in proc.stderr
+
+
+@pytest.mark.parametrize("field, value, message", [
+    ("start_date", "2024-01-01", "YYYYMMDD"),
+    ("end_date", "2024-01-31", "YYYYMMDD"),
+    ("date_order", "bad", "start_date must be <= end_date"),
+    ("storage_schema_version", "../v1", "storage_schema_version"),
+    ("storage_schema_version", "", "storage_schema_version"),
+    ("expected_symbol_count", 0, "expected_symbol_count must be > 0"),
+    ("universe_name", "", "universe_name is required"),
+])
+def test_tushare_dry_run_rejects_bad_runtime_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object, message: str) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "secret-token-value")
+    symbols = tmp_path / "symbols.csv"
+    symbols.write_text("000001.SZ\n600000.SH\n", encoding="utf-8")
+    cfg = _cfg(tmp_path, symbols)
+    kwargs = cfg.__dict__.copy()
+    if field == "date_order":
+        kwargs["start_date"] = "20240201"
+        kwargs["end_date"] = "20240131"
+    else:
+        kwargs[field] = value
+    with pytest.raises(ValueError, match=message):
+        run_tushare_raw_ingest_dry_run(TushareRawIngestConfig(**kwargs))
