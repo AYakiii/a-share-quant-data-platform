@@ -12,7 +12,8 @@ from qsys.data.sources.tushare_client import read_tushare_token
 from qsys.data.sources.tushare_contracts import TushareRawIngestConfig
 from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS
 
-TUSHARE_SYMBOL_RE = re.compile(r"^\d{6}\.(SZ|SH|BJ)$")
+CANONICAL_SYMBOL_RE = re.compile(r"^\d{6}$")
+TUSHARE_TS_CODE_RE = re.compile(r"^(\d{6})\.(SZ|SH|BJ)$")
 DATE_RE = re.compile(r"^\d{8}$")
 
 
@@ -25,21 +26,35 @@ def file_sha256(path: str | Path) -> str:
     return h.hexdigest()
 
 
+def canonical_symbol_from_ts_code(ts_code: str) -> str:
+    """Convert a provider-specific Tushare ts_code into a canonical six-digit symbol."""
+    text = str(ts_code or "").strip().upper()
+    match = TUSHARE_TS_CODE_RE.fullmatch(text)
+    if not match:
+        raise ValueError(f"illegal Tushare ts_code: {ts_code!r}")
+    return match.group(1)
+
+
 def load_symbols(path: str | Path) -> list[str]:
-    """Load and validate non-empty Tushare symbols from an external universe file."""
+    """Load canonical six-digit symbols from an external Universe file.
+
+    The canonical Universe file is provider-neutral. Tushare ``ts_code`` is a
+    provider-specific API representation and is intentionally not required as
+    input for M0 dry-run validation.
+    """
     rows = Path(path).read_text(encoding="utf-8-sig").splitlines()
     symbols: list[str] = []
     seen: set[str] = set()
     for idx, row in enumerate(rows, start=1):
         first = row.split(",", 1)[0].strip()
-        if idx == 1 and first.lower() in {"symbol", "ts_code"}:
+        if idx == 1 and first.lower() in {"symbol", "canonical_symbol"}:
             continue
         if not first:
             raise ValueError(f"empty symbol at line {idx}")
-        if not TUSHARE_SYMBOL_RE.fullmatch(first):
-            raise ValueError(f"illegal Tushare symbol at line {idx}: {first!r}")
+        if not CANONICAL_SYMBOL_RE.fullmatch(first):
+            raise ValueError(f"illegal canonical symbol at line {idx}: {first!r}")
         if first in seen:
-            raise ValueError(f"duplicate symbol in universe file: {first}")
+            raise ValueError(f"duplicate canonical symbol in universe file: {first}")
         seen.add(first)
         symbols.append(first)
     if not symbols:
@@ -79,6 +94,7 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
         "symbol_row_count": len(symbols),
         "unique_symbol_count": len(set(symbols)),
         "symbol_count": len(symbols),
+        "symbol_input_format": "canonical_symbol",
         "start_date": config.start_date,
         "end_date": config.end_date,
         "output_root": str(config.output_root),

@@ -133,3 +133,18 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 - Full suite rerun: `PYTHONPATH=src pytest -q` → 617 passed, 1 skipped, 20 warnings.
 - Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
 - Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.
+
+
+## PR136 Canonical Universe / Tushare ts_code Boundary Follow-up
+
+- Tushare dry-run Universe loading now accepts provider-neutral canonical six-digit symbols directly.
+- Canonical Universe lineage (`symbols_file`, `universe_sha256`, row count, unique count) remains based on the operator's original input file.
+- Tushare `ts_code` is documented and handled as a provider-specific API representation, not as the baseline Universe format.
+- Added `canonical_symbol_from_ts_code()` for future API-result filtering workflows that need to derive canonical symbols from provider-specific `ts_code` values.
+- No provider-specific baseline Universe file is created or required.
+
+### Canonical Universe follow-up tests
+
+- Full suite rerun: `PYTHONPATH=src pytest -q` → 619 passed, 1 skipped, 20 warnings.
+- Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
+- Tushare hard-code scan rerun for forbidden universe/count literals in Tushare modules → no matches.
