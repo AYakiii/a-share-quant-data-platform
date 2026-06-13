@@ -1,3 +1,4 @@
+"""Legacy reference: superseded by the current DWH3.0 Raw Lake workflow; do not extend this runner for Tushare. Removal condition: delete after historical P0 pipeline users have migrated to provider-explicit Raw Lake CLIs."""
 from __future__ import annotations
 
 import argparse
@@ -8,8 +9,8 @@ from qsys.data.factor_lake.acquisition_compact import compact_run
 from qsys.data.factor_lake.acquisition_profiles import get_acquisition_profile
 from qsys.data.factor_lake.acquisition_promotion import promote_compact, qa_promoted_asset
 from qsys.data.factor_lake.acquisition_validation import resolve_run_dir, validate_run
-from qsys.utils.run_p0_raw_acquisition_wave import parse_args as p0_parse_args
-from qsys.utils.run_p0_raw_acquisition_wave import run_p0_wave
+from qsys.utils.run_akshare_p0_raw_acquisition_wave import parse_args as p0_parse_args
+from qsys.utils.run_akshare_p0_raw_acquisition_wave import run_p0_wave
 
 
 def _reject_drive_path(path_text: str) -> None:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from qsys.data.factor_lake.raw_ingest import API_POLICY_METADATA, COVERAGE_API_SPECS, run_raw_coverage_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_API_POLICY_METADATA, AKSHARE_COVERAGE_API_SPECS, run_raw_coverage_ingest
 
 
 DOWNGRADED_STRUCTURAL_APIS = {
@@ -31,7 +31,7 @@ HEALTHY_DEFAULT_APIS = {
 def _coverage_pairs() -> set[tuple[str, str]]:
     return {
         (family, spec["api_name"])
-        for family, specs in COVERAGE_API_SPECS.items()
+        for family, specs in AKSHARE_COVERAGE_API_SPECS.items()
         for spec in specs
     }
 
@@ -41,7 +41,7 @@ def test_structural_ths_and_sw_sources_are_registered_manual_review_and_default_
     assert {("industry_concept", api_name) for api_name in DOWNGRADED_STRUCTURAL_APIS} <= coverage_pairs
 
     for api_name in DOWNGRADED_STRUCTURAL_APIS:
-        policy = API_POLICY_METADATA[("industry_concept", api_name)]
+        policy = AKSHARE_API_POLICY_METADATA[("industry_concept", api_name)]
         assert policy["enabled"] is False
         assert policy["default_enabled"] is False
         assert policy["manual_review_required"] is True
@@ -131,14 +131,14 @@ def test_czce_mixed_text_object_columns_write_parquet_successfully(tmp_path: Pat
 
 
 def test_investigation_markers_for_shfe_and_concept_fund_flow() -> None:
-    shfe_policy = API_POLICY_METADATA[("commodity_inventory", "futures_shfe_warehouse_receipt")]
+    shfe_policy = AKSHARE_API_POLICY_METADATA[("commodity_inventory", "futures_shfe_warehouse_receipt")]
     assert shfe_policy["default_enabled"] is False
     assert shfe_policy["manual_review_required"] is True
     assert shfe_policy["acquisition_mode"] == "manual_selected_only"
     assert "non-JSON" in str(shfe_policy["disabled_reason"])
     assert "date compatibility" in str(shfe_policy["disabled_reason"])
 
-    concept_policy = API_POLICY_METADATA[("market_sentiment", "stock_fund_flow_concept")]
+    concept_policy = AKSHARE_API_POLICY_METADATA[("market_sentiment", "stock_fund_flow_concept")]
     assert concept_policy["default_enabled"] is False
     assert concept_policy["manual_review_required"] is True
     assert concept_policy["acquisition_mode"] == "manual_selected_only"
@@ -150,10 +150,10 @@ def test_healthy_non_structural_sources_remain_default_acquirable() -> None:
     assert HEALTHY_DEFAULT_APIS <= coverage_pairs
 
     for pair in HEALTHY_DEFAULT_APIS:
-        policy = API_POLICY_METADATA.get(pair, {})
+        policy = AKSHARE_API_POLICY_METADATA.get(pair, {})
         assert policy.get("default_enabled", True) is not False
         assert policy.get("acquisition_mode") != "manual_selected_only"
 
-    financial_indicator_policy = API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")]
+    financial_indicator_policy = AKSHARE_API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")]
     assert financial_indicator_policy["default_enabled"] is False
     assert financial_indicator_policy["acquisition_mode"] == "manual_selected_only"

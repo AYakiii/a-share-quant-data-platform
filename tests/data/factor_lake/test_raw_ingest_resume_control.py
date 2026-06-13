@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from qsys.data.factor_lake import raw_ingest
-from qsys.data.factor_lake.raw_ingest import API_POLICY_METADATA, run_raw_coverage_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_API_POLICY_METADATA, run_raw_coverage_ingest
 
 
 class _Result:
@@ -163,7 +163,7 @@ def test_heavy_sources_are_manual_selected_only_and_policy_is_truthful(tmp_path:
     assert status_by_api["stock_gdfx_free_holding_analyse_em"] == "skipped"
     assert error_by_api["stock_gdfx_free_holding_analyse_em"] == "default_disabled"
 
-    holding_policy = API_POLICY_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")]
+    holding_policy = AKSHARE_API_POLICY_METADATA[("event_ownership", "stock_gdfx_holding_analyse_em")]
     assert holding_policy["enabled"] is False
     assert holding_policy["default_enabled"] is False
     assert holding_policy["manual_review_required"] is True

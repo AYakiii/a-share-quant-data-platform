@@ -12,7 +12,7 @@ import pandas as pd
 from qsys.data.factor_lake.backfill_tasks import RawBackfillTask
 from qsys.data.factor_lake.io import write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
-from qsys.data.factor_lake.raw_ingest import DEFAULT_ADAPTERS
+from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_DEFAULT_ADAPTERS
 
 
 @dataclass
@@ -101,7 +101,7 @@ def execute_backfill_task(task: RawBackfillTask, output_root: str, metastore_pat
 
     partition = json.loads(task.partition)
     fetch_params = json.loads(task.fetch_params)
-    adapters = adapter_override or DEFAULT_ADAPTERS
+    adapters = adapter_override or AKSHARE_DEFAULT_ADAPTERS
     out_path = meta_path = ""
     status = "failed"
     rows = 0

@@ -1,8 +1,10 @@
+> Legacy: this raw acquisition pipeline is superseded by the current DWH3.0 Raw Lake workflow. Do not extend it for Tushare. Removal condition: delete after historical P0 users migrate to provider-explicit Raw Lake CLIs.
+
 # Raw Acquisition Pipeline CLI
 
 This CLI productizes the proven raw acquisition workflow by orchestrating existing modules instead of replacing them.
 
-- Reuses `run_p0_raw_acquisition_wave.py` for `pull --profile p0`.
+- Reuses `run_akshare_p0_raw_acquisition_wave.py (formerly run_p0_raw_acquisition_wave.py)` for `pull --profile p0`.
 - Reuses existing P0 artifacts (`p0_wave_catalog.csv`, `p0_wave_manifest.json`, `p0_wave_summary.json`, `p0_final_acceptance_report.json`).
 - Keeps local staging before any Drive promotion.
 

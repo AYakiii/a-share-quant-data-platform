@@ -285,7 +285,7 @@ def test_prepare_binds_custom_drive_roots_and_semantic_collision_plan(tmp_path, 
     plan = pd.read_csv(pkg / "drive_collision_plan.csv")
     for col in ["source_family", "api_name", "bucket_kind", "bucket_value", "rows", "relative_path", "drive_path"]:
         assert col in plan.columns
-    assert plan.loc[0, "drive_path"] == str(drive.resolve() / "raw" / "akshare" / "fam" / "api" / "year=2022" / "data.parquet")
+    assert plan.loc[0, "drive_path"] == str(drive.resolve() / "raw" / "akshare" / "fam" / "api" / "v1" / "year=2022" / "data.parquet")
     assert not (drive / "raw" / "akshare").exists()
 
 

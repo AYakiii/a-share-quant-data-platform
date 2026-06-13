@@ -9,8 +9,9 @@ import pandas as pd
 
 from qsys.data.factor_lake.schemas import SourceCase, SourceRunResult
 
-def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str]) -> Path:
-    path = Path(root) / "data" / "raw" / "akshare" / source_family / api_name
+def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str], *, provider: str = "akshare") -> Path:
+    """Return/create a local Raw partition path under data/raw/<provider>."""
+    path = Path(root) / "data" / "raw" / provider / source_family / api_name
     for k, v in partition.items():
         path = path / f"{k}={v}"
     path.mkdir(parents=True, exist_ok=True)
@@ -57,8 +58,9 @@ def write_raw_partition(
     metadata: dict[str, Any],
     *,
     overwrite: bool = False,
+    provider: str = "akshare",
 ) -> tuple[Path, Path]:
-    out_dir = raw_partition_path(root, source_family, api_name, partition)
+    out_dir = raw_partition_path(root, source_family, api_name, partition, provider=provider)
     data_path = out_dir / "data.parquet"
     meta_path = out_dir / "metadata.json"
     if not overwrite and (data_path.exists() or meta_path.exists()):

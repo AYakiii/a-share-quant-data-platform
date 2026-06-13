@@ -5,7 +5,7 @@ import json
 import pandas as pd
 
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
-from qsys.data.factor_lake.raw_ingest import run_raw_coverage_ingest, run_raw_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import run_raw_coverage_ingest, run_raw_ingest
 
 
 class _Result:
