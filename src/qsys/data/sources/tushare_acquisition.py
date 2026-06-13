@@ -1,7 +1,9 @@
 """Tushare Raw acquisition dry-run skeleton."""
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,15 +11,37 @@ from qsys.data.sources.tushare_client import read_tushare_token
 from qsys.data.sources.tushare_contracts import TushareRawIngestConfig
 from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS
 
+TUSHARE_SYMBOL_RE = re.compile(r"^\d{6}\.(SZ|SH|BJ)$")
+
+
+def file_sha256(path: str | Path) -> str:
+    """Compute SHA-256 for the external universe file without logging contents."""
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def load_symbols(path: str | Path) -> list[str]:
-    """Load non-empty symbols from a text/CSV-like external universe file."""
+    """Load and validate non-empty Tushare symbols from an external universe file."""
     rows = Path(path).read_text(encoding="utf-8-sig").splitlines()
     symbols: list[str] = []
-    for row in rows:
+    seen: set[str] = set()
+    for idx, row in enumerate(rows, start=1):
         first = row.split(",", 1)[0].strip()
-        if first and first.lower() not in {"symbol", "ts_code"}:
-            symbols.append(first)
+        if idx == 1 and first.lower() in {"symbol", "ts_code"}:
+            continue
+        if not first:
+            raise ValueError(f"empty symbol at line {idx}")
+        if not TUSHARE_SYMBOL_RE.fullmatch(first):
+            raise ValueError(f"illegal Tushare symbol at line {idx}: {first!r}")
+        if first in seen:
+            raise ValueError(f"duplicate symbol in universe file: {first}")
+        seen.add(first)
+        symbols.append(first)
+    if not symbols:
+        raise ValueError("symbols_file must contain at least one symbol")
     return symbols
 
 
@@ -28,6 +52,8 @@ def staging_root(config: TushareRawIngestConfig) -> Path:
 
 def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
     """Validate operator inputs and return a token-free dry-run manifest."""
+    if config.provider != "tushare":
+        raise ValueError("Tushare raw ingest config provider must be 'tushare'")
     if require_token:
         read_tushare_token(allow_prompt=False)
     symbols = load_symbols(config.symbols_file)
@@ -37,6 +63,10 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
         "provider": config.provider,
         "storage_schema_version": config.storage_schema_version,
         "universe_name": config.universe_name,
+        "symbols_file": str(config.symbols_file),
+        "universe_sha256": file_sha256(config.symbols_file),
+        "symbol_row_count": len(symbols),
+        "unique_symbol_count": len(set(symbols)),
         "symbol_count": len(symbols),
         "start_date": config.start_date,
         "end_date": config.end_date,

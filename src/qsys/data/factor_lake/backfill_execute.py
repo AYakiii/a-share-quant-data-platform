@@ -12,7 +12,6 @@ import pandas as pd
 from qsys.data.factor_lake.backfill_tasks import RawBackfillTask
 from qsys.data.factor_lake.io import write_raw_partition
 from qsys.data.factor_lake.metastore import FactorLakeMetastore
-from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_DEFAULT_ADAPTERS
 
 
 @dataclass
@@ -101,7 +100,9 @@ def execute_backfill_task(task: RawBackfillTask, output_root: str, metastore_pat
 
     partition = json.loads(task.partition)
     fetch_params = json.loads(task.fetch_params)
-    adapters = adapter_override or AKSHARE_DEFAULT_ADAPTERS
+    if adapter_override is None:
+        raise ValueError("adapter_override is required for non-dry-run backfill execution; use akshare_execute_backfill_task for legacy AkShare behavior")
+    adapters = adapter_override
     out_path = meta_path = ""
     status = "failed"
     rows = 0
@@ -158,3 +159,17 @@ def execute_backfill_tasks(tasks: list[RawBackfillTask], output_root: str, metas
     df = pd.DataFrame([asdict(r) for r in results]) if results else pd.DataFrame(columns=list(RawBackfillTaskResult.__annotations__.keys()))
     summary = df.groupby(["source_family", "dataset_name", "status"], as_index=False).size() if not df.empty else pd.DataFrame(columns=["source_family", "dataset_name", "status", "size"])
     return {"task_count": len(selected), "result_count": len(results), "results": [asdict(r) for r in results], "summary": summary.rename(columns={"size": "count"}).to_dict(orient="records")}
+
+
+def akshare_execute_backfill_task(task: RawBackfillTask, output_root: str, metastore_path: str, *, dry_run: bool = True) -> RawBackfillTaskResult:
+    """Legacy AkShare wrapper that supplies the AkShare adapter registry explicitly."""
+    from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_DEFAULT_ADAPTERS
+
+    return execute_backfill_task(task, output_root, metastore_path, adapter_override=AKSHARE_DEFAULT_ADAPTERS, dry_run=dry_run)
+
+
+def akshare_execute_backfill_tasks(tasks: list[RawBackfillTask], output_root: str, metastore_path: str, max_tasks: int | None = None, dry_run: bool = True, continue_on_error: bool = True, request_sleep: float = 0.0) -> dict:
+    """Legacy AkShare wrapper that supplies the AkShare adapter registry explicitly."""
+    from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_DEFAULT_ADAPTERS
+
+    return execute_backfill_tasks(tasks, output_root, metastore_path, max_tasks=max_tasks, dry_run=dry_run, continue_on_error=continue_on_error, request_sleep=request_sleep, adapter_override=AKSHARE_DEFAULT_ADAPTERS)

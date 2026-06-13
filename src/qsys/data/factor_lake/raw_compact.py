@@ -12,15 +12,28 @@ from typing import Any, Iterable
 import pandas as pd
 
 DEFAULT_PROVIDER = "akshare"
-DEFAULT_STORAGE_SCHEMA_VERSION = "v1"
+DEFAULT_STORAGE_SCHEMA_VERSION: str | None = None
+PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+def validate_path_segment(value: str | None, *, label: str, allow_empty: bool = False) -> str:
+    """Validate a provider/schema path segment as a conservative slug."""
+    text = str(value or "").strip()
+    if allow_empty and text == "":
+        return ""
+    if not text or text in {".", ".."} or "/" in text or "\\" in text or ".." in Path(text).parts or Path(text).is_absolute() or not PATH_SEGMENT_RE.fullmatch(text):
+        raise ValueError(f"{label} must be a non-empty safe path segment matching [A-Za-z0-9._-]+")
+    return text
 
 def local_ingest_raw_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
     return Path("data") / "raw" / provider
 
 def compact_asset_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
     return Path("raw") / provider
 
 def drive_raw_relative_root(provider: str = DEFAULT_PROVIDER) -> Path:
+    provider = validate_path_segment(provider, label="provider")
     return Path("raw") / provider
 
 LOCAL_INGEST_RAW_RELATIVE_ROOT = local_ingest_raw_relative_root()
@@ -39,7 +52,6 @@ FAILED_BACKLOG_FIELDS = [
     "status",
     "original_symbol",
     "source_symbol",
-    "akshare_symbol",
     "params_json",
     "partition_json",
     "task_key_json",
@@ -201,8 +213,12 @@ def classify_raw_assets(assets: Iterable[RawAsset], *, start_date: str, end_date
     return out
 
 
-def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str, *, provider: str = DEFAULT_PROVIDER, storage_schema_version: str = DEFAULT_STORAGE_SCHEMA_VERSION) -> Path:
-    return package_root / compact_asset_relative_root(provider) / source_family / api_name / storage_schema_version / f"{bucket_kind}={bucket_value}" / "data.parquet"
+def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str, *, provider: str = DEFAULT_PROVIDER, storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION) -> Path:
+    path = package_root / compact_asset_relative_root(provider) / source_family / api_name
+    schema = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True)
+    if schema:
+        path = path / schema
+    return path / f"{bucket_kind}={bucket_value}" / "data.parquet"
 
 
 def _infer_window(output_root: Path) -> tuple[str, str]:
@@ -268,13 +284,15 @@ def compact_raw_lake(
     end_date: str | None = None,
     replace_existing: bool = False,
     provider: str = DEFAULT_PROVIDER,
-    storage_schema_version: str = DEFAULT_STORAGE_SCHEMA_VERSION,
+    storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
     """Compact local Raw parquet files into one parquet per source_family/api_name/bucket.
 
     The compaction is inventory-driven and lineage-driven. It does not deduplicate,
     normalize, delete rows, or delete columns.
     """
+    provider = validate_path_segment(provider, label="provider")
+    storage_schema_version = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True) or None
     out_root = Path(output_root)
     inferred_start, inferred_end = _infer_window(out_root)
     start = start_date or inferred_start
@@ -363,7 +381,7 @@ def compact_raw_lake(
         "acquisition_window": {"start_date": start, "end_date": end},
         "created_at": datetime.now(UTC).isoformat(),
         "provider": provider,
-        "storage_schema_version": storage_schema_version,
+        "storage_schema_version": storage_schema_version or "",
         "local_ingest_raw_relative_root": str(local_ingest_raw_relative_root(provider)),
         "local_compact_asset_relative_root": str(compact_asset_relative_root(provider)),
         "drive_raw_relative_root": str(drive_raw_relative_root(provider)),

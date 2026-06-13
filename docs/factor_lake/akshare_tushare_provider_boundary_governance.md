@@ -98,3 +98,22 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 - Add one narrowly scoped Tushare source implementation behind the dry-run contract.
 - Define per-source Raw storage schema contracts before enabling non-dry-run writes.
 - Add integration tests using temporary local roots before any Drive prepare/promotion workflow is considered.
+
+
+## PR136 Follow-up Review Fixes
+
+- Restored AkShare legacy compact target paths so default AkShare prepare writes `raw/akshare/<family>/<api>/<bucket>/data.parquet` without inserting a schema-version layer.
+- Made `storage_schema_version` optional for AkShare and required for non-AkShare providers such as Tushare; Tushare prepare uses `raw/tushare/<family>/<api>/v1/<bucket>/data.parquet`.
+- Added conservative path-segment validation for `provider` and non-empty `storage_schema_version`, rejecting empty provider, `.`, `..`, absolute paths, separators, traversal, and non-slug input.
+- Added Tushare universe lineage fields: `symbols_file`, `universe_sha256`, `symbol_row_count`, and `unique_symbol_count`; duplicate, empty, illegal-format, and expected-count mismatches are rejected.
+- Fixed the Tushare CLI so it is hard-bound to `provider="tushare"`; only shared compact CLI accepts operator-supplied provider.
+- Removed implicit `AKSHARE_DEFAULT_ADAPTERS` fallback from shared backfill execution; legacy AkShare wrappers now supply AkShare adapters explicitly.
+- Added `provider` to RawWarehouse manifests and kept shared artifact fixed fields to `original_symbol` and `source_symbol`, with `akshare_symbol` remaining provider-specific optional metadata.
+- Added `provider` to local Raw read APIs with legacy default `akshare`.
+- Prepare review output now includes `provider`, `storage_schema_version`, and `prepared_drive_raw_root`.
+
+### Follow-up tests
+
+- Full suite rerun: `PYTHONPATH=src pytest -q` → 607 passed, 1 skipped, 20 warnings.
+- Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
+- Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.

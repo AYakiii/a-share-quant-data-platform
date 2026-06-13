@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 import pandas as pd
+import pytest
 
 from qsys.data.factor_lake.backfill_execute import execute_backfill_tasks
 from qsys.data.factor_lake.backfill_tasks import generate_tasks_from_default_backfill_plan
@@ -54,3 +55,9 @@ def test_max_tasks_limit(tmp_path):
     tasks = generate_tasks_from_default_backfill_plan()
     out = execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), max_tasks=1, dry_run=True)
     assert out["task_count"] == 1
+
+
+def test_non_dry_run_requires_explicit_adapter_registry(tmp_path):
+    tasks = generate_tasks_from_default_backfill_plan()[:1]
+    with pytest.raises(ValueError, match="adapter_override is required"):
+        execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, continue_on_error=True)

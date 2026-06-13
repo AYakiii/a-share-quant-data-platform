@@ -8,9 +8,11 @@ from typing import Any
 import pandas as pd
 
 from qsys.data.factor_lake.schemas import SourceCase, SourceRunResult
+from qsys.data.factor_lake.raw_compact import validate_path_segment
 
 def raw_partition_path(root: str | Path, source_family: str, api_name: str, partition: dict[str, str], *, provider: str = "akshare") -> Path:
     """Return/create a local Raw partition path under data/raw/<provider>."""
+    provider = validate_path_segment(provider, label="provider")
     path = Path(root) / "data" / "raw" / provider / source_family / api_name
     for k, v in partition.items():
         path = path / f"{k}={v}"
