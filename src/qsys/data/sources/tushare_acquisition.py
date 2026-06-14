@@ -6,15 +6,18 @@ import hashlib
 import json
 import random
 import re
+import threading
 import time
-from dataclasses import asdict
-from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
 
 from qsys.data.factor_lake.raw_compact import validate_path_segment
+from qsys.data.sources.tushare_calendar import CalendarPlan, TushareCalendarPlanner, calendar_days
 from qsys.data.sources.tushare_client import TushareClient, read_tushare_token
 from qsys.data.sources.tushare_contracts import TushareRawIngestConfig, TushareSourceSpec
 from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS, source_specs_by_api
@@ -82,14 +85,7 @@ def artifact_root(config: TushareRawIngestConfig) -> Path:
 
 
 def _date_range(start_date: str, end_date: str) -> list[str]:
-    start = datetime.strptime(start_date, "%Y%m%d")
-    end = datetime.strptime(end_date, "%Y%m%d")
-    days: list[str] = []
-    cur = start
-    while cur <= end:
-        days.append(cur.strftime("%Y%m%d"))
-        cur += timedelta(days=1)
-    return days
+    return calendar_days(start_date, end_date)
 
 
 def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], list[str], list[str], list[TushareSourceSpec], list[str]]:
@@ -130,7 +126,38 @@ def _partition_dir(config: TushareRawIngestConfig, spec: TushareSourceSpec, trad
     return staging_root(config) / spec.source_family / spec.api_name / f"{spec.partition_key}={trade_date}"
 
 
-def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], requested_api_names: list[str], requested_families: list[str], specs: list[TushareSourceSpec], trade_dates: list[str]) -> dict[str, Any]:
+def _read_dates_file(path: Path) -> list[str]:
+    """Read debug/override request dates from a local file."""
+    rows = [row.strip().split(",", 1)[0].strip() for row in path.read_text(encoding="utf-8-sig").splitlines()]
+    dates = [row for row in rows if row and row.lower() not in {"date", "trade_date", "cal_date"}]
+    bad = [row for row in dates if not DATE_RE.fullmatch(row)]
+    if bad:
+        raise ValueError(f"dates_file contains non-YYYYMMDD values: {bad[:3]}")
+    return dates
+
+
+def _resolve_calendar_plan(config: TushareRawIngestConfig, specs: list[TushareSourceSpec], client: TushareQueryClient | None = None, *, allow_offline: bool = False) -> CalendarPlan:
+    """Resolve the run-level request dates and calendar lineage."""
+    natural_days = _date_range(config.start_date, config.end_date)
+    if config.dates_file is not None:
+        dates = _read_dates_file(config.dates_file)
+        return CalendarPlan(dates, natural_days, "dates_file", "manual", str(config.dates_file), max(0, len(natural_days) - len(dates)))
+    modes = {spec.calendar_mode for spec in specs}
+    if len(modes) > 1:
+        raise NotImplementedError("mixed Tushare calendar_mode values are not yet supported in one run")
+    if modes == {"calendar_days"}:
+        return CalendarPlan(natural_days, natural_days, "calendar_days", "calendar_range", None, 0)
+    if "trading_days" in modes:
+        try:
+            return TushareCalendarPlanner(config.output_root, client=client).plan(config.start_date, config.end_date, calendar_mode="trading_days")
+        except Exception:
+            if not allow_offline:
+                raise
+            return CalendarPlan([], natural_days, "calendar_unresolved", "trade_cal", None, len(natural_days))
+    return CalendarPlan(natural_days, natural_days, "manual", "manual", None, 0)
+
+
+def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], requested_api_names: list[str], requested_families: list[str], specs: list[TushareSourceSpec], trade_dates: list[str], calendar_plan: CalendarPlan | None = None) -> dict[str, Any]:
     """Build the token-free acquisition manifest."""
     return {
         "provider": config.provider,
@@ -144,6 +171,17 @@ def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], reques
         "symbol_input_format": "canonical_symbol",
         "start_date": config.start_date,
         "end_date": config.end_date,
+        "requested_start_date": config.start_date,
+        "requested_end_date": config.end_date,
+        "date_source": calendar_plan.date_source if calendar_plan else "calendar_days",
+        "dates_file": str(config.dates_file) if config.dates_file else None,
+        "calendar_source": calendar_plan.calendar_source if calendar_plan else "calendar_range",
+        "calendar_unresolved": (calendar_plan.date_source == "calendar_unresolved") if calendar_plan else False,
+        "calendar_cache_path": calendar_plan.cache_path if calendar_plan else None,
+        "calendar_mode_by_api": {spec.api_name: spec.calendar_mode for spec in specs},
+        "request_date_count": len(trade_dates),
+        "skipped_calendar_days_count": (calendar_plan.skipped_non_trading_days_count if calendar_plan else 0),
+        "skipped_non_trading_days_count": (calendar_plan.skipped_non_trading_days_count if calendar_plan else 0),
         "requested_api_names": requested_api_names,
         "requested_families": requested_families,
         "api_names": [spec.api_name for spec in specs],
@@ -169,14 +207,21 @@ def _validate_symbols(config: TushareRawIngestConfig) -> list[str]:
     return symbols
 
 
-def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
+def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True, client: TushareQueryClient | None = None) -> dict[str, Any]:
     """Validate inputs and return a token-free dry-run manifest without calling Tushare APIs."""
     cfg = TushareRawIngestConfig(**{**config.__dict__, "dry_run": True})
-    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(cfg)
+    _, requested_api_names, requested_families, _, specs, _ = _validate_config(cfg)
+    symbols = _validate_symbols(cfg)
+    calendar_client = client
     if require_token:
         read_tushare_token(allow_prompt=False)
-    symbols = _validate_symbols(cfg)
-    return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
+        if calendar_client is None:
+            try:
+                calendar_client = TushareClient()
+            except ModuleNotFoundError:
+                calendar_client = None
+    calendar_plan = _resolve_calendar_plan(cfg, specs, client=calendar_client, allow_offline=True)
+    return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=calendar_plan.trade_dates, calendar_plan=calendar_plan)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -354,10 +399,31 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
     _write_csv(artifacts / "operator_summary_by_api.csv", rows_by_api)
     return summary
 
-def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_date: str, retry: int) -> tuple[pd.DataFrame, str | None]:
+class RequestPacer:
+    """Thread-safe global API request pacer."""
+
+    def __init__(self, request_sleep: float, request_jitter: float = 0.0) -> None:
+        self.request_sleep = max(0.0, float(request_sleep))
+        self.request_jitter = max(0.0, float(request_jitter))
+        self._last_request_at = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        """Block until the next global provider request is allowed."""
+        with self._lock:
+            now = time.monotonic()
+            wait = self.request_sleep + random.uniform(0, self.request_jitter) - (now - self._last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_request_at = time.monotonic()
+
+
+def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_date: str, retry: int, pacer: RequestPacer | None = None) -> tuple[pd.DataFrame, str | None]:
     last_error: str | None = None
     for attempt in range(max(0, retry) + 1):
         try:
+            if pacer is not None:
+                pacer.acquire()
             params: dict[str, Any] = {"trade_date": trade_date}
             if spec.fields:
                 params["fields"] = ",".join(spec.fields)
@@ -367,6 +433,15 @@ def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_
             if attempt >= retry:
                 break
     return pd.DataFrame(), last_error
+
+
+@dataclass(frozen=True)
+class TaskResult:
+    """Worker result aggregated by the main acquisition thread."""
+
+    status: str
+    rows: dict[str, list[dict[str, Any]]]
+    current: dict[str, str]
 
 
 def _progress_payload(config: TushareRawIngestConfig, started_at: str, start_ts: float, total: int, completed: int, status_counts: dict[str, int], current: dict[str, str] | None) -> dict[str, Any]:
@@ -420,16 +495,19 @@ def _append_qa_from_metadata(
 
 def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQueryClient | None = None) -> dict[str, Any]:
     """Run local-only Tushare raw acquisition and write staging plus QA artifacts."""
-    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(config)
+    _, requested_api_names, requested_families, _, specs, _ = _validate_config(config)
     symbols = _validate_symbols(config)
     universe = set(symbols)
-    manifest = build_manifest(config, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
+    bootstrap_client = client or TushareClient()
+    calendar_plan = _resolve_calendar_plan(config, specs, client=bootstrap_client, allow_offline=client is not None)
+    trade_dates = calendar_plan.trade_dates
+    manifest = build_manifest(config, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates, calendar_plan=calendar_plan)
     artifacts = artifact_root(config)
     _write_json(artifacts / "tushare_acquisition_manifest.json", manifest)
     if config.dry_run:
         _write_operator_summaries(config, manifest, artifacts)
         return manifest
-    client = client or TushareClient()
+
     catalog: list[dict[str, Any]] = []
     coverage: list[dict[str, Any]] = []
     field_presence: list[dict[str, Any]] = []
@@ -438,13 +516,25 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
     events_path = artifacts / "operation_events.jsonl"
     live_path = artifacts / "live_progress.json"
     events_path.parent.mkdir(parents=True, exist_ok=True)
-    total_tasks = len(specs) * len(trade_dates)
+    tasks = [(spec, trade_date) for spec in specs for trade_date in trade_dates]
+    total_tasks = len(tasks)
     completed = 0
     status_counts = {"ok": 0, "empty": 0, "request_failed": 0, "already_exists": 0, "incomplete_existing_partition": 0, "already_exists_metadata_incomplete": 0}
     started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     start_ts = time.monotonic()
     heartbeat_sec = config.heartbeat_sec if config.heartbeat_sec and config.heartbeat_sec > 0 else None
     next_heartbeat = start_ts if heartbeat_sec is not None else float("inf")
+    progress_lock = threading.Lock()
+    events_lock = threading.Lock()
+    pacer = RequestPacer(config.request_sleep, config.request_jitter)
+    thread_local = threading.local()
+
+    def get_client() -> TushareQueryClient:
+        if client is not None:
+            return client
+        if not hasattr(thread_local, "client"):
+            thread_local.client = TushareClient()
+        return thread_local.client
 
     def update_progress(current: dict[str, str] | None, *, force_stdout: bool = False) -> None:
         nonlocal next_heartbeat
@@ -453,87 +543,91 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
         now = time.monotonic()
         if heartbeat_sec is not None and (force_stdout or now >= next_heartbeat):
             current_text = "none" if current is None else f"{current['api_name']}:{current['trade_date']}"
-            print(
-                f"[heartbeat] elapsed_sec={payload['elapsed_sec']} total_tasks={total_tasks} "
-                f"completed_tasks={completed} pending_or_running_tasks={payload['pending_or_running_tasks']} "
-                f"status_counts={status_counts} current={current_text}",
-                flush=True,
-            )
+            print(f"[heartbeat] elapsed_sec={payload['elapsed_sec']} total_tasks={total_tasks} completed_tasks={completed} pending_or_running_tasks={payload['pending_or_running_tasks']} status_counts={status_counts} current={current_text}", flush=True)
             next_heartbeat = now + heartbeat_sec
 
-    def emit(events: Any, payload: dict[str, Any]) -> None:
-        events.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        events.flush()
+    def emit(payload: dict[str, Any]) -> None:
+        with events_lock:
+            with events_path.open("a", encoding="utf-8") as events:
+                events.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    update_progress(None)
-    with events_path.open("w", encoding="utf-8") as events:
-        for spec in specs:
-            for trade_date in trade_dates:
-                current = {"api_name": spec.api_name, "trade_date": trade_date}
-                update_progress(current)
-                part = _partition_dir(config, spec, trade_date)
-                data_path = part / "data.parquet"
-                meta_path = part / "metadata.json"
-                base = {"api_name": spec.api_name, "family": spec.source_family, "trade_date": trade_date, "partition_path": str(part)}
-                emit(events, {**base, "event": "task_started"})
-                if config.resume and data_path.exists() and meta_path.exists():
-                    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-                    status = "already_exists" if _metadata_complete(metadata) else "already_exists_metadata_incomplete"
-                    catalog.append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": metadata.get("filtered_row_count")})
-                    _append_qa_from_metadata(base=base, spec=spec, metadata=metadata, data_path=data_path, coverage=coverage, field_presence=field_presence, duplicates=duplicates, universe_rows=universe_rows)
-                    status_counts[status] = status_counts.get(status, 0) + 1
-                    completed += 1
-                    emit(events, {**base, "event": status})
-                    update_progress(current)
-                    continue
-                if data_path.exists() or meta_path.exists():
-                    catalog.append({**base, "status": "incomplete_existing_partition"})
-                    status_counts["incomplete_existing_partition"] += 1
-                    completed += 1
-                    emit(events, {**base, "event": "incomplete_existing_partition"})
-                    update_progress(current)
-                    continue
-                if config.request_sleep > 0:
-                    time.sleep(config.request_sleep + random.uniform(0, max(0.0, config.request_jitter)))
-                df, error = _call_with_retry(client, spec, trade_date, config.retry)
-                if error:
-                    catalog.append({**base, "status": "request_failed", "error": error})
-                    status_counts["request_failed"] += 1
-                    completed += 1
-                    emit(events, {**base, "event": "request_failed", "error": error})
-                    update_progress(current)
-                    continue
-                raw_rows = len(df)
-                df = df.copy()
-                if "ts_code" in df.columns:
-                    df["canonical_symbol"] = df["ts_code"].map(canonical_symbol_from_ts_code)
-                else:
-                    df["canonical_symbol"] = pd.Series(dtype="object")
-                if "trade_date" not in df.columns:
-                    df["trade_date"] = trade_date
-                allowed_columns = [c for c in (*spec.fields, "canonical_symbol") if c in df.columns]
-                df = df.loc[:, allowed_columns]
-                pre_symbols = int(df["canonical_symbol"].nunique()) if len(df) else 0
-                filtered = df[df["canonical_symbol"].isin(universe)].copy()
-                post_symbols = int(filtered["canonical_symbol"].nunique()) if len(filtered) else 0
-                missing = len(universe - set(filtered["canonical_symbol"].dropna().astype(str)))
-                duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
-                part.mkdir(parents=True, exist_ok=False)
-                filtered.to_parquet(data_path, index=False)
-                status = "empty" if raw_rows == 0 else "ok"
-                metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
-                _write_json(meta_path, metadata)
-                catalog.append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
-                coverage.append(metadata)
-                duplicates.append({**base, "duplicate_key_count": duplicate_count})
-                universe_rows.append({**base, "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing})
-                for column in sorted(set(filtered.columns) | set(spec.fields) | {"canonical_symbol"}):
-                    field_presence.append({**base, "field": column, "present": column in filtered.columns, "null_count": int(filtered[column].isna().sum()) if column in filtered.columns else None, "dtype": str(filtered[column].dtype) if column in filtered.columns else None})
-                status_counts[status] += 1
-                completed += 1
-                emit(events, {**base, "event": "partition_written", "row_count": len(filtered)})
-                update_progress(current)
-    update_progress(None, force_stdout=False)
+    def finish(status: str, rows: dict[str, list[dict[str, Any]]], current: dict[str, str]) -> TaskResult:
+        return TaskResult(status=status, rows=rows, current=current)
+
+    def run_task(spec: TushareSourceSpec, trade_date: str) -> TaskResult:
+        current = {"api_name": spec.api_name, "trade_date": trade_date}
+        part = _partition_dir(config, spec, trade_date)
+        data_path = part / "data.parquet"
+        meta_path = part / "metadata.json"
+        base = {"api_name": spec.api_name, "family": spec.source_family, "trade_date": trade_date, "partition_path": str(part)}
+        emit({**base, "event": "task_started"})
+        rows = {"catalog": [], "coverage": [], "field_presence": [], "duplicates": [], "universe_rows": []}
+        if config.resume and data_path.exists() and meta_path.exists():
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            status = "already_exists" if _metadata_complete(metadata) else "already_exists_metadata_incomplete"
+            rows["catalog"].append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": metadata.get("filtered_row_count")})
+            _append_qa_from_metadata(base=base, spec=spec, metadata=metadata, data_path=data_path, coverage=rows["coverage"], field_presence=rows["field_presence"], duplicates=rows["duplicates"], universe_rows=rows["universe_rows"])
+            emit({**base, "event": status})
+            return finish(status, rows, current)
+        if data_path.exists() or meta_path.exists():
+            rows["catalog"].append({**base, "status": "incomplete_existing_partition"})
+            emit({**base, "event": "incomplete_existing_partition"})
+            return finish("incomplete_existing_partition", rows, current)
+        df, error = _call_with_retry(get_client(), spec, trade_date, config.retry, pacer)
+        if error:
+            rows["catalog"].append({**base, "status": "request_failed", "error": error})
+            emit({**base, "event": "request_failed", "error": error})
+            return finish("request_failed", rows, current)
+        raw_rows = len(df)
+        df = df.copy()
+        if "ts_code" in df.columns:
+            df["canonical_symbol"] = df["ts_code"].map(canonical_symbol_from_ts_code)
+        else:
+            df["canonical_symbol"] = pd.Series(dtype="object")
+        if "trade_date" not in df.columns:
+            df["trade_date"] = trade_date
+        allowed_columns = [c for c in (*spec.fields, "canonical_symbol") if c in df.columns]
+        df = df.loc[:, allowed_columns]
+        pre_symbols = int(df["canonical_symbol"].nunique()) if len(df) else 0
+        filtered = df[df["canonical_symbol"].isin(universe)].copy()
+        post_symbols = int(filtered["canonical_symbol"].nunique()) if len(filtered) else 0
+        missing = len(universe - set(filtered["canonical_symbol"].dropna().astype(str)))
+        duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
+        part.mkdir(parents=True, exist_ok=False)
+        filtered.to_parquet(data_path, index=False)
+        status = "empty" if raw_rows == 0 else "ok"
+        metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
+        _write_json(meta_path, metadata)
+        rows["catalog"].append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
+        rows["coverage"].append(metadata)
+        rows["duplicates"].append({**base, "duplicate_key_count": duplicate_count})
+        rows["universe_rows"].append({**base, "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing})
+        for column in sorted(set(filtered.columns) | set(spec.fields) | {"canonical_symbol"}):
+            rows["field_presence"].append({**base, "field": column, "present": column in filtered.columns, "null_count": int(filtered[column].isna().sum()) if column in filtered.columns else None, "dtype": str(filtered[column].dtype) if column in filtered.columns else None})
+        emit({**base, "event": "partition_written", "row_count": len(filtered)})
+        return finish(status, rows, current)
+
+    with progress_lock:
+        update_progress(None)
+    if events_path.exists():
+        events_path.unlink()
+    max_workers = max(1, int(config.max_workers))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_task, spec, trade_date) for spec, trade_date in tasks]
+        for future in as_completed(futures):
+            result = future.result()
+            rows = result.rows
+            catalog.extend(rows["catalog"])
+            coverage.extend(rows["coverage"])
+            field_presence.extend(rows["field_presence"])
+            duplicates.extend(rows["duplicates"])
+            universe_rows.extend(rows["universe_rows"])
+            status_counts[result.status] = status_counts.get(result.status, 0) + 1
+            completed += 1
+            with progress_lock:
+                update_progress(result.current)
+    with progress_lock:
+        update_progress(None, force_stdout=False)
     _write_csv(artifacts / "raw_ingest_catalog.csv", catalog)
     _write_csv(artifacts / "source_coverage_summary.csv", coverage)
     _write_csv(artifacts / "field_presence_summary.csv", field_presence)

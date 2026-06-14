@@ -25,6 +25,7 @@ class TushareRawIngestConfig:
     dry_run: bool = True
     resume: bool = False
     heartbeat_sec: float | None = 30.0
+    dates_file: Path | None = None
     provider: str = "tushare"
 
 
@@ -38,3 +39,4 @@ class TushareSourceSpec:
     fetch_mode: str = "trade_date_full_market"
     primary_key: tuple[str, ...] = ("ts_code", "trade_date")
     fields: tuple[str, ...] = ()
+    calendar_mode: str = "trading_days"

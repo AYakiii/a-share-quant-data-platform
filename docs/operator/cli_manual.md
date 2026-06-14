@@ -533,3 +533,30 @@ universe_filter_summary.csv
 operation_events.jsonl
 live_progress.json
 ```
+
+### Tushare calendar-aware raw acquisition
+
+Tushare Raw acquisition now treats the trading calendar as a system-acquired resource. Operators normally provide only the universe, dataset version, date window, API names, and a local `output-root`; the runner fetches and caches `trade_cal` under the local artifacts tree and records calendar lineage in the manifest.
+
+Trading-day daily APIs such as `daily`, `daily_basic`, `moneyflow`, and `margin_detail` use `calendar_mode=trading_days`, so requests are planned as `api_name × trade_date` for open trading days only. Future event-style APIs may opt into `calendar_days`; the current runner intentionally supports only one `calendar_mode` per run and fails fast on mixed-mode selections until per-source mixed planning is implemented. The universe is still applied after each full-market raw request via `canonical_symbol`; the runner must not request one symbol at a time for these APIs.
+
+`--dates-file` is reserved for debug/override use only and is not part of the normal operator flow. `max_workers` enables bounded concurrency, but it does not guarantee linear speedups because Tushare limits, network latency, and API response time still dominate. The default remains `--max-workers 1`; start experiments with `--max-workers 2` plus conservative `--request-sleep` and `--request-jitter` values.
+
+Example smoke run:
+
+```bash
+PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
+  --symbols-file stock_universe_v1_symbols.txt \
+  --universe-name stock_universe_v1 \
+  --dataset-version v1_csi500_2021_2025_union \
+  --start-date 20260608 \
+  --end-date 20260612 \
+  --api-names daily,daily_basic,moneyflow,margin_detail \
+  --output-root /content/outputs/tushare_raw_m1c_calendar_smoke \
+  --max-workers 1 \
+  --request-sleep 0.3 \
+  --request-jitter 0.0 \
+  --retry 2 \
+  --heartbeat-sec 10 \
+  --resume
+```
