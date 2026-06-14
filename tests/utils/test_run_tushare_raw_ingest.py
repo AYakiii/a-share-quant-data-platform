@@ -99,7 +99,19 @@ def test_mock_api_writes_parquet_metadata_filters_and_detects_duplicates(tmp_pat
 
 def test_family_subset_selects_registry_sources(tmp_path: Path) -> None:
     manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=(), families=("market_flow",), dry_run=True), require_token=False)
-    assert manifest["api_names"] == ["daily", "daily_basic", "moneyflow", "margin_detail"]
+    assert manifest["requested_api_names"] == []
+    assert manifest["requested_families"] == ["market_flow"]
+    assert manifest["api_names"] == ["moneyflow"]
+    assert manifest["families"] == ["market_flow"]
+    assert [s["api_name"] for s in manifest["sources"]] == ["moneyflow"]
+
+
+def test_api_and_family_selection_intersect(tmp_path: Path) -> None:
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily", "moneyflow"), families=("market_flow",), dry_run=True), require_token=False)
+    assert manifest["requested_api_names"] == ["daily", "moneyflow"]
+    assert manifest["requested_families"] == ["market_flow"]
+    assert manifest["api_names"] == ["moneyflow"]
+    assert manifest["families"] == ["market_flow"]
     assert [s["api_name"] for s in manifest["sources"]] == ["moneyflow"]
 
 

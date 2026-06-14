@@ -387,6 +387,7 @@ Selection is parameter/contract driven:
 
 - `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail`.
 - `--families` selects registry families such as `market_price,market_basic,market_flow,margin_leverage`.
+- When both `--api-names` and `--families` are provided, the actual execution set is their intersection. Manifest field `api_names` records the actual selected APIs; `requested_api_names` / `requested_families` record operator input when present.
 - `--symbols-file` must be the external canonical six-digit Universe file; no provider-specific Universe file is generated.
 - `--dataset-version` is required and is not defaulted to a specific V1 namespace.
 

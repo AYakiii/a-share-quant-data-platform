@@ -92,7 +92,7 @@ def _date_range(start_date: str, end_date: str) -> list[str]:
     return days
 
 
-def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], list[TushareSourceSpec], list[str]]:
+def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], list[str], list[str], list[TushareSourceSpec], list[str]]:
     if config.provider != "tushare":
         raise ValueError("Tushare raw ingest config provider must be 'tushare'")
     if not str(config.universe_name or "").strip():
@@ -108,27 +108,29 @@ def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], li
     if any(marker in output_text for marker in DRIVE_MARKERS):
         raise ValueError("output_root must be local-only and must not point to Google Drive")
     by_api = source_specs_by_api()
-    selected_apis = list(config.api_names) or list(by_api)
-    unknown = sorted(set(selected_apis) - set(by_api))
+    requested_api_names = list(config.api_names)
+    candidate_api_names = requested_api_names or list(by_api)
+    unknown = sorted(set(candidate_api_names) - set(by_api))
     if unknown:
         raise ValueError(f"unknown Tushare api_names: {unknown}")
-    selected_families = list(config.families)
-    if selected_families:
+    requested_families = list(config.families)
+    if requested_families:
         valid_families = {spec.source_family for spec in TUSHARE_SOURCE_SPECS}
-        unknown_families = sorted(set(selected_families) - valid_families)
+        unknown_families = sorted(set(requested_families) - valid_families)
         if unknown_families:
             raise ValueError(f"unknown Tushare families: {unknown_families}")
-    specs = [by_api[api] for api in selected_apis if not selected_families or by_api[api].source_family in selected_families]
+    specs = [by_api[api] for api in candidate_api_names if not requested_families or by_api[api].source_family in requested_families]
     if not specs:
         raise ValueError("api_names/families selection produced no Tushare sources")
-    return dataset_version, selected_apis, specs, _date_range(config.start_date, config.end_date)
+    actual_api_names = [spec.api_name for spec in specs]
+    return dataset_version, requested_api_names, requested_families, actual_api_names, specs, _date_range(config.start_date, config.end_date)
 
 
 def _partition_dir(config: TushareRawIngestConfig, spec: TushareSourceSpec, trade_date: str) -> Path:
     return staging_root(config) / spec.source_family / spec.api_name / f"{spec.partition_key}={trade_date}"
 
 
-def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], api_names: list[str], specs: list[TushareSourceSpec], trade_dates: list[str]) -> dict[str, Any]:
+def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], requested_api_names: list[str], requested_families: list[str], specs: list[TushareSourceSpec], trade_dates: list[str]) -> dict[str, Any]:
     """Build the token-free acquisition manifest."""
     return {
         "provider": config.provider,
@@ -142,7 +144,9 @@ def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], api_na
         "symbol_input_format": "canonical_symbol",
         "start_date": config.start_date,
         "end_date": config.end_date,
-        "api_names": api_names,
+        "requested_api_names": requested_api_names,
+        "requested_families": requested_families,
+        "api_names": [spec.api_name for spec in specs],
         "families": sorted({spec.source_family for spec in specs}),
         "trade_dates": trade_dates,
         "output_root": str(config.output_root),
@@ -168,11 +172,11 @@ def _validate_symbols(config: TushareRawIngestConfig) -> list[str]:
 def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
     """Validate inputs and return a token-free dry-run manifest without calling Tushare APIs."""
     cfg = TushareRawIngestConfig(**{**config.__dict__, "dry_run": True})
-    _, api_names, specs, trade_dates = _validate_config(cfg)
+    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(cfg)
     if require_token:
         read_tushare_token(allow_prompt=False)
     symbols = _validate_symbols(cfg)
-    return build_manifest(cfg, symbols=symbols, api_names=api_names, specs=specs, trade_dates=trade_dates)
+    return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -203,10 +207,10 @@ def _call_with_retry(client: TushareQueryClient, api_name: str, trade_date: str,
 
 def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQueryClient | None = None) -> dict[str, Any]:
     """Run local-only Tushare raw acquisition and write staging plus QA artifacts."""
-    _, api_names, specs, trade_dates = _validate_config(config)
+    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(config)
     symbols = _validate_symbols(config)
     universe = set(symbols)
-    manifest = build_manifest(config, symbols=symbols, api_names=api_names, specs=specs, trade_dates=trade_dates)
+    manifest = build_manifest(config, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
     artifacts = artifact_root(config)
     _write_json(artifacts / "tushare_acquisition_manifest.json", manifest)
     if config.dry_run:
