@@ -6,9 +6,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from qsys.data.factor_lake.raw_ingest import (
-    API_POLICY_METADATA,
-    COVERAGE_API_SPECS,
+from qsys.data.factor_lake.akshare_raw_ingest import (
+    AKSHARE_API_POLICY_METADATA,
+    AKSHARE_COVERAGE_API_SPECS,
     _build_raw_partition,
     _financial_indicator_em_symbol,
     _params_for_mode,
@@ -18,7 +18,7 @@ from qsys.data.factor_lake.registry import FACTOR_SOURCE_REGISTRY, SOURCE_CAPABI
 
 
 def test_financial_indicator_em_registered_manual_only_and_legacy_preserved() -> None:
-    financial_specs = COVERAGE_API_SPECS["financial_fundamental"]
+    financial_specs = AKSHARE_COVERAGE_API_SPECS["financial_fundamental"]
     api_names = {spec["api_name"] for spec in financial_specs}
     capability_by_api = {spec.api_name: spec for spec in SOURCE_CAPABILITY_REGISTRY}
     source_case_names = {case.api_name: case for case in FACTOR_SOURCE_REGISTRY}
@@ -35,7 +35,7 @@ def test_financial_indicator_em_registered_manual_only_and_legacy_preserved() ->
     assert capability.normalized_target == ""
     assert capability.factor_family_target == ""
     assert capability.lookahead_risk_fields == "REPORT_DATE must not be used as PIT availability time; use NOTICE_DATE"
-    policy = API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")]
+    policy = AKSHARE_API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator_em")]
     assert policy["enabled"] is False
     assert policy["default_enabled"] is False
     assert policy["manual_review_required"] is True
@@ -46,7 +46,7 @@ def test_financial_indicator_em_registered_manual_only_and_legacy_preserved() ->
     assert source_case_names["stock_financial_analysis_indicator_em"].enabled is False
 
     assert "stock_financial_analysis_indicator" in api_names
-    legacy_policy = API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator")]
+    legacy_policy = AKSHARE_API_POLICY_METADATA[("financial_fundamental", "stock_financial_analysis_indicator")]
     assert legacy_policy["enabled"] is False
     assert legacy_policy["default_enabled"] is False
     assert legacy_policy["manual_review_required"] is True

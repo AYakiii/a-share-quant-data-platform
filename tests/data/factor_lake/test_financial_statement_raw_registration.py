@@ -6,9 +6,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from qsys.data.factor_lake.raw_ingest import (
-    API_POLICY_METADATA,
-    COVERAGE_API_SPECS,
+from qsys.data.factor_lake.akshare_raw_ingest import (
+    AKSHARE_API_POLICY_METADATA,
+    AKSHARE_COVERAGE_API_SPECS,
     FINANCIAL_STATEMENT_REPORT_DATE_APIS,
     FINANCIAL_STATEMENT_SYMBOL_APIS,
     _build_raw_partition,
@@ -43,7 +43,7 @@ FORBIDDEN_BEHAVIOR_TOKENS = {
 
 
 def test_all_financial_statement_apis_registered_under_financial_fundamental() -> None:
-    specs = COVERAGE_API_SPECS["financial_fundamental"]
+    specs = AKSHARE_COVERAGE_API_SPECS["financial_fundamental"]
     by_api = {spec["api_name"]: spec for spec in specs}
     capability_apis = {spec.api_name for spec in SOURCE_CAPABILITY_REGISTRY}
     source_case_apis = {case.api_name for case in FACTOR_SOURCE_REGISTRY}
@@ -67,7 +67,7 @@ def test_all_financial_statement_apis_registered_under_financial_fundamental() -
 
 def test_policy_metadata_marks_statement_apis_p1_raw_not_deferred() -> None:
     for family_api in FINANCIAL_STATEMENT_SYMBOL_APIS:
-        policy = API_POLICY_METADATA[family_api]
+        policy = AKSHARE_API_POLICY_METADATA[family_api]
         assert policy["enabled"] is True
         assert policy["default_enabled"] is True
         assert policy["manual_review_required"] is False
@@ -77,7 +77,7 @@ def test_policy_metadata_marks_statement_apis_p1_raw_not_deferred() -> None:
         assert "disabled_category" not in policy
 
     for family_api in FINANCIAL_STATEMENT_REPORT_DATE_APIS:
-        policy = API_POLICY_METADATA[family_api]
+        policy = AKSHARE_API_POLICY_METADATA[family_api]
         assert policy["enabled"] is True
         assert policy["default_enabled"] is True
         assert policy["manual_review_required"] is False
@@ -247,7 +247,7 @@ def test_synthetic_summary_dataframe_chinese_columns_are_preserved_unchanged(tmp
 
 
 def test_existing_financial_fundamental_apis_remain_registered() -> None:
-    api_names = {spec["api_name"] for spec in COVERAGE_API_SPECS["financial_fundamental"]}
+    api_names = {spec["api_name"] for spec in AKSHARE_COVERAGE_API_SPECS["financial_fundamental"]}
     assert EXISTING_FINANCIAL_APIS <= api_names
 
 
@@ -264,7 +264,7 @@ def test_financial_statement_params_modes_are_minimal() -> None:
 
 def test_no_forbidden_behavior_added_to_registration_files() -> None:
     assert STATEMENT_APIS.isdisjoint({"stock_financial_analysis_indicator", "stock_financial_analysis_indicator_em", "stock_yjyg_em", "stock_yysj_em"})
-    for policy in (API_POLICY_METADATA[("financial_fundamental", api_name)] for api_name in STATEMENT_APIS):
+    for policy in (AKSHARE_API_POLICY_METADATA[("financial_fundamental", api_name)] for api_name in STATEMENT_APIS):
         policy_text = json.dumps(policy, ensure_ascii=False).lower()
         for forbidden in FORBIDDEN_BEHAVIOR_TOKENS:
             if forbidden == "factor":

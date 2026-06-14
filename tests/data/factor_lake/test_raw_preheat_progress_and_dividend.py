@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from qsys.data.factor_lake.raw_ingest import (
-    COVERAGE_API_SPECS,
+from qsys.data.factor_lake.akshare_raw_ingest import (
+    AKSHARE_COVERAGE_API_SPECS,
     _build_raw_partition,
     _build_task_key,
     _params_for_mode,
@@ -82,7 +82,7 @@ def test_heartbeat_prints_periodically_with_flush_and_persists_live_progress(mon
 
 
 def test_stock_history_dividend_detail_is_one_task_per_symbol_with_stable_keys() -> None:
-    spec = next(row for row in COVERAGE_API_SPECS["corporate_action"] if row["api_name"] == "stock_history_dividend_detail")
+    spec = next(row for row in AKSHARE_COVERAGE_API_SPECS["corporate_action"] if row["api_name"] == "stock_history_dividend_detail")
     assert spec["param_mode"] == "symbol_only"
     symbols = ["000001", "600000"]
     params = _params_for_mode(spec["param_mode"], symbols, [], ["20240331", "20240630"], [], [], [], "20240101", "20241231")
@@ -100,7 +100,7 @@ def test_stock_history_dividend_detail_is_one_task_per_symbol_with_stable_keys()
 
 def test_stock_history_dividend_detail_stock_universe_v1_count_is_846() -> None:
     symbols = [line.strip() for line in Path("stock_universe_v1_symbols.txt").read_text(encoding="utf-8").splitlines() if line.strip()]
-    spec = next(row for row in COVERAGE_API_SPECS["corporate_action"] if row["api_name"] == "stock_history_dividend_detail")
+    spec = next(row for row in AKSHARE_COVERAGE_API_SPECS["corporate_action"] if row["api_name"] == "stock_history_dividend_detail")
     params = _params_for_mode(spec["param_mode"], symbols, [], ["20240331", "20240630"], [], [], [], "20240101", "20241231")
     assert len(symbols) == 846
     assert len(params) == 846

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from qsys.utils import run_factor_lake_raw_ingest as cli
+from qsys.utils import run_akshare_raw_ingest as cli
 
 
 def test_parse_symbols_dedup_preserve_order():

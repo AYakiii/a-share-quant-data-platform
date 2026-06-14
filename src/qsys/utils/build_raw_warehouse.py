@@ -1,3 +1,4 @@
+"""Legacy reference: superseded by DWH3.0 Raw Lake flows; not a recommended public entrypoint and must not be extended for Tushare."""
 from __future__ import annotations
 
 import argparse

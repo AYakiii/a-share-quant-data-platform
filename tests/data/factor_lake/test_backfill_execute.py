@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 import pandas as pd
+import pytest
 
 from qsys.data.factor_lake.backfill_execute import execute_backfill_tasks
 from qsys.data.factor_lake.backfill_tasks import generate_tasks_from_default_backfill_plan
@@ -40,7 +41,7 @@ def test_real_execution_and_failure_record(tmp_path):
         tasks[0].api_name: ok_stock,
         tasks[1].api_name: fail_index,
     }
-    out = execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, adapter_override=adapters)
+    out = execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, adapter_override=adapters, provider="akshare")
     statuses = [x["status"] for x in out["results"]]
     assert "success" in statuses
     assert "failed" in statuses
@@ -54,3 +55,25 @@ def test_max_tasks_limit(tmp_path):
     tasks = generate_tasks_from_default_backfill_plan()
     out = execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), max_tasks=1, dry_run=True)
     assert out["task_count"] == 1
+
+
+def test_non_dry_run_requires_explicit_adapter_registry(tmp_path):
+    tasks = generate_tasks_from_default_backfill_plan()[:1]
+    with pytest.raises(ValueError, match="adapter_override is required"):
+        execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, continue_on_error=True)
+
+
+def test_non_dry_run_requires_explicit_provider_when_adapter_present(tmp_path):
+    tasks = generate_tasks_from_default_backfill_plan()[:1]
+    adapters = {tasks[0].api_name: lambda **kwargs: _Result(pd.DataFrame({"a": [1]}))}
+    with pytest.raises(ValueError, match="provider is required"):
+        execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, adapter_override=adapters)
+
+
+def test_shared_backfill_writes_to_explicit_tushare_provider_root(tmp_path):
+    tasks = generate_tasks_from_default_backfill_plan()[:1]
+    adapters = {tasks[0].api_name: lambda **kwargs: _Result(pd.DataFrame({"a": [1]}))}
+    out = execute_backfill_tasks(tasks, str(tmp_path), str(tmp_path / "meta.sqlite"), dry_run=False, adapter_override=adapters, provider="tushare")
+    assert out["results"][0]["status"] == "success"
+    assert (tmp_path / "data" / "raw" / "tushare").exists()
+    assert not (tmp_path / "data" / "raw" / "akshare").exists()

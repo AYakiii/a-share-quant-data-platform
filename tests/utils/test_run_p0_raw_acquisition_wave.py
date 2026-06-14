@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from qsys.utils import run_p0_raw_acquisition_wave as mod
+from qsys.utils import run_akshare_p0_raw_acquisition_wave as mod
 
 
 def _strict_fake_ingest(

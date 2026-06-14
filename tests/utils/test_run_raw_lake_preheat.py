@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 
 from qsys.data.factor_lake.acquisition_universe import load_industry_codes
-from qsys.data.factor_lake.raw_ingest import _params_for_mode, run_raw_coverage_ingest
-from qsys.utils import run_raw_lake_preheat as preheat
+from qsys.data.factor_lake.akshare_raw_ingest import _params_for_mode, run_raw_coverage_ingest
+from qsys.utils import run_akshare_raw_lake_preheat as preheat
 
 
 class FakeAk:
@@ -165,10 +165,10 @@ def test_include_deferred_recovery_adds_separate_lane(tmp_path):
 def test_duplicate_api_registrations_do_not_cause_duplicate_execution(monkeypatch, tmp_path):
     monkeypatch.setattr(
         preheat,
-        "COVERAGE_API_SPECS",
+        "AKSHARE_COVERAGE_API_SPECS",
         {"family_a": [{"api_name": "same_api", "param_mode": "none"}], "family_b": [{"api_name": "same_api", "param_mode": "none"}]},
     )
-    monkeypatch.setattr(preheat, "PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
+    monkeypatch.setattr(preheat, "AKSHARE_PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
     plan = preheat.build_preheat_plan(_args(tmp_path), _universe(tmp_path))
     assert [row["api_name"] for row in plan] == ["same_api"]
 
@@ -184,10 +184,10 @@ def test_deferred_recovery_only_api_filter_does_not_release_all_deferred(tmp_pat
 def test_conflicting_duplicate_api_param_modes_fail_clearly(monkeypatch, tmp_path):
     monkeypatch.setattr(
         preheat,
-        "COVERAGE_API_SPECS",
+        "AKSHARE_COVERAGE_API_SPECS",
         {"family_a": [{"api_name": "same_api", "param_mode": "none"}], "family_b": [{"api_name": "same_api", "param_mode": "symbol_only"}]},
     )
-    monkeypatch.setattr(preheat, "PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
+    monkeypatch.setattr(preheat, "AKSHARE_PHASE_COVERAGE_FAMILIES", ("family_a", "family_b"))
     with pytest.raises(ValueError, match="Conflicting duplicate API registration.*same_api"):
         preheat.build_preheat_plan(_args(tmp_path), preheat.PreheatUniverse())
 

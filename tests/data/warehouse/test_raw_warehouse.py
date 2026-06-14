@@ -262,3 +262,11 @@ def test_merge_symbols_normalize_apostrophe(tmp_path):
     fp.write_text("'000001\n600519\n", encoding="utf-8")
     out = _merge_symbols("'000001, 600519", str(fp))
     assert out == ["000001", "600519"]
+
+
+def test_raw_warehouse_manifest_includes_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(rw, "run_fetch_write_with_hard_timeout", lambda *args, **kwargs: {"status": "fetched", "rows": 1, "n_columns": 1, "elapsed_seconds": 0.01})
+    spec = _make_spec(_fetch_ok)
+    out = RawWarehouseRunner(spec, tmp_path / "raw", tmp_path / "out", "provider_manifest", max_workers=1).run(start_date="2025-01-02", end_date="2025-01-02", include_calendar_days=False, exchanges="sse")
+    manifest = json.loads((out["run_dir"] / "warehouse_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["provider"] == "akshare"

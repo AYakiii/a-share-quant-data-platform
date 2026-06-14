@@ -8,8 +8,8 @@ import pytest
 from qsys.utils import raw_lake_compact_cli as cli
 
 
-def _raw(root: Path, parts=None, rows=2, cols=("a", "b"), family="fam", api="api") -> None:
-    p = root / "data" / "raw" / "akshare" / family / api
+def _raw(root: Path, parts=None, rows=2, cols=("a", "b"), family="fam", api="api", provider="akshare") -> None:
+    p = root / "data" / "raw" / provider / family / api
     for k, v in (parts or {"trade_date": "20220103"}).items():
         p = p / f"{k}={v}"
     p.mkdir(parents=True, exist_ok=True)
@@ -325,3 +325,75 @@ def test_promote_refuses_rebuilt_target_set_change_before_raw_write(tmp_path, mo
     with pytest.raises(ValueError, match="target path set differs"):
         cli.main(["promote", "--package-root", str(pkg), "--drive-dwh-root", str(drive), "--confirm-promotion", "target_set"])
     assert not (drive / "raw" / "akshare").exists()
+
+
+def test_akshare_legacy_default_compact_path_has_no_schema_version(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"year": "2022"})
+    assert cli.main(["prepare", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "ak_legacy"]) == 0
+    manifest = _manifest(Path("outputs/raw_acquisition_compact/ak_legacy"))
+    rel = manifest["compact_assets"][0]["relative_path"]
+    assert rel == "raw/akshare/fam/api/year=2022/data.parquet"
+    assert manifest["dataset_version"] == ""
+    assert manifest["storage_schema_version"] == ""
+
+
+def test_tushare_prepare_requires_and_uses_dataset_version_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"year": "2022"}, provider="tushare")
+    with pytest.raises(ValueError, match="dataset-version"):
+        cli.main(["prepare", "--provider", "tushare", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "ts_missing_schema"])
+    assert cli.main(["prepare", "--provider", "tushare", "--dataset-version", "v1_csi500_2021_2025_union", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "ts_v1_dataset"]) == 0
+    manifest = _manifest(Path("outputs/raw_acquisition_compact/ts_v1_dataset"))
+    assert manifest["provider"] == "tushare"
+    assert manifest["dataset_version"] == "v1_csi500_2021_2025_union"
+    assert manifest["storage_schema_version"] == "v1_csi500_2021_2025_union"
+    assert manifest["compact_assets"][0]["relative_path"] == "raw/tushare/fam/api/v1_csi500_2021_2025_union/year=2022/data.parquet"
+    ready = _ready(Path("outputs/raw_acquisition_compact/ts_v1_dataset"))
+    assert ready["provider"] == "tushare"
+    assert ready["dataset_version"] == "v1_csi500_2021_2025_union"
+    assert ready["storage_schema_version"] == "v1_csi500_2021_2025_union"
+    assert ready["prepared_drive_raw_root"] == str((drive / "raw" / "tushare").resolve())
+
+
+@pytest.mark.parametrize("bad", ["", ".", "..", "../x", "x/y", r"x\y", "/abs", "a b"])
+def test_provider_path_segment_traversal_is_rejected(tmp_path, monkeypatch, bad):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out)
+    with pytest.raises(ValueError, match="provider"):
+        cli.main(["prepare", "--provider", bad, "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "bad_provider"])
+
+
+@pytest.mark.parametrize("bad", [".", "..", "../x", "x/y", r"x\y", "/abs", "a b"])
+def test_storage_schema_path_segment_traversal_is_rejected(tmp_path, monkeypatch, bad):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, provider="tushare")
+    with pytest.raises(ValueError, match="dataset_version"):
+        cli.main(["prepare", "--provider", "tushare", "--dataset-version", bad, "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "bad_schema"])
+
+
+def test_tushare_dataset_versions_do_not_collide(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    out = tmp_path / "wave_20220101_20241231"
+    drive = tmp_path / "drive"
+    drive.mkdir()
+    _raw(out, parts={"year": "2022"}, provider="tushare")
+    assert cli.main(["prepare", "--provider", "tushare", "--dataset-version", "v1_csi500_2021_2025_union", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "ts_v1_scope"]) == 0
+    assert cli.main(["prepare", "--provider", "tushare", "--dataset-version", "v2_all_a_share", "--output-root", str(out), "--drive-dwh-root", str(drive), "--promotion-name", "ts_v2_scope"]) == 0
+    rel1 = _manifest(Path("outputs/raw_acquisition_compact/ts_v1_scope"))["compact_assets"][0]["relative_path"]
+    rel2 = _manifest(Path("outputs/raw_acquisition_compact/ts_v2_scope"))["compact_assets"][0]["relative_path"]
+    assert rel1 == "raw/tushare/fam/api/v1_csi500_2021_2025_union/year=2022/data.parquet"
+    assert rel2 == "raw/tushare/fam/api/v2_all_a_share/year=2022/data.parquet"
+    assert rel1 != rel2
