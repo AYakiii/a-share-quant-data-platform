@@ -79,7 +79,7 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
         raise ValueError("start_date and end_date must be YYYYMMDD")
     if config.start_date > config.end_date:
         raise ValueError("start_date must be <= end_date")
-    storage_schema_version = validate_path_segment(config.storage_schema_version, label="storage_schema_version")
+    dataset_version = validate_path_segment(config.dataset_version, label="dataset_version")
     if require_token:
         read_tushare_token(allow_prompt=False)
     symbols = load_symbols(config.symbols_file)
@@ -87,7 +87,7 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
         raise ValueError(f"expected_symbol_count mismatch: expected {config.expected_symbol_count}, got {len(symbols)}")
     manifest = {
         "provider": config.provider,
-        "storage_schema_version": storage_schema_version,
+        "dataset_version": dataset_version,
         "universe_name": config.universe_name,
         "symbols_file": str(config.symbols_file),
         "universe_sha256": file_sha256(config.symbols_file),

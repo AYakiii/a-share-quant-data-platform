@@ -174,7 +174,8 @@ def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]
         "review_required_bucket_kinds": sorted({a.get("bucket_kind") for a in assets if a.get("bucket_kind") in REVIEW_REQUIRED_BUCKET_KINDS}),
         "prepared_drive_dwh_root": str(drive_root.resolve()),
         "provider": manifest.get("provider", "akshare"),
-        "storage_schema_version": manifest.get("storage_schema_version", ""),
+        "dataset_version": manifest.get("dataset_version", manifest.get("storage_schema_version", "")),
+        "storage_schema_version": manifest.get("storage_schema_version", manifest.get("dataset_version", "")),
         "prepared_drive_raw_root": str((drive_root / Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))).resolve()),
         "prepared_drive_catalog_root": str(_catalog_dir(drive_root, promotion_name).resolve()),
         "drive_collision_plan_path": str(collision_plan_path.resolve()),
@@ -194,6 +195,7 @@ def _prepare_review_summary(ready: dict[str, Any]) -> dict[str, Any]:
             "promotion_name",
             "package_root",
             "provider",
+            "dataset_version",
             "storage_schema_version",
             "prepared_drive_dwh_root",
             "prepared_drive_raw_root",
@@ -211,12 +213,13 @@ def _prepare_review_summary(ready: dict[str, Any]) -> dict[str, Any]:
 
 def prepare(args: argparse.Namespace) -> int:
     provider = validate_path_segment(args.provider, label="provider")
-    storage_schema_version = validate_path_segment(args.storage_schema_version, label="storage_schema_version", allow_empty=True) or None
-    if provider != "akshare" and not storage_schema_version:
-        raise ValueError("--storage-schema-version is required for non-akshare providers")
+    dataset_version_arg = args.dataset_version if args.dataset_version is not None else args.storage_schema_version
+    dataset_version = validate_path_segment(dataset_version_arg, label="dataset_version", allow_empty=True) or None
+    if provider != "akshare" and not dataset_version:
+        raise ValueError("--dataset-version is required for non-akshare providers")
     drive_root = _require_drive_root(args.drive_dwh_root)
     promotion_name = validate_promotion_name(args.promotion_name) if args.promotion_name is not None else None
-    manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package), provider=provider, storage_schema_version=storage_schema_version)
+    manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package), provider=provider, dataset_version=dataset_version)
     package_root = _resolve_package_root(manifest["package_root"])
     collisions = write_collision_plan(package_root, drive_root)
     collision_plan_path = package_root / "drive_collision_plan.csv"
@@ -420,7 +423,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--end-date")
     p.add_argument("--replace-local-package", action="store_true", help=f"Replace an existing local package under {COMPACT_ROOT_PARENT}; never affects Drive")
     p.add_argument("--provider", default="akshare")
-    p.add_argument("--storage-schema-version")
+    p.add_argument("--dataset-version")
+    p.add_argument("--storage-schema-version", help="Deprecated alias for --dataset-version")
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("promote", help="Human-gated Drive promotion of a ready compact package.")

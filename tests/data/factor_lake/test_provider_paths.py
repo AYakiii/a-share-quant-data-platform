@@ -13,5 +13,5 @@ def test_default_provider_paths_are_akshare(tmp_path):
 
 def test_tushare_provider_paths_include_provider_and_schema():
     assert str(local_ingest_raw_relative_root("tushare")) == "data/raw/tushare"
-    assert str(compact_asset_relative_root("tushare") / "market_price" / "daily" / "v1" / "year=2024" / "data.parquet") == "raw/tushare/market_price/daily/v1/year=2024/data.parquet"
+    assert str(compact_asset_relative_root("tushare") / "market_price" / "daily" / "v1_csi500_2021_2025_union" / "year=2024" / "data.parquet") == "raw/tushare/market_price/daily/v1_csi500_2021_2025_union/year=2024/data.parquet"
     assert str(drive_raw_relative_root("tushare")) == "raw/tushare"

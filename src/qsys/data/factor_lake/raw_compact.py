@@ -12,7 +12,9 @@ from typing import Any, Iterable
 import pandas as pd
 
 DEFAULT_PROVIDER = "akshare"
-DEFAULT_STORAGE_SCHEMA_VERSION: str | None = None
+DEFAULT_DATASET_VERSION: str | None = None
+# Backward-compatible alias for callers that still import the old name.
+DEFAULT_STORAGE_SCHEMA_VERSION = DEFAULT_DATASET_VERSION
 PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 def validate_path_segment(value: str | None, *, label: str, allow_empty: bool = False) -> str:
@@ -213,11 +215,11 @@ def classify_raw_assets(assets: Iterable[RawAsset], *, start_date: str, end_date
     return out
 
 
-def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str, *, provider: str = DEFAULT_PROVIDER, storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION) -> Path:
+def _bucket_path(package_root: Path, source_family: str, api_name: str, bucket_kind: str, bucket_value: str, *, provider: str = DEFAULT_PROVIDER, dataset_version: str | None = DEFAULT_DATASET_VERSION) -> Path:
     path = package_root / compact_asset_relative_root(provider) / source_family / api_name
-    schema = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True)
-    if schema:
-        path = path / schema
+    version = validate_path_segment(dataset_version, label="dataset_version", allow_empty=True)
+    if version:
+        path = path / version
     return path / f"{bucket_kind}={bucket_value}" / "data.parquet"
 
 
@@ -284,7 +286,8 @@ def compact_raw_lake(
     end_date: str | None = None,
     replace_existing: bool = False,
     provider: str = DEFAULT_PROVIDER,
-    storage_schema_version: str | None = DEFAULT_STORAGE_SCHEMA_VERSION,
+    dataset_version: str | None = DEFAULT_DATASET_VERSION,
+    storage_schema_version: str | None = None,
 ) -> dict[str, Any]:
     """Compact local Raw parquet files into one parquet per source_family/api_name/bucket.
 
@@ -292,7 +295,9 @@ def compact_raw_lake(
     normalize, delete rows, or delete columns.
     """
     provider = validate_path_segment(provider, label="provider")
-    storage_schema_version = validate_path_segment(storage_schema_version, label="storage_schema_version", allow_empty=True) or None
+    if dataset_version is None and storage_schema_version is not None:
+        dataset_version = storage_schema_version
+    dataset_version = validate_path_segment(dataset_version, label="dataset_version", allow_empty=True) or None
     out_root = Path(output_root)
     inferred_start, inferred_end = _infer_window(out_root)
     start = start_date or inferred_start
@@ -350,7 +355,7 @@ def compact_raw_lake(
         compact_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=expected_columns or [])
         if len(compact_df) != expected_rows:
             raise ValueError("compact row preservation check failed before write")
-        dst = _bucket_path(pkg, source_family, api_name, bucket_kind, bucket_value, provider=provider, storage_schema_version=storage_schema_version)
+        dst = _bucket_path(pkg, source_family, api_name, bucket_kind, bucket_value, provider=provider, dataset_version=dataset_version)
         dst.parent.mkdir(parents=True, exist_ok=True)
         compact_df.to_parquet(dst, index=False)
         reopened = pd.read_parquet(dst)
@@ -381,7 +386,8 @@ def compact_raw_lake(
         "acquisition_window": {"start_date": start, "end_date": end},
         "created_at": datetime.now(UTC).isoformat(),
         "provider": provider,
-        "storage_schema_version": storage_schema_version or "",
+        "dataset_version": dataset_version or "",
+        "storage_schema_version": dataset_version or "",
         "local_ingest_raw_relative_root": str(local_ingest_raw_relative_root(provider)),
         "local_compact_asset_relative_root": str(compact_asset_relative_root(provider)),
         "drive_raw_relative_root": str(drive_raw_relative_root(provider)),

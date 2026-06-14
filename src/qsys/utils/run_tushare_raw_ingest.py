@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--storage-schema-version", default="v1")
+    parser.add_argument("--dataset-version", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Required in M0; no formal Tushare pull is implemented.")
     return parser
 
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
         end_date=args.end_date,
         output_root=Path(args.output_root),
         provider="tushare",
-        storage_schema_version=args.storage_schema_version,
+        dataset_version=args.dataset_version,
     )
     print(manifest_json(run_tushare_raw_ingest_dry_run(cfg)))
     return 0

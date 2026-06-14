@@ -3,7 +3,7 @@
 ## 1. 修改文件清单
 
 - AkShare entrypoints and implementation were renamed to provider-explicit modules under `src/qsys/utils/` and `src/qsys/data/factor_lake/`.
-- Shared Raw Lake path helpers in `src/qsys/data/factor_lake/io.py`, `src/qsys/data/factor_lake/raw_compact.py`, and `src/qsys/utils/raw_lake_compact_cli.py` now accept `provider` and `storage_schema_version` where applicable.
+- Shared Raw Lake path helpers in `src/qsys/data/factor_lake/io.py`, `src/qsys/data/factor_lake/raw_compact.py`, and `src/qsys/utils/raw_lake_compact_cli.py` now accept `provider` and operator-defined `dataset_version` where applicable; `storage_schema_version` is retained only as a short-term compatibility alias in shared compact artifacts.
 - Shared warehouse metadata now carries `source_symbol` while retaining `akshare_symbol` as an AkShare-specific compatibility field.
 - Tushare dry-run skeleton modules were added under `src/qsys/data/sources/` and `src/qsys/utils/run_tushare_raw_ingest.py`.
 - README and legacy acquisition pipeline docs were updated with provider-explicit active entrypoints and legacy notices.
@@ -56,7 +56,7 @@
 
 ## 7. 处理理由
 
-The changes isolate AkShare-specific acquisition names without building a full provider framework. Shared Raw Lake components remain provider-neutral and only gained thin `provider` and `storage_schema_version` parameters required to prevent Tushare/AkShare staging, compact package, Drive target, and catalog collisions.
+The changes isolate AkShare-specific acquisition names without building a full provider framework. Shared Raw Lake components remain provider-neutral and only gained thin `provider` and operator-defined `dataset_version` parameters required to prevent Tushare/AkShare staging, compact package, Drive target, and catalog collisions.
 
 ## 8. 未处理问题
 
@@ -103,20 +103,20 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 ## PR136 Follow-up Review Fixes
 
 - Restored AkShare legacy compact target paths so default AkShare prepare writes `raw/akshare/<family>/<api>/<bucket>/data.parquet` without inserting a schema-version layer.
-- Made `storage_schema_version` optional for AkShare and required for non-AkShare providers such as Tushare; Tushare prepare uses `raw/tushare/<family>/<api>/v1/<bucket>/data.parquet`.
-- Added conservative path-segment validation for `provider` and non-empty `storage_schema_version`, rejecting empty provider, `.`, `..`, absolute paths, separators, traversal, and non-slug input.
+- Made `dataset_version` optional for AkShare legacy paths and required for non-AkShare providers such as Tushare; Tushare prepare uses `raw/tushare/<family>/<api>/<dataset_version>/<bucket>/data.parquet`.
+- Added conservative path-segment validation for `provider` and non-empty `dataset_version`, rejecting empty provider, `.`, `..`, absolute paths, separators, traversal, and non-slug input.
 - Added Tushare universe lineage fields: `symbols_file`, `universe_sha256`, `symbol_row_count`, and `unique_symbol_count`; duplicate, empty, illegal-format, and expected-count mismatches are rejected.
 - Fixed the Tushare CLI so it is hard-bound to `provider="tushare"`; only shared compact CLI accepts operator-supplied provider.
 - Removed implicit `AKSHARE_DEFAULT_ADAPTERS` fallback from shared backfill execution; legacy AkShare wrappers now supply AkShare adapters explicitly.
 - Added `provider` to RawWarehouse manifests and kept shared artifact fixed fields to `original_symbol` and `source_symbol`, with `akshare_symbol` remaining provider-specific optional metadata.
 - Added `provider` to local Raw read APIs with legacy default `akshare`.
-- Prepare review output now includes `provider`, `storage_schema_version`, and `prepared_drive_raw_root`.
+- Prepare review output now includes `provider`, `dataset_version`, and `prepared_drive_raw_root`.
 
 ### Follow-up tests
 
 - Full suite rerun: `PYTHONPATH=src pytest -q` → 607 passed, 1 skipped, 20 warnings.
 - Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
-- Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.
+- Tushare hard-code scan rerun for forbidden universe/count literals in Tushare modules → no matches.
 
 
 ## PR136 Final Backfill/Tushare Validation Follow-up
@@ -125,14 +125,14 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 - Added explicit `provider` parameters to shared `execute_backfill_task()` and `execute_backfill_tasks()`; non-dry-run shared execution now requires both an adapter registry and provider, and passes `provider` to `write_raw_partition()`.
 - AkShare backfill wrappers now explicitly pass `provider="akshare"`.
 - Added tests proving shared backfill with `provider="tushare"` writes under `data/raw/tushare/...` and does not silently write AkShare paths.
-- Added Tushare dry-run validation for YYYYMMDD dates, ordered date range, non-empty safe schema version, positive expected symbol count, and non-empty universe name.
+- Added Tushare dry-run validation for YYYYMMDD dates, ordered date range, non-empty safe dataset version, positive expected symbol count, and non-empty universe name.
 - Local API provider read coverage remains in place for `provider="tushare"`.
 
 ### Final follow-up tests
 
 - Full suite rerun: `PYTHONPATH=src pytest -q` → 617 passed, 1 skipped, 20 warnings.
 - Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
-- Tushare hard-code scan rerun for `846` and `stock_universe_v1` in Tushare modules → no matches.
+- Tushare hard-code scan rerun for forbidden universe/count literals in Tushare modules → no matches.
 
 
 ## PR136 Canonical Universe / Tushare ts_code Boundary Follow-up
@@ -148,3 +148,17 @@ No formal Tushare historical API pull was started. The new Tushare CLI only vali
 - Full suite rerun: `PYTHONPATH=src pytest -q` → 619 passed, 1 skipped, 20 warnings.
 - Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.
 - Tushare hard-code scan rerun for forbidden universe/count literals in Tushare modules → no matches.
+
+
+## PR136 Dataset Version Naming Follow-up
+
+- Replaced Tushare dry-run `storage_schema_version` semantics with required `dataset_version`.
+- `dataset_version` is an operator-defined dataset namespace. It can be a short name or a descriptive namespace such as `v1_csi500_2021_2025_union` or `v2_all_a_share`; code must not default to a bare version string.
+- Shared compact CLI now accepts `--dataset-version`; `--storage-schema-version` remains only as a deprecated compatibility alias.
+- Non-AkShare compact paths use `raw/<provider>/<family>/<api>/<dataset_version>/<bucket>/data.parquet`, while AkShare legacy compact paths still omit the version layer by default.
+- Universe lineage remains anchored by `symbols_file`, `universe_sha256`, and `universe_name`. Canonical Universe files use six-digit symbols; Tushare `ts_code` remains provider-specific API representation.
+
+### Dataset version follow-up tests
+
+- Full suite rerun: `PYTHONPATH=src pytest -q` → 621 passed, 1 skipped, 20 warnings.
+- Compile check rerun: `python -m py_compile $(find src/qsys -name '*.py' -print)` → passed.

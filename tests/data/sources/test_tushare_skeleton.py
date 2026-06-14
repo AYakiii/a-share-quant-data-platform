@@ -20,6 +20,7 @@ def _cfg(tmp_path: Path, symbols_file: Path) -> TushareRawIngestConfig:
         start_date="20240101",
         end_date="20240131",
         output_root=tmp_path / "out",
+        dataset_version="v1_csi500_2021_2025_union",
     )
 
 
@@ -39,7 +40,7 @@ def test_tushare_dry_run_token_free_manifest_with_universe_lineage(tmp_path: Pat
     assert "secret-token-value" not in str(manifest)
     assert "secret-token-value" not in printed
     assert manifest["provider"] == "tushare"
-    assert manifest["storage_schema_version"] == "v1"
+    assert manifest["dataset_version"] == "v1_csi500_2021_2025_union"
     assert manifest["symbols_file"] == str(symbols)
     assert manifest["universe_sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
     assert manifest["symbol_row_count"] == 2
@@ -69,6 +70,32 @@ def test_tushare_universe_rejects_bad_symbols(tmp_path: Path, monkeypatch: pytes
         run_tushare_raw_ingest_dry_run(_cfg(tmp_path, symbols))
 
 
+def test_tushare_cli_requires_dataset_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TUSHARE_TOKEN", "secret-token-value")
+    symbols = tmp_path / "symbols.csv"
+    symbols.write_text("000008\n", encoding="utf-8")
+    proc = subprocess.run([
+        sys.executable,
+        "-m",
+        "qsys.utils.run_tushare_raw_ingest",
+        "--dry-run",
+        "--symbols-file",
+        str(symbols),
+        "--universe-name",
+        "external_universe",
+        "--expected-symbol-count",
+        "1",
+        "--start-date",
+        "20240101",
+        "--end-date",
+        "20240131",
+        "--output-root",
+        str(tmp_path / "out"),
+    ], capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": "src"})
+    assert proc.returncode != 0
+    assert "--dataset-version" in proc.stderr
+
+
 def test_tushare_cli_does_not_accept_provider_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TUSHARE_TOKEN", "secret-token-value")
     symbols = tmp_path / "symbols.csv"
@@ -90,6 +117,8 @@ def test_tushare_cli_does_not_accept_provider_override(tmp_path: Path, monkeypat
         "20240131",
         "--output-root",
         str(tmp_path / "out"),
+        "--dataset-version",
+        "v1_csi500_2021_2025_union",
         "--provider",
         "akshare",
     ], capture_output=True, text=True, env={**__import__("os").environ, "PYTHONPATH": "src"})
@@ -117,8 +146,8 @@ def test_official_style_canonical_symbols_need_no_rewrite(tmp_path: Path, monkey
     ("start_date", "2024-01-01", "YYYYMMDD"),
     ("end_date", "2024-01-31", "YYYYMMDD"),
     ("date_order", "bad", "start_date must be <= end_date"),
-    ("storage_schema_version", "../v1", "storage_schema_version"),
-    ("storage_schema_version", "", "storage_schema_version"),
+    ("dataset_version", "../v1_bad", "dataset_version"),
+    ("dataset_version", "", "dataset_version"),
     ("expected_symbol_count", 0, "expected_symbol_count must be > 0"),
     ("universe_name", "", "universe_name is required"),
 ])

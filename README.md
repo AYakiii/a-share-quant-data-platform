@@ -502,8 +502,11 @@ python -m qsys.utils.run_akshare_raw_lake_preheat
 Tushare dry-run skeleton:
 
 ```bash
-python -m qsys.utils.run_tushare_raw_ingest --dry-run --symbols-file symbols.csv --universe-name external_universe --expected-symbol-count 1 --start-date 20240101 --end-date 20240131 --output-root /tmp/tushare_raw
+python -m qsys.utils.run_tushare_raw_ingest --dry-run --symbols-file symbols.csv --universe-name external_universe --dataset-version v1_csi500_2021_2025_union --expected-symbol-count 1 --start-date 20240101 --end-date 20240131 --output-root /tmp/tushare_raw
 ```
+
+
+`--dataset-version` is an operator-defined dataset namespace, not a code default. Use clear names such as `v1_csi500_2021_2025_union` or `v2_all_a_share` to keep different Universe/data-boundary runs physically isolated. Universe lineage is still confirmed by `--symbols-file`, its SHA-256, and `--universe-name`. Canonical Universe files use six-digit symbols; Tushare `ts_code` is only a provider-specific API representation.
 
 Shared compact / promotion / audit:
 

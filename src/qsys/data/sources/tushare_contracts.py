@@ -19,8 +19,8 @@ class TushareRawIngestConfig:
     start_date: str
     end_date: str
     output_root: Path
+    dataset_version: str
     provider: str = "tushare"
-    storage_schema_version: str = "v1"
     dry_run: bool = True
 
 
