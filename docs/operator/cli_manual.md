@@ -404,29 +404,99 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
 
 During acquisition the runner writes one-line `[heartbeat]` updates and refreshes `<output-root>/artifacts/tushare_raw_acquisition/live_progress.json`. The output root must remain local-only and must not point to Google Drive.
 
-**4) Compact review cell**
+Progress and review have three separate operator meanings:
+
+- CLI heartbeat is a machine/log-layer progress signal for terminal logs.
+- Colab progress monitor is a human-facing, single-screen progress bar backed by `live_progress.json`.
+- Operator summary is the post-run rough review backed by `operator_summary.json` and `operator_summary_by_api.csv`.
+
+The default Colab operation sequence is parameters, dry-run, run, progress monitor, then summary review.
+
+**4) Progress monitor cell (optional but recommended)**
+
+Run this in a separate Colab cell while the acquisition cell is active. It refreshes one output area in place, reads only `live_progress.json`, and does not print per-task logs or inspect detailed artifacts.
 
 ```python
 import json
+import time
 from pathlib import Path
-import pandas as pd
+from IPython.display import clear_output
 
-artifacts = Path(OUTPUT_ROOT) / "artifacts" / "tushare_raw_acquisition"
-manifest = json.loads((artifacts / "tushare_acquisition_manifest.json").read_text())
-catalog = pd.read_csv(artifacts / "raw_ingest_catalog.csv")
-display(catalog[["api_name", "family", "trade_date", "status"]])
+ART = Path(OUTPUT_ROOT) / "artifacts/tushare_raw_acquisition"
+LIVE = ART / "live_progress.json"
 
-for partition in manifest["planned_partitions"]:
-    part = Path(partition)
-    data_path = part / "data.parquet"
-    meta_path = part / "metadata.json"
-    print(part)
-    print("data.parquet", data_path.exists(), "metadata.json", meta_path.exists())
-    if data_path.exists():
-        display(pd.read_parquet(data_path).head(2))
+for _ in range(720):
+    clear_output(wait=True)
+
+    if not LIVE.exists():
+        print("waiting for live_progress.json ...")
+        time.sleep(2)
+        continue
+
+    p = json.loads(LIVE.read_text(encoding="utf-8"))
+
+    total = int(p.get("total_tasks") or 0)
+    done = int(p.get("completed_tasks") or 0)
+    pending = int(p.get("pending_or_running_tasks") or 0)
+
+    pct = 0 if total == 0 else done / total
+    bar_len = 30
+    filled = int(bar_len * pct)
+    bar = "█" * filled + "░" * (bar_len - filled)
+
+    print("Tushare local acquisition progress")
+    print(f"[{bar}] {done}/{total} ({pct:.1%})")
+    print("pending:", pending)
+    print("elapsed_sec:", p.get("elapsed_sec"))
+    print("current_task:", p.get("current_task"))
+    print("status_counts:", p.get("status_counts"))
+    print("updated_at:", p.get("updated_at"))
+
+    if total > 0 and done >= total:
+        break
+
+    time.sleep(2)
 ```
 
-The review cell intentionally follows only `manifest["planned_partitions"]`; it does not scan `<output-root>/data/raw/tushare/**` and does not display historical partitions or full tables.
+The progress monitor must stay aggregate-only: it does not read `operation_events.jsonl`, display catalog or coverage rows, loop over `planned_partitions`, or display parquet samples.
+
+**5) Compact summary review cell**
+
+```python
+import json
+import pandas as pd
+from pathlib import Path
+from IPython.display import display
+
+ART = Path(OUTPUT_ROOT) / "artifacts/tushare_raw_acquisition"
+
+summary = json.loads((ART / "operator_summary.json").read_text(encoding="utf-8"))
+by_api = pd.read_csv(ART / "operator_summary_by_api.csv")
+
+print("=== RUN SUMMARY ===")
+display(pd.DataFrame([summary]))
+
+print("=== BY API SUMMARY ===")
+display(by_api)
+
+print("=== LIVE PROGRESS ===")
+live_path = ART / "live_progress.json"
+if live_path.exists():
+    live = json.loads(live_path.read_text(encoding="utf-8"))
+    display(pd.DataFrame([{
+        "total_tasks": live.get("total_tasks"),
+        "completed_tasks": live.get("completed_tasks"),
+        "pending_or_running_tasks": live.get("pending_or_running_tasks"),
+        "status_counts": live.get("status_counts"),
+        "updated_at": live.get("updated_at"),
+    }]))
+else:
+    print("live_progress.json missing")
+
+print("ROUGH CHECK:", summary.get("rough_check"))
+```
+
+The default summary review cell reads only fixed-size operator summaries and live progress. It does not display catalog details, coverage details, abnormal rows, parquet samples, or per-partition output. Use the CSV artifacts such as `raw_ingest_catalog.csv`, `source_coverage_summary.csv`, `duplicate_key_summary.csv`, `universe_filter_summary.csv`, `field_presence_summary.csv`, and `operation_events.jsonl` only for optional diagnostics.
 
 Selection is parameter/contract driven:
 

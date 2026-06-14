@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from qsys.data.sources.tushare_acquisition import manifest_json, run_tushare_raw_ingest, run_tushare_raw_ingest_dry_run
@@ -61,27 +62,38 @@ def config_from_args(args: argparse.Namespace) -> TushareRawIngestConfig:
 
 def _print_summary(manifest: dict[str, object]) -> None:
     """Print compact token-free operator summary."""
-    status_counts: dict[str, int] = {}
     artifacts_root = Path(str(manifest["output_root"])) / "artifacts" / "tushare_raw_acquisition"
-    catalog = artifacts_root / "raw_ingest_catalog.csv"
-    if catalog.exists():
-        import csv
-
-        with catalog.open("r", encoding="utf-8", newline="") as fh:
-            for row in csv.DictReader(fh):
-                status = row.get("status", "")
-                status_counts[status] = status_counts.get(status, 0) + 1
-    planned = manifest.get("planned_partitions", [])
-    apis = manifest.get("api_names", [])
-    dates = manifest.get("trade_dates", [])
-    date_range = f"{manifest['start_date']}..{manifest['end_date']}"
-    print(f"[tushare] provider={manifest['provider']} dataset_version={manifest['dataset_version']}")
-    print(f"[tushare] date_range={date_range} trade_dates={len(dates)} apis={len(apis)} api_names={','.join(apis)} planned_partitions={len(planned)}")
+    summary_path = artifacts_root / "operator_summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    else:
+        planned = manifest.get("planned_partitions", [])
+        summary = {
+            "provider": manifest.get("provider"),
+            "dataset_version": manifest.get("dataset_version"),
+            "start_date": manifest.get("start_date"),
+            "end_date": manifest.get("end_date"),
+            "api_names": manifest.get("api_names", []),
+            "trade_date_count": len(manifest.get("trade_dates", [])),
+            "planned_partitions": len(planned) if isinstance(planned, list) else planned,
+            "status_counts": {},
+            "abnormal_counts": {},
+            "rough_check": "UNKNOWN",
+        }
+    apis = summary.get("api_names", [])
+    api_names = ",".join(str(api) for api in apis) if isinstance(apis, list) else str(apis)
+    date_range = f"{summary.get('start_date')}..{summary.get('end_date')}"
+    print(f"[tushare] provider={summary.get('provider')} dataset_version={summary.get('dataset_version')}")
+    print(
+        f"[tushare] date_range={date_range} trade_dates={summary.get('trade_date_count')} "
+        f"apis={len(apis) if isinstance(apis, list) else api_names} api_names={api_names} "
+        f"planned_partitions={summary.get('planned_partitions')}"
+    )
+    print(f"[tushare] status_counts={summary.get('status_counts')}")
+    print(f"[tushare] abnormal_counts={summary.get('abnormal_counts')}")
+    print(f"[tushare] rough_check={summary.get('rough_check')}")
     print(f"[tushare] output_root={manifest['output_root']}")
     print(f"[tushare] artifacts={artifacts_root}")
-    if status_counts:
-        print(f"[tushare] status_counts={status_counts}")
-
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)

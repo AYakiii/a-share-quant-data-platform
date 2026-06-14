@@ -201,6 +201,117 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+OPERATOR_STATUS_KEYS = (
+    "ok",
+    "empty",
+    "already_exists",
+    "request_failed",
+    "incomplete_existing_partition",
+    "already_exists_metadata_incomplete",
+)
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _min_int(values: list[int]) -> int:
+    return min(values) if values else 0
+
+
+def _max_int(values: list[int]) -> int:
+    return max(values) if values else 0
+
+
+def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str, Any], artifacts: Path) -> dict[str, Any]:
+    """Write fixed-size token-free summaries for operator dashboards."""
+    catalog = _read_csv_rows(artifacts / "raw_ingest_catalog.csv")
+    coverage = _read_csv_rows(artifacts / "source_coverage_summary.csv")
+    duplicates = _read_csv_rows(artifacts / "duplicate_key_summary.csv")
+    api_names = list(manifest.get("api_names", []))
+    status_counts = {key: 0 for key in OPERATOR_STATUS_KEYS}
+    for row in catalog:
+        status = row.get("status", "")
+        if status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+    bad_statuses = {"request_failed", "incomplete_existing_partition", "already_exists_metadata_incomplete"}
+    missing_data_files = sum(1 for row in catalog if row.get("data_path") and not Path(row["data_path"]).exists())
+    missing_metadata_files = sum(1 for row in catalog if row.get("metadata_path") and not Path(row["metadata_path"]).exists())
+    duplicate_partitions = sum(1 for row in duplicates if _to_int(row.get("duplicate_key_count"), 0) > 0)
+    abnormal_counts = {
+        "bad_status_partitions": sum(status_counts.get(status, 0) for status in bad_statuses),
+        "empty_partitions": status_counts.get("empty", 0),
+        "failed_partitions": status_counts.get("request_failed", 0),
+        "duplicate_partitions": duplicate_partitions,
+        "missing_data_files": missing_data_files,
+        "missing_metadata_files": missing_metadata_files,
+    }
+    rough_check = "PASS" if all(value == 0 for value in abnormal_counts.values()) else "FAIL"
+    summary = {
+        "provider": manifest.get("provider"),
+        "dataset_version": manifest.get("dataset_version"),
+        "start_date": manifest.get("start_date"),
+        "end_date": manifest.get("end_date"),
+        "api_names": api_names,
+        "trade_date_count": len(manifest.get("trade_dates", [])),
+        "planned_partitions": len(manifest.get("planned_partitions", [])),
+        "status_counts": status_counts,
+        "abnormal_counts": abnormal_counts,
+        "rough_check": rough_check,
+    }
+
+    rows_by_api: list[dict[str, Any]] = []
+    for api_name in api_names:
+        api_catalog = [row for row in catalog if row.get("api_name") == api_name]
+        api_coverage = [row for row in coverage if row.get("api_name") == api_name]
+        api_duplicates = [row for row in duplicates if row.get("api_name") == api_name]
+        api_status = {key: sum(1 for row in api_catalog if row.get("status") == key) for key in OPERATOR_STATUS_KEYS}
+        filtered = [_to_int(row.get("filtered_row_count")) for row in api_coverage]
+        returned = [_to_int(row.get("return_row_count")) for row in api_coverage]
+        symbols = [_to_int(row.get("post_filter_symbol_count")) for row in api_coverage]
+        dup_counts = [_to_int(row.get("duplicate_key_count"), 0) for row in api_duplicates]
+        api_missing_data = sum(1 for row in api_catalog if row.get("data_path") and not Path(row["data_path"]).exists())
+        api_missing_meta = sum(1 for row in api_catalog if row.get("metadata_path") and not Path(row["metadata_path"]).exists())
+        api_abnormal = (sum(api_status.get(s, 0) for s in bad_statuses) + api_status.get("empty", 0) + sum(1 for v in dup_counts if v > 0) + api_missing_data + api_missing_meta)
+        rows_by_api.append({
+            "api_name": api_name,
+            "planned_partitions": len(manifest.get("trade_dates", [])),
+            "status_ok": api_status["ok"],
+            "status_empty": api_status["empty"],
+            "status_already_exists": api_status["already_exists"],
+            "status_request_failed": api_status["request_failed"],
+            "status_incomplete_existing_partition": api_status["incomplete_existing_partition"],
+            "status_already_exists_metadata_incomplete": api_status["already_exists_metadata_incomplete"],
+            "total_return_rows": sum(returned),
+            "total_filtered_rows": sum(filtered),
+            "min_filtered_rows": _min_int(filtered),
+            "max_filtered_rows": _max_int(filtered),
+            "min_symbols": _min_int(symbols),
+            "max_symbols": _max_int(symbols),
+            "max_missing_symbols": _max_int([_to_int(row.get("universe_missing_count")) for row in api_coverage]),
+            "max_duplicate_keys": _max_int(dup_counts),
+            "data_files": sum(1 for row in api_catalog if row.get("data_path") and Path(row["data_path"]).exists()),
+            "metadata_files": sum(1 for row in api_catalog if row.get("metadata_path") and Path(row["metadata_path"]).exists()),
+            "missing_data_files": api_missing_data,
+            "missing_metadata_files": api_missing_meta,
+            "rough_check": "PASS" if api_abnormal == 0 else "FAIL",
+        })
+    _write_json(artifacts / "operator_summary.json", summary)
+    _write_csv(artifacts / "operator_summary_by_api.csv", rows_by_api)
+    return summary
+
 def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_date: str, retry: int) -> tuple[pd.DataFrame, str | None]:
     last_error: str | None = None
     for attempt in range(max(0, retry) + 1):
@@ -274,6 +385,7 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
     artifacts = artifact_root(config)
     _write_json(artifacts / "tushare_acquisition_manifest.json", manifest)
     if config.dry_run:
+        _write_operator_summaries(config, manifest, artifacts)
         return manifest
     client = client or TushareClient()
     catalog: list[dict[str, Any]] = []
@@ -385,6 +497,7 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
     _write_csv(artifacts / "field_presence_summary.csv", field_presence)
     _write_csv(artifacts / "duplicate_key_summary.csv", duplicates)
     _write_csv(artifacts / "universe_filter_summary.csv", universe_rows)
+    _write_operator_summaries(config, manifest, artifacts)
     return manifest
 
 
