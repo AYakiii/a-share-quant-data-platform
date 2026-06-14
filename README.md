@@ -405,7 +405,7 @@ Buffered policy is not automatically better than strict Top-N. Evaluate with aft
 Default mode is **formal full-market/full-period Raw Data Lake acquisition**.
 When symbol/date/industry/concept filters are omitted, the runner expands via acquisition-universe defaults.
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+    PYTHONPATH=src python -m qsys.utils.run_akshare_raw_ingest \
       --output-root outputs/factor_lake_raw \
       --start-date 20100101 \
       --end-date 20101231 \
@@ -413,7 +413,7 @@ When symbol/date/industry/concept filters are omitted, the runner expands via ac
 
 Targeted filters are supported for debug/recovery (not default semantics):
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+    PYTHONPATH=src python -m qsys.utils.run_akshare_raw_ingest \
       --symbols 000001,000002 \
       --trade-dates 20100104,20100105 \
       --api-names stock_zh_a_hist
@@ -422,7 +422,7 @@ Default policy keeps disabled sources skipped unless `--include-disabled` is set
 
 Admission-control tuning is configured explicitly at the API level when needed:
 
-    PYTHONPATH=src python -m qsys.utils.run_factor_lake_raw_ingest \
+    PYTHONPATH=src python -m qsys.utils.run_akshare_raw_ingest \
       --api-inflight-limits stock_margin_detail_szse=2
 
 The same compact form is accepted by the preheat CLI. In the Colab console, set `API_INFLIGHT_LIMITS` to a Python dict such as `{"stock_margin_detail_szse": 2}`; use `{}` for no API-specific cap. Active API limits are written to `_operation_review/admission_control_manifest.json` for audit and are intentionally excluded from hybrid checkpoint fingerprints so existing staging remains resumable.
@@ -442,14 +442,14 @@ Preheat report-date modes:
 
 ```bash
 # Existing explicit mode remains supported.
-PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
+PYTHONPATH=src python -m qsys.utils.run_akshare_raw_lake_preheat \
   --output-root outputs/raw_acquisition_local/wave_20220101_20241231 \
   --start-date 20220101 \
   --end-date 20241231 \
   --report-dates 20220331,20220630,20220930,20221231
 
 # Optional automatic mode derives 0331/0630/0930/1231 dates inside the window.
-PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
+PYTHONPATH=src python -m qsys.utils.run_akshare_raw_lake_preheat \
   --output-root outputs/raw_acquisition_local/wave_20220101_20241231 \
   --start-date 20220101 \
   --end-date 20241231 \
@@ -458,7 +458,7 @@ PYTHONPATH=src python -m qsys.utils.run_raw_lake_preheat \
 
 `--report-dates` and `--auto-quarter-end-report-dates` are mutually exclusive, and omitting both preserves the previous no-default behavior.
 
-Prepare is local-only for compact parquet assets. It scans already-landed local ingest Raw parquet files under `<output-root>/data/raw/akshare`, writes compact package assets under `<package-root>/raw/akshare`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. Empty staging is rejected before manifest/readiness files are written. Acquisition windows are inferred from an output-root name containing `YYYYMMDD_YYYYMMDD`, or supplied explicitly with `--start-date` and `--end-date`; unknown or inverted windows are rejected. The prepared Drive DWH root, Raw root, catalog root, collision-plan path, collision-plan SHA-256, and action counts are recorded in `READY_FOR_PROMOTION.json` for operator review. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
+Prepare is local-only for compact parquet assets. It scans already-landed local ingest Raw parquet files under `<output-root>/data/raw/<provider>`, writes compact package assets under `<package-root>/raw/<provider>`, classifies compact buckets from physical Raw lineage, writes local QA artifacts, and reads Drive only to produce `drive_collision_plan.csv` and `READY_FOR_PROMOTION.json`. Empty staging is rejected before manifest/readiness files are written. Acquisition windows are inferred from an output-root name containing `YYYYMMDD_YYYYMMDD`, or supplied explicitly with `--start-date` and `--end-date`; unknown or inverted windows are rejected. The prepared Drive DWH root, Raw root, catalog root, collision-plan path, collision-plan SHA-256, and action counts are recorded in `READY_FOR_PROMOTION.json` for operator review. It never writes Drive Raw parquet, never deletes Drive files, and fails if the Drive root is unavailable.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
@@ -466,7 +466,7 @@ PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli prepare \
   --drive-dwh-root /content/gdrive/MyDrive/a_share_quant_data
 ```
 
-Promote is the only command that writes Drive Raw assets. Canonical Drive Raw storage is `<drive-dwh-root>/raw/akshare/...`; the workflow must never create `<drive-dwh-root>/data/raw/akshare/...`. Promotion requires exact human confirmation, refuses a different Drive DWH root than the one reviewed during `prepare`, validates the reviewed local collision-plan SHA-256, validates the local package before the first Drive write, immediately rebuilds the collision plan, refuses changed target path sets and every non-identical Raw or catalog artifact overwrite, copies only new files, skips byte-identical files, reopens all promoted parquet files from Drive, and verifies rows, columns, and SHA-256. Buckets classified as `scope` or `snapshot` require explicit operator opt-in via `--allow-reviewed-bucket-kinds`.
+Promote is the only command that writes Drive Raw assets. Canonical Drive Raw storage is `<drive-dwh-root>/raw/<provider>/...`; the workflow must never create `<drive-dwh-root>/data/raw/akshare/...`. Promotion requires exact human confirmation, refuses a different Drive DWH root than the one reviewed during `prepare`, validates the reviewed local collision-plan SHA-256, validates the local package before the first Drive write, immediately rebuilds the collision plan, refuses changed target path sets and every non-identical Raw or catalog artifact overwrite, copies only new files, skips byte-identical files, reopens all promoted parquet files from Drive, and verifies rows, columns, and SHA-256. Buckets classified as `scope` or `snapshot` require explicit operator opt-in via `--allow-reviewed-bucket-kinds`.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli promote \
@@ -484,3 +484,34 @@ PYTHONPATH=src python -m qsys.utils.raw_lake_compact_cli audit \
 ```
 
 Raw compact is inventory-driven and lineage-driven: it uses generic partition keys such as `snapshot`, `year`, `trade_date`, `report_date`, `date`, `start_date`/`end_date`, and `since_date`. It intentionally avoids API-name-specific compact rules, parquet-body business-date repartitioning, normalization, silent deduplication, row deletion, and column deletion. Failed-task backlog counts are task-level rows from `raw_ingest_catalog.csv`, not API-level recovery summaries.
+
+### Provider-explicit Raw entrypoints
+
+AkShare:
+
+```bash
+python -m qsys.utils.run_akshare_raw_ingest
+```
+
+AkShare preheat:
+
+```bash
+python -m qsys.utils.run_akshare_raw_lake_preheat
+```
+
+Tushare dry-run skeleton:
+
+```bash
+python -m qsys.utils.run_tushare_raw_ingest --dry-run --symbols-file symbols.csv --universe-name external_universe --dataset-version v1_csi500_2021_2025_union --expected-symbol-count 1 --start-date 20240101 --end-date 20240131 --output-root /tmp/tushare_raw
+```
+
+
+`--dataset-version` is an operator-defined dataset namespace, not a code default. Use clear names such as `v1_csi500_2021_2025_union` or `v2_all_a_share` to keep different Universe/data-boundary runs physically isolated. Universe lineage is still confirmed by `--symbols-file`, its SHA-256, and `--universe-name`. Canonical Universe files use six-digit symbols; Tushare `ts_code` is only a provider-specific API representation.
+
+Shared compact / promotion / audit:
+
+```bash
+python -m qsys.utils.raw_lake_compact_cli prepare
+python -m qsys.utils.raw_lake_compact_cli promote
+python -m qsys.utils.raw_lake_compact_cli audit
+```

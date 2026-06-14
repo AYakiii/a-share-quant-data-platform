@@ -14,12 +14,15 @@ from qsys.data.factor_lake.raw_compact import (
     COMPACT_ROOT_PARENT,
     DRIVE_RAW_RELATIVE_ROOT,
     LOCAL_COMPACT_ASSET_RELATIVE_ROOT,
+    compact_asset_relative_root,
+    drive_raw_relative_root,
     REVIEW_REQUIRED_BUCKET_KINDS,
     assert_path_within,
     compact_raw_lake,
     file_sha256,
     load_manifest,
     resolve_compact_parent,
+    validate_path_segment,
     validate_promotion_name,
     verify_parquet_asset,
 )
@@ -85,14 +88,15 @@ def _safe_manifest_relative_path(relative_path: str, expected_root: Path) -> Pat
     return rel
 
 
-def _package_asset_path(package_root: Path, relative_path: str) -> Path:
-    rel = _safe_manifest_relative_path(relative_path, LOCAL_COMPACT_ASSET_RELATIVE_ROOT)
+def _package_asset_path(package_root: Path, relative_path: str, expected_root: Path | None = None) -> Path:
+    rel = _safe_manifest_relative_path(relative_path, expected_root or LOCAL_COMPACT_ASSET_RELATIVE_ROOT)
     return assert_path_within(package_root / rel, package_root, label="local compact asset")
 
 
-def _drive_raw_path(drive_root: Path, relative_path: str) -> Path:
-    rel = _safe_manifest_relative_path(relative_path, DRIVE_RAW_RELATIVE_ROOT)
-    raw_root = drive_root / DRIVE_RAW_RELATIVE_ROOT
+def _drive_raw_path(drive_root: Path, relative_path: str, expected_root: Path | None = None) -> Path:
+    root_rel = expected_root or DRIVE_RAW_RELATIVE_ROOT
+    rel = _safe_manifest_relative_path(relative_path, root_rel)
+    raw_root = drive_root / root_rel
     return assert_path_within(drive_root / rel, raw_root, label="Drive Raw target")
 
 
@@ -103,7 +107,8 @@ def _catalog_dir(drive_root: Path, promotion_name: str) -> Path:
 
 def _validate_local_package(package_root: Path, manifest: dict[str, Any]) -> None:
     for asset in manifest.get("compact_assets", []):
-        src = _package_asset_path(package_root, str(asset["relative_path"]))
+        expected_root = Path(str(manifest.get("local_compact_asset_relative_root", LOCAL_COMPACT_ASSET_RELATIVE_ROOT)))
+        src = _package_asset_path(package_root, str(asset["relative_path"]), expected_root)
         verify_parquet_asset(src, expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
 
 
@@ -114,8 +119,10 @@ def build_collision_plan(package_root: str | Path, drive_dwh_root: str | Path) -
     rows: list[dict[str, Any]] = []
     for asset in manifest.get("compact_assets", []):
         rel = str(asset["relative_path"])
-        src = _package_asset_path(pkg, rel)
-        dst = _drive_raw_path(drive_root, rel)
+        compact_root = Path(str(manifest.get("local_compact_asset_relative_root", LOCAL_COMPACT_ASSET_RELATIVE_ROOT)))
+        drive_raw_root = Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))
+        src = _package_asset_path(pkg, rel, compact_root)
+        dst = _drive_raw_path(drive_root, rel, drive_raw_root)
         src_sha = file_sha256(src)
         if not dst.exists():
             action = "copy_new"
@@ -166,7 +173,10 @@ def _ready_payload(manifest: dict[str, Any], collision_rows: list[dict[str, Any]
         "bucket_asset_counts": _bucket_asset_counts(assets),
         "review_required_bucket_kinds": sorted({a.get("bucket_kind") for a in assets if a.get("bucket_kind") in REVIEW_REQUIRED_BUCKET_KINDS}),
         "prepared_drive_dwh_root": str(drive_root.resolve()),
-        "prepared_drive_raw_root": str((drive_root / DRIVE_RAW_RELATIVE_ROOT).resolve()),
+        "provider": manifest.get("provider", "akshare"),
+        "dataset_version": manifest.get("dataset_version", manifest.get("storage_schema_version", "")),
+        "storage_schema_version": manifest.get("storage_schema_version", manifest.get("dataset_version", "")),
+        "prepared_drive_raw_root": str((drive_root / Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))).resolve()),
         "prepared_drive_catalog_root": str(_catalog_dir(drive_root, promotion_name).resolve()),
         "drive_collision_plan_path": str(collision_plan_path.resolve()),
         "drive_collision_plan_sha256": file_sha256(collision_plan_path),
@@ -184,6 +194,9 @@ def _prepare_review_summary(ready: dict[str, Any]) -> dict[str, Any]:
         for key in [
             "promotion_name",
             "package_root",
+            "provider",
+            "dataset_version",
+            "storage_schema_version",
             "prepared_drive_dwh_root",
             "prepared_drive_raw_root",
             "prepared_drive_catalog_root",
@@ -199,9 +212,14 @@ def _prepare_review_summary(ready: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare(args: argparse.Namespace) -> int:
+    provider = validate_path_segment(args.provider, label="provider")
+    dataset_version_arg = args.dataset_version if args.dataset_version is not None else args.storage_schema_version
+    dataset_version = validate_path_segment(dataset_version_arg, label="dataset_version", allow_empty=True) or None
+    if provider != "akshare" and not dataset_version:
+        raise ValueError("--dataset-version is required for non-akshare providers")
     drive_root = _require_drive_root(args.drive_dwh_root)
     promotion_name = validate_promotion_name(args.promotion_name) if args.promotion_name is not None else None
-    manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package))
+    manifest = compact_raw_lake(args.output_root, promotion_name=promotion_name, start_date=args.start_date, end_date=args.end_date, replace_existing=bool(args.replace_local_package), provider=provider, dataset_version=dataset_version)
     package_root = _resolve_package_root(manifest["package_root"])
     collisions = write_collision_plan(package_root, drive_root)
     collision_plan_path = package_root / "drive_collision_plan.csv"
@@ -348,8 +366,10 @@ def promote(args: argparse.Namespace) -> int:
     for row in collisions:
         src = Path(row["source_path"])
         dst = Path(row["drive_path"])
-        _package_asset_path(package_root, row["relative_path"])
-        _drive_raw_path(drive_root, row["relative_path"])
+        compact_root = Path(str(manifest.get("local_compact_asset_relative_root", LOCAL_COMPACT_ASSET_RELATIVE_ROOT)))
+        drive_raw_root = Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))
+        _package_asset_path(package_root, row["relative_path"], compact_root)
+        _drive_raw_path(drive_root, row["relative_path"], drive_raw_root)
         if row["action"] == "copy_new":
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
@@ -360,7 +380,7 @@ def promote(args: argparse.Namespace) -> int:
             raise FileExistsError(f"unexpected blocked collision: {row['relative_path']}")
 
     for asset in manifest.get("compact_assets", []):
-        verify_parquet_asset(_drive_raw_path(drive_root, asset["relative_path"]), expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
+        verify_parquet_asset(_drive_raw_path(drive_root, asset["relative_path"], Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))), expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
 
     attempt_name = datetime.now(UTC).strftime("promotion_attempt_%Y%m%dT%H%M%S%fZ")
     report = {"promotion_name": promotion_name, "promoted_at": datetime.now(UTC).isoformat(), "copied": copied, "skipped_identical": skipped, "verified_assets": len(manifest.get("compact_assets", [])), "review_required_bucket_kinds": required_review}
@@ -382,7 +402,7 @@ def audit(args: argparse.Namespace) -> int:
     manifest = json.loads((promo_dir / "compact_manifest.json").read_text(encoding="utf-8"))
     summary: dict[str, int] = {}
     for asset in manifest.get("compact_assets", []):
-        verify_parquet_asset(_drive_raw_path(drive_root, asset["relative_path"]), expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
+        verify_parquet_asset(_drive_raw_path(drive_root, asset["relative_path"], Path(str(manifest.get("drive_raw_relative_root", DRIVE_RAW_RELATIVE_ROOT)))), expected_rows=int(asset["rows"]), expected_columns=list(asset["columns"]), expected_sha256=str(asset["sha256"]))
         kind = str(asset["bucket_kind"])
         summary[kind] = summary.get(kind, 0) + 1
     print("Bucket summary")
@@ -402,6 +422,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--start-date")
     p.add_argument("--end-date")
     p.add_argument("--replace-local-package", action="store_true", help=f"Replace an existing local package under {COMPACT_ROOT_PARENT}; never affects Drive")
+    p.add_argument("--provider", default="akshare")
+    p.add_argument("--dataset-version")
+    p.add_argument("--storage-schema-version", help="Deprecated alias for --dataset-version")
     p.set_defaults(func=prepare)
 
     p = sub.add_parser("promote", help="Human-gated Drive promotion of a ready compact package.")

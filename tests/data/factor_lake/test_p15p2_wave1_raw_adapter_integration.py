@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from qsys.data.factor_lake.registry import FACTOR_SOURCE_REGISTRY, SOURCE_CAPABILITY_REGISTRY
-from qsys.data.factor_lake.raw_ingest import API_POLICY_METADATA, COVERAGE_API_SPECS, run_raw_coverage_ingest
+from qsys.data.factor_lake.akshare_raw_ingest import AKSHARE_API_POLICY_METADATA, AKSHARE_COVERAGE_API_SPECS, run_raw_coverage_ingest
 
 
 WAVE1_APIS = {
@@ -22,7 +22,7 @@ WAVE1_APIS = {
 
 
 def test_wave1_apis_are_registered_manual_only_and_not_default_enabled() -> None:
-    coverage_apis = {spec["api_name"] for specs in COVERAGE_API_SPECS.values() for spec in specs}
+    coverage_apis = {spec["api_name"] for specs in AKSHARE_COVERAGE_API_SPECS.values() for spec in specs}
     capability_apis = {spec.api_name for spec in SOURCE_CAPABILITY_REGISTRY}
     source_cases = {case.api_name: case for case in FACTOR_SOURCE_REGISTRY if case.api_name in WAVE1_APIS}
 
@@ -30,11 +30,11 @@ def test_wave1_apis_are_registered_manual_only_and_not_default_enabled() -> None
     assert WAVE1_APIS <= capability_apis
     assert WAVE1_APIS <= set(source_cases)
     assert all(not source_cases[api_name].enabled for api_name in WAVE1_APIS)
-    for family, specs in COVERAGE_API_SPECS.items():
+    for family, specs in AKSHARE_COVERAGE_API_SPECS.items():
         for spec in specs:
             api_name = spec["api_name"]
             if api_name in WAVE1_APIS:
-                policy = API_POLICY_METADATA[(family, api_name)]
+                policy = AKSHARE_API_POLICY_METADATA[(family, api_name)]
                 assert policy["default_enabled"] is False
                 assert policy["manual_review_required"] is True
 

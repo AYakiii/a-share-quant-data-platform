@@ -129,6 +129,7 @@ def _fetch_stock_zh_a_daily_partition(partition: FetchPartition) -> dict[str, An
         "primary_error": primary_err,
         "fallback_error": fallback_err,
         "original_symbol": original_symbol,
+        "source_symbol": symbol,
         "akshare_symbol": symbol,
         "rows_before_filter": rows_before,
         "rows_after_filter": rows_after,

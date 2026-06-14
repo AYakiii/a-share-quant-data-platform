@@ -9,7 +9,7 @@ from .registry import (
     plan_partitions,
     registry_to_frame,
 )
-from .raw_ingest import run_raw_ingest
+from .akshare_raw_ingest import run_akshare_raw_ingest
 from .backfill_plan import RawBackfillPlanItem, backfill_plan_to_frame, export_backfill_plan_csv, generate_default_backfill_plan
 from .backfill_tasks import RawBackfillTask, dry_run_summary, export_backfill_tasks_csv, filter_tasks, generate_tasks_from_default_backfill_plan, tasks_to_frame
 from .backfill_execute import RawBackfillTaskResult, execute_backfill_task, execute_backfill_tasks
@@ -20,7 +20,7 @@ __all__ = [
     "get_dataset_spec",
     "list_datasets",
     "plan_partitions",
-    "run_raw_ingest",
+    "run_akshare_raw_ingest",
     "SOURCE_CAPABILITY_REGISTRY",
     "SourceCapabilitySpec",
     "registry_to_frame",
