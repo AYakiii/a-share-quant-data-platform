@@ -12,11 +12,18 @@ from qsys.data.sources.tushare_sources import DAILY_BASIC_FIELDS, DAILY_FIELDS
 from qsys.utils.run_tushare_raw_ingest import build_parser, config_from_args
 
 
+def _trade_cal_frame(start_date: str, end_date: str) -> pd.DataFrame:
+    dates = pd.date_range(start=start_date, end=end_date, freq="D").strftime("%Y%m%d").tolist()
+    return pd.DataFrame({"cal_date": dates, "is_open": [0 if d.endswith("13") else 1 for d in dates]})
+
+
 class MockClient:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
     def query(self, api_name: str, **params: str) -> pd.DataFrame:
+        if api_name == "trade_cal":
+            return _trade_cal_frame(params["start_date"], params["end_date"])
         self.calls.append((api_name, params["trade_date"]))
         return pd.DataFrame({
             "ts_code": ["000001.SZ", "000002.SZ", "000002.SZ", "600000.SH"],
@@ -138,6 +145,8 @@ def test_fields_contract_passes_fields_and_trims_output(tmp_path: Path) -> None:
             self.params: dict[str, str] = {}
 
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
             self.params = params
             return pd.DataFrame({
                 "ts_code": ["000001.SZ"],
@@ -195,7 +204,7 @@ def test_cli_summary_default_and_print_manifest(tmp_path: Path, capsys: pytest.C
     short = capsys.readouterr().out
     assert "[tushare] output_root=" in short
     assert "api_names=daily" in short
-    assert "planned_partitions=1" in short
+    assert "planned_partitions=0" in short
     assert '"planned_partitions"' not in short
     assert main(base + ["--print-manifest"]) == 0
     full = capsys.readouterr().out
@@ -205,6 +214,8 @@ def test_cli_summary_default_and_print_manifest(tmp_path: Path, capsys: pytest.C
 def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path) -> None:
     class CleanClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
             fields = DAILY_BASIC_FIELDS if api_name == "daily_basic" else DAILY_FIELDS
             row: dict[str, object] = {field: 1.0 for field in fields}
             row["ts_code"] = "000001.SZ"
@@ -251,6 +262,8 @@ def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path
 def test_empty_success_without_columns_is_data_fact_not_contract_failure(tmp_path: Path) -> None:
     class EmptyClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
             return pd.DataFrame()
 
     run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=EmptyClient())
@@ -273,6 +286,8 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
 
     class MixedClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
             if api_name == "daily_basic":
                 raise RuntimeError("boom")
             if params["trade_date"] == "20260611":
@@ -307,6 +322,8 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
 def test_missing_required_contract_fields_fail_rough_check(tmp_path: Path) -> None:
     class MissingFieldClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
             return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]]})
 
     run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=MissingFieldClient())
@@ -350,3 +367,89 @@ def test_cli_manual_default_review_cell_is_summary_only() -> None:
     assert "**5) Compact summary review cell**" in text
     assert 'manifest["planned_partitions"]' not in text
     assert "pd.read_parquet" not in text
+
+
+def test_pr141_mocked_trade_cal_uses_open_days_and_dry_run_matches_real_plan(tmp_path: Path) -> None:
+    symbols = _symbols(tmp_path)
+    client = MockClient()
+    cfg = _cfg(tmp_path, symbols, start_date="20260612", end_date="20260614", api_names=("daily",), max_workers=1)
+    dry_manifest = run_tushare_raw_ingest_dry_run(cfg, require_token=False, client=client)
+    real_manifest = run_tushare_raw_ingest(cfg, client=client)
+    assert dry_manifest["trade_dates"] == ["20260612", "20260614"]
+    assert dry_manifest["request_date_count"] == 2
+    assert dry_manifest["skipped_non_trading_days_count"] == 1
+    assert dry_manifest["planned_partitions"] == real_manifest["planned_partitions"]
+    assert dry_manifest["request_date_count"] == real_manifest["request_date_count"]
+
+
+def test_pr141_dry_run_without_calendar_client_is_unresolved_not_calendar_fallback(tmp_path: Path) -> None:
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), start_date="20260612", end_date="20260614", dry_run=True), require_token=False)
+    assert manifest["calendar_unresolved"] is True
+    assert manifest["date_source"] == "calendar_unresolved"
+    assert manifest["trade_dates"] == []
+    assert manifest["planned_partitions"] == []
+    assert manifest["request_date_count"] == 0
+
+
+def test_pr141_calendar_days_mode_keeps_natural_days(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qsys.data.sources import tushare_acquisition as acquisition
+    from qsys.data.sources.tushare_contracts import TushareSourceSpec
+
+    spec = TushareSourceSpec(source_family="events", api_name="event_api", fields=("ts_code",), calendar_mode="calendar_days")
+    monkeypatch.setattr(acquisition, "source_specs_by_api", lambda: {"event_api": spec})
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), start_date="20260612", end_date="20260614", api_names=("event_api",), dry_run=True), require_token=False)
+    assert manifest["date_source"] == "calendar_days"
+    assert manifest["trade_dates"] == ["20260612", "20260613", "20260614"]
+    assert manifest["request_date_count"] == 3
+
+
+def test_pr141_dates_file_override_records_lineage(tmp_path: Path) -> None:
+    dates = tmp_path / "dates.txt"
+    dates.write_text("trade_date\n20260612\n20260614\n", encoding="utf-8")
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), start_date="20260612", end_date="20260614", dates_file=dates, dry_run=True), require_token=False)
+    assert manifest["date_source"] == "dates_file"
+    assert manifest["dates_file"] == str(dates)
+    assert manifest["trade_dates"] == ["20260612", "20260614"]
+    assert manifest["request_date_count"] == 2
+
+
+def test_pr141_mixed_calendar_modes_fail_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qsys.data.sources import tushare_acquisition as acquisition
+    from qsys.data.sources.tushare_contracts import TushareSourceSpec
+
+    daily = TushareSourceSpec(source_family="market_price", api_name="daily", fields=("ts_code",), calendar_mode="trading_days")
+    event = TushareSourceSpec(source_family="events", api_name="event_api", fields=("ts_code",), calendar_mode="calendar_days")
+    monkeypatch.setattr(acquisition, "source_specs_by_api", lambda: {"daily": daily, "event_api": event})
+    with pytest.raises(NotImplementedError, match="mixed Tushare calendar_mode"):
+        run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily", "event_api"), dry_run=True), require_token=False, client=MockClient())
+
+
+def test_pr141_max_workers_2_completes_all_tasks(tmp_path: Path) -> None:
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), start_date="20260612", end_date="20260614", max_workers=2), client=MockClient())
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    catalog = pd.read_csv(artifacts / "raw_ingest_catalog.csv")
+    summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
+    assert len(catalog) == 2
+    assert summary["planned_partitions"] == 2
+    assert summary["status_counts"]["ok"] == 2
+
+
+def test_pr141_request_pacer_acquire_called_before_provider_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qsys.data.sources import tushare_acquisition as acquisition
+
+    events: list[str] = []
+    original_acquire = acquisition.RequestPacer.acquire
+
+    def spy_acquire(self: object) -> None:
+        events.append("acquire")
+        original_acquire(self)
+
+    class OrderedClient(MockClient):
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name != "trade_cal":
+                events.append("query")
+            return super().query(api_name, **params)
+
+    monkeypatch.setattr(acquisition.RequestPacer, "acquire", spy_acquire)
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=OrderedClient())
+    assert events[:2] == ["acquire", "query"]

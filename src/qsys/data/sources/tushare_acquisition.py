@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -143,6 +143,8 @@ def _resolve_calendar_plan(config: TushareRawIngestConfig, specs: list[TushareSo
         dates = _read_dates_file(config.dates_file)
         return CalendarPlan(dates, natural_days, "dates_file", "manual", str(config.dates_file), max(0, len(natural_days) - len(dates)))
     modes = {spec.calendar_mode for spec in specs}
+    if len(modes) > 1:
+        raise NotImplementedError("mixed Tushare calendar_mode values are not yet supported in one run")
     if modes == {"calendar_days"}:
         return CalendarPlan(natural_days, natural_days, "calendar_days", "calendar_range", None, 0)
     if "trading_days" in modes:
@@ -151,7 +153,7 @@ def _resolve_calendar_plan(config: TushareRawIngestConfig, specs: list[TushareSo
         except Exception:
             if not allow_offline:
                 raise
-            return CalendarPlan(natural_days, natural_days, "calendar_days_offline_fallback", "calendar_range", None, 0)
+            return CalendarPlan([], natural_days, "calendar_unresolved", "trade_cal", None, len(natural_days))
     return CalendarPlan(natural_days, natural_days, "manual", "manual", None, 0)
 
 
@@ -174,6 +176,7 @@ def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], reques
         "date_source": calendar_plan.date_source if calendar_plan else "calendar_days",
         "dates_file": str(config.dates_file) if config.dates_file else None,
         "calendar_source": calendar_plan.calendar_source if calendar_plan else "calendar_range",
+        "calendar_unresolved": (calendar_plan.date_source == "calendar_unresolved") if calendar_plan else False,
         "calendar_cache_path": calendar_plan.cache_path if calendar_plan else None,
         "calendar_mode_by_api": {spec.api_name: spec.calendar_mode for spec in specs},
         "request_date_count": len(trade_dates),
@@ -204,14 +207,20 @@ def _validate_symbols(config: TushareRawIngestConfig) -> list[str]:
     return symbols
 
 
-def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
+def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True, client: TushareQueryClient | None = None) -> dict[str, Any]:
     """Validate inputs and return a token-free dry-run manifest without calling Tushare APIs."""
     cfg = TushareRawIngestConfig(**{**config.__dict__, "dry_run": True})
     _, requested_api_names, requested_families, _, specs, _ = _validate_config(cfg)
+    symbols = _validate_symbols(cfg)
+    calendar_client = client
     if require_token:
         read_tushare_token(allow_prompt=False)
-    symbols = _validate_symbols(cfg)
-    calendar_plan = _resolve_calendar_plan(cfg, specs, allow_offline=True)
+        if calendar_client is None:
+            try:
+                calendar_client = TushareClient()
+            except ModuleNotFoundError:
+                calendar_client = None
+    calendar_plan = _resolve_calendar_plan(cfg, specs, client=calendar_client, allow_offline=(not require_token or calendar_client is None))
     return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=calendar_plan.trade_dates, calendar_plan=calendar_plan)
 
 
@@ -426,6 +435,15 @@ def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_
     return pd.DataFrame(), last_error
 
 
+@dataclass(frozen=True)
+class TaskResult:
+    """Worker result aggregated by the main acquisition thread."""
+
+    status: str
+    rows: dict[str, list[dict[str, Any]]]
+    current: dict[str, str]
+
+
 def _progress_payload(config: TushareRawIngestConfig, started_at: str, start_ts: float, total: int, completed: int, status_counts: dict[str, int], current: dict[str, str] | None) -> dict[str, Any]:
     return {
         "provider": config.provider,
@@ -533,10 +551,10 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
             with events_path.open("a", encoding="utf-8") as events:
                 events.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def finish(status: str, rows: dict[str, list[dict[str, Any]]], current: dict[str, str]) -> dict[str, Any]:
-        return {"status": status, "rows": rows, "current": current}
+    def finish(status: str, rows: dict[str, list[dict[str, Any]]], current: dict[str, str]) -> TaskResult:
+        return TaskResult(status=status, rows=rows, current=current)
 
-    def run_task(spec: TushareSourceSpec, trade_date: str) -> dict[str, Any]:
+    def run_task(spec: TushareSourceSpec, trade_date: str) -> TaskResult:
         current = {"api_name": spec.api_name, "trade_date": trade_date}
         part = _partition_dir(config, spec, trade_date)
         data_path = part / "data.parquet"
@@ -598,16 +616,16 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
         futures = [executor.submit(run_task, spec, trade_date) for spec, trade_date in tasks]
         for future in as_completed(futures):
             result = future.result()
-            rows = result["rows"]
+            rows = result.rows
             catalog.extend(rows["catalog"])
             coverage.extend(rows["coverage"])
             field_presence.extend(rows["field_presence"])
             duplicates.extend(rows["duplicates"])
             universe_rows.extend(rows["universe_rows"])
-            status_counts[result["status"]] = status_counts.get(result["status"], 0) + 1
+            status_counts[result.status] = status_counts.get(result.status, 0) + 1
             completed += 1
             with progress_lock:
-                update_progress(result["current"])
+                update_progress(result.current)
     with progress_lock:
         update_progress(None, force_stdout=False)
     _write_csv(artifacts / "raw_ingest_catalog.csv", catalog)
