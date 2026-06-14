@@ -1,5 +1,7 @@
 # A-Share Quant Data Platform
 
+For project CLI usage, see [`docs/operator/cli_manual.md`](docs/operator/cli_manual.md).
+
 A research-oriented A-share systematic trading framework built around a modular pipeline:
 
 Data → Panel → Feature → Signal → Backtest → Diagnostics → Constraints
