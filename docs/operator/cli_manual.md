@@ -338,3 +338,79 @@ Before acquisition or promotion:
 5. Confirm Drive is not written except by reviewed `promote`.
 6. Confirm no token appears in command output, manifest, metadata, notebooks, or logs.
 7. Run `--help` on the CLI if unsure about current options.
+
+### M1-A: Tushare local-only Raw acquisition
+
+M1-A formalizes the verified Tushare smoke contracts as local-only Raw acquisition:
+
+```text
+Tushare API -> local staging -> metadata / manifest / QA artifacts
+```
+
+It still does **not** write Google Drive, does **not** promote, and does **not** build normalized/factor/backtest outputs. M0 remains dry-run/plan-only validation; M1-A allows true local acquisition when `--dry-run` is omitted.
+
+Dry-run template:
+
+```bash
+PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
+  --dry-run \
+  --symbols-file stock_universe_v1_symbols.txt \
+  --universe-name stock_universe_v1 \
+  --dataset-version v1_csi500_2021_2025_union \
+  --start-date 20260612 \
+  --end-date 20260612 \
+  --api-names daily,daily_basic \
+  --output-root outputs/tushare_raw_m1a \
+  --max-workers 1 \
+  --request-sleep 0.3
+```
+
+Local acquisition template:
+
+```bash
+PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
+  --symbols-file stock_universe_v1_symbols.txt \
+  --universe-name stock_universe_v1 \
+  --dataset-version v1_csi500_2021_2025_union \
+  --start-date 20260612 \
+  --end-date 20260612 \
+  --api-names daily,daily_basic,moneyflow,margin_detail \
+  --output-root outputs/tushare_raw_m1a \
+  --max-workers 1 \
+  --request-sleep 0.3 \
+  --request-jitter 0.0 \
+  --retry 2 \
+  --resume
+```
+
+Selection is parameter/contract driven:
+
+- `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail`.
+- `--families` selects registry families such as `market_price,market_basic,market_flow,margin_leverage`.
+- `--symbols-file` must be the external canonical six-digit Universe file; no provider-specific Universe file is generated.
+- `--dataset-version` is required and is not defaulted to a specific V1 namespace.
+
+M1-A local staging layout:
+
+```text
+<output-root>/data/raw/tushare/<family>/<api>/trade_date=YYYYMMDD/data.parquet
+<output-root>/data/raw/tushare/<family>/<api>/trade_date=YYYYMMDD/metadata.json
+```
+
+Token-free review artifacts are written under:
+
+```text
+<output-root>/artifacts/tushare_raw_acquisition/
+```
+
+Expected artifact files:
+
+```text
+tushare_acquisition_manifest.json
+raw_ingest_catalog.csv
+source_coverage_summary.csv
+field_presence_summary.csv
+duplicate_key_summary.csv
+universe_filter_summary.csv
+operation_events.jsonl
+```

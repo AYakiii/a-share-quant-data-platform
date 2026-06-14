@@ -517,3 +517,5 @@ python -m qsys.utils.raw_lake_compact_cli prepare
 python -m qsys.utils.raw_lake_compact_cli promote
 python -m qsys.utils.raw_lake_compact_cli audit
 ```
+
+- Tushare M1-A local-only Raw acquisition CLI is documented in `docs/operator/cli_manual.md`; it writes local staging and QA artifacts only, with no Drive writes or promote step.
