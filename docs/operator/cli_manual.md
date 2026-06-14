@@ -498,6 +498,8 @@ print("ROUGH CHECK:", summary.get("rough_check"))
 
 The default summary review cell reads only fixed-size operator summaries and live progress. It does not display catalog details, coverage details, abnormal rows, parquet samples, or per-partition output. Use the CSV artifacts such as `raw_ingest_catalog.csv`, `source_coverage_summary.csv`, `duplicate_key_summary.csv`, `universe_filter_summary.csv`, `field_presence_summary.csv`, and `operation_events.jsonl` only for optional diagnostics.
 
+Raw acquisition records what the provider returns. Empty results and null values are data facts, not cleaning decisions. Their interpretation belongs to later normalization, panel construction, or feature engineering stages. Therefore `status_empty` remains a status-count fact, but it is not included in `abnormal_counts` and does not make `rough_check` fail.
+
 Selection is parameter/contract driven:
 
 - `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail`.

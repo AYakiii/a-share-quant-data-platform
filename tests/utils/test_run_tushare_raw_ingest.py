@@ -8,6 +8,7 @@ import pytest
 
 from qsys.data.sources.tushare_acquisition import run_tushare_raw_ingest, run_tushare_raw_ingest_dry_run
 from qsys.data.sources.tushare_contracts import TushareRawIngestConfig
+from qsys.data.sources.tushare_sources import DAILY_BASIC_FIELDS, DAILY_FIELDS
 from qsys.utils.run_tushare_raw_ingest import build_parser, config_from_args
 
 
@@ -204,11 +205,12 @@ def test_cli_summary_default_and_print_manifest(tmp_path: Path, capsys: pytest.C
 def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path) -> None:
     class CleanClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
-            return pd.DataFrame({
-                "ts_code": ["000001.SZ", "000002.SZ"],
-                "trade_date": [params["trade_date"]] * 2,
-                "close": [1.0, 2.0],
-            })
+            fields = DAILY_BASIC_FIELDS if api_name == "daily_basic" else DAILY_FIELDS
+            row: dict[str, object] = {field: 1.0 for field in fields}
+            row["ts_code"] = "000001.SZ"
+            row["trade_date"] = params["trade_date"]
+            row2 = {**row, "ts_code": "000002.SZ"}
+            return pd.DataFrame([row, row2])
 
     symbols = _symbols(tmp_path)
     manifest = run_tushare_raw_ingest(
@@ -227,11 +229,11 @@ def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path
     assert summary["status_counts"]["ok"] == 4
     assert summary["abnormal_counts"] == {
         "bad_status_partitions": 0,
-        "empty_partitions": 0,
         "failed_partitions": 0,
         "duplicate_partitions": 0,
         "missing_data_files": 0,
         "missing_metadata_files": 0,
+        "required_contract_fields_missing": 0,
     }
     assert summary["rough_check"] == "PASS"
     assert "planned_partitions" not in "\n".join(str(x) for x in summary.values())
@@ -246,6 +248,22 @@ def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path
     assert by_api["planned_partitions"].tolist() == [2, 2]
 
 
+def test_empty_success_is_data_fact_not_abnormal(tmp_path: Path) -> None:
+    class EmptyClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            return pd.DataFrame(columns=list(DAILY_FIELDS))
+
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=EmptyClient())
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
+    assert summary["status_counts"]["empty"] == 1
+    assert "empty_partitions" not in summary["abnormal_counts"]
+    assert summary["rough_check"] == "PASS"
+    by_api = pd.read_csv(artifacts / "operator_summary_by_api.csv")
+    assert by_api.loc[0, "status_empty"] == 1
+    assert by_api.loc[0, "rough_check"] == "PASS"
+
+
 def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> None:
     from qsys.data.sources.tushare_acquisition import _write_operator_summaries
 
@@ -254,8 +272,12 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
             if api_name == "daily_basic":
                 raise RuntimeError("boom")
             if params["trade_date"] == "20260611":
-                return pd.DataFrame(columns=["ts_code", "trade_date", "close"])
-            return MockClient().query(api_name, **params)
+                return pd.DataFrame(columns=list(DAILY_FIELDS))
+            row: dict[str, object] = {field: 1.0 for field in DAILY_FIELDS}
+            row["ts_code"] = "000001.SZ"
+            row["trade_date"] = params["trade_date"]
+            duplicate = {**row}
+            return pd.DataFrame([row, duplicate])
 
     cfg = _cfg(tmp_path, _symbols(tmp_path), start_date="20260611", end_date="20260612", api_names=("daily", "daily_basic"), retry=0)
     manifest = run_tushare_raw_ingest(cfg, client=MixedClient())
@@ -266,7 +288,8 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
     Path(ok_row["metadata_path"]).unlink()
     summary = _write_operator_summaries(cfg, manifest, artifacts)
     assert summary["abnormal_counts"]["failed_partitions"] == 2
-    assert summary["abnormal_counts"]["empty_partitions"] == 1
+    assert "empty_partitions" not in summary["abnormal_counts"]
+    assert summary["status_counts"]["empty"] == 1
     assert summary["abnormal_counts"]["duplicate_partitions"] == 1
     assert summary["abnormal_counts"]["missing_data_files"] == 1
     assert summary["abnormal_counts"]["missing_metadata_files"] == 1
@@ -275,6 +298,21 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
     by_api = pd.read_csv(artifacts / "operator_summary_by_api.csv")
     assert len(by_api) == 2
     assert by_api["status_request_failed"].sum() == 2
+
+
+def test_missing_required_contract_fields_fail_rough_check(tmp_path: Path) -> None:
+    class MissingFieldClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]]})
+
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=MissingFieldClient())
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
+    assert summary["abnormal_counts"]["required_contract_fields_missing"] == 1
+    assert summary["rough_check"] == "FAIL"
+    by_api = pd.read_csv(artifacts / "operator_summary_by_api.csv")
+    assert by_api.loc[0, "required_contract_fields_missing"] == 1
+    assert by_api.loc[0, "rough_check"] == "FAIL"
 
 
 def test_cli_default_uses_operator_summary_without_manifest_or_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
