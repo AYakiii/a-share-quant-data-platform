@@ -164,3 +164,11 @@ def test_tushare_dry_run_rejects_bad_runtime_config(tmp_path: Path, monkeypatch:
         kwargs[field] = value
     with pytest.raises(ValueError, match=message):
         run_tushare_raw_ingest_dry_run(TushareRawIngestConfig(**kwargs))
+
+
+def test_core_tushare_registry_calendar_modes_are_explicit_trading_days() -> None:
+    from qsys.data.sources.tushare_sources import source_specs_by_api
+
+    specs = source_specs_by_api()
+    for api_name in ("daily", "daily_basic", "moneyflow", "margin_detail"):
+        assert specs[api_name].calendar_mode == "trading_days"

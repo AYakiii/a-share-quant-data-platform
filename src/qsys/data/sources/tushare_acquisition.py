@@ -220,7 +220,7 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
                 calendar_client = TushareClient()
             except ModuleNotFoundError:
                 calendar_client = None
-    calendar_plan = _resolve_calendar_plan(cfg, specs, client=calendar_client, allow_offline=(not require_token or calendar_client is None))
+    calendar_plan = _resolve_calendar_plan(cfg, specs, client=calendar_client, allow_offline=True)
     return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=calendar_plan.trade_dates, calendar_plan=calendar_plan)
 
 

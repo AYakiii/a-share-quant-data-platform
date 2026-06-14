@@ -57,10 +57,10 @@ MONEYFLOW_FIELDS = (
 )
 
 TUSHARE_SOURCE_SPECS: tuple[TushareSourceSpec, ...] = (
-    TushareSourceSpec(source_family="market_price", api_name="daily", fields=DAILY_FIELDS),
-    TushareSourceSpec(source_family="market_basic", api_name="daily_basic", fields=DAILY_BASIC_FIELDS),
-    TushareSourceSpec(source_family="market_flow", api_name="moneyflow", fields=MONEYFLOW_FIELDS),
-    TushareSourceSpec(source_family="margin_leverage", api_name="margin_detail", fields=MARGIN_DETAIL_FIELDS),
+    TushareSourceSpec(source_family="market_price", api_name="daily", fields=DAILY_FIELDS, calendar_mode="trading_days"),
+    TushareSourceSpec(source_family="market_basic", api_name="daily_basic", fields=DAILY_BASIC_FIELDS, calendar_mode="trading_days"),
+    TushareSourceSpec(source_family="market_flow", api_name="moneyflow", fields=MONEYFLOW_FIELDS, calendar_mode="trading_days"),
+    TushareSourceSpec(source_family="margin_leverage", api_name="margin_detail", fields=MARGIN_DETAIL_FIELDS, calendar_mode="trading_days"),
 )
 
 
