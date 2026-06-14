@@ -184,6 +184,14 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Atomically write JSON for live operator polling."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = sorted({k for row in rows for k in row}) if rows else ["status"]
@@ -193,16 +201,68 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def _call_with_retry(client: TushareQueryClient, api_name: str, trade_date: str, retry: int) -> tuple[pd.DataFrame, str | None]:
+def _call_with_retry(client: TushareQueryClient, spec: TushareSourceSpec, trade_date: str, retry: int) -> tuple[pd.DataFrame, str | None]:
     last_error: str | None = None
     for attempt in range(max(0, retry) + 1):
         try:
-            return client.query(api_name, trade_date=trade_date), None
+            params: dict[str, Any] = {"trade_date": trade_date}
+            if spec.fields:
+                params["fields"] = ",".join(spec.fields)
+            return client.query(spec.api_name, **params), None
         except Exception as exc:  # noqa: BLE001 - persist token-free failure summary
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt >= retry:
                 break
     return pd.DataFrame(), last_error
+
+
+def _progress_payload(config: TushareRawIngestConfig, started_at: str, start_ts: float, total: int, completed: int, status_counts: dict[str, int], current: dict[str, str] | None) -> dict[str, Any]:
+    return {
+        "provider": config.provider,
+        "dataset_version": config.dataset_version,
+        "started_at": started_at,
+        "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "elapsed_sec": round(time.monotonic() - start_ts, 1),
+        "total_tasks": total,
+        "completed_tasks": completed,
+        "pending_or_running_tasks": max(0, total - completed),
+        "current_task": current,
+        "status_counts": status_counts,
+        "artifacts_root": str(artifact_root(config)),
+        "local_staging_root": str(staging_root(config)),
+    }
+
+
+def _metadata_complete(metadata: dict[str, Any]) -> bool:
+    required = {"return_row_count", "filtered_row_count", "pre_filter_symbol_count", "post_filter_symbol_count", "universe_missing_count", "duplicate_key_count"}
+    return required.issubset(metadata)
+
+
+def _append_qa_from_metadata(
+    *,
+    base: dict[str, Any],
+    spec: TushareSourceSpec,
+    metadata: dict[str, Any],
+    data_path: Path,
+    coverage: list[dict[str, Any]],
+    field_presence: list[dict[str, Any]],
+    duplicates: list[dict[str, Any]],
+    universe_rows: list[dict[str, Any]],
+) -> None:
+    """Backfill QA rows from an existing partition metadata file."""
+    coverage.append(metadata)
+    duplicates.append({**base, "duplicate_key_count": metadata.get("duplicate_key_count")})
+    universe_rows.append({
+        **base,
+        "pre_filter_symbol_count": metadata.get("pre_filter_symbol_count"),
+        "post_filter_symbol_count": metadata.get("post_filter_symbol_count"),
+        "universe_missing_count": metadata.get("universe_missing_count"),
+    })
+    dtypes = metadata.get("dtypes") if isinstance(metadata.get("dtypes"), dict) else {}
+    if not dtypes and data_path.exists():
+        dtypes = {c: str(t) for c, t in pd.read_parquet(data_path).dtypes.items()}
+    for column in sorted(set(dtypes) | set(spec.fields) | {"canonical_symbol"}):
+        field_presence.append({**base, "field": column, "present": column in dtypes, "null_count": None, "dtype": dtypes.get(column)})
 
 
 def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQueryClient | None = None) -> dict[str, Any]:
@@ -222,38 +282,83 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
     duplicates: list[dict[str, Any]] = []
     universe_rows: list[dict[str, Any]] = []
     events_path = artifacts / "operation_events.jsonl"
+    live_path = artifacts / "live_progress.json"
     events_path.parent.mkdir(parents=True, exist_ok=True)
+    total_tasks = len(specs) * len(trade_dates)
+    completed = 0
+    status_counts = {"ok": 0, "empty": 0, "request_failed": 0, "already_exists": 0, "incomplete_existing_partition": 0, "already_exists_metadata_incomplete": 0}
+    started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    start_ts = time.monotonic()
+    heartbeat_sec = config.heartbeat_sec if config.heartbeat_sec and config.heartbeat_sec > 0 else None
+    next_heartbeat = start_ts if heartbeat_sec is not None else float("inf")
+
+    def update_progress(current: dict[str, str] | None, *, force_stdout: bool = False) -> None:
+        nonlocal next_heartbeat
+        payload = _progress_payload(config, started_at, start_ts, total_tasks, completed, status_counts, current)
+        _write_json_atomic(live_path, payload)
+        now = time.monotonic()
+        if heartbeat_sec is not None and (force_stdout or now >= next_heartbeat):
+            current_text = "none" if current is None else f"{current['api_name']}:{current['trade_date']}"
+            print(
+                f"[heartbeat] elapsed_sec={payload['elapsed_sec']} total_tasks={total_tasks} "
+                f"completed_tasks={completed} pending_or_running_tasks={payload['pending_or_running_tasks']} "
+                f"status_counts={status_counts} current={current_text}",
+                flush=True,
+            )
+            next_heartbeat = now + heartbeat_sec
+
+    def emit(events: Any, payload: dict[str, Any]) -> None:
+        events.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        events.flush()
+
+    update_progress(None)
     with events_path.open("w", encoding="utf-8") as events:
         for spec in specs:
             for trade_date in trade_dates:
+                current = {"api_name": spec.api_name, "trade_date": trade_date}
+                update_progress(current)
                 part = _partition_dir(config, spec, trade_date)
                 data_path = part / "data.parquet"
                 meta_path = part / "metadata.json"
                 base = {"api_name": spec.api_name, "family": spec.source_family, "trade_date": trade_date, "partition_path": str(part)}
+                emit(events, {**base, "event": "task_started"})
                 if config.resume and data_path.exists() and meta_path.exists():
-                    catalog.append({**base, "status": "already_exists"})
-                    events.write(json.dumps({**base, "event": "already_exists"}, ensure_ascii=False) + "\n")
+                    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                    status = "already_exists" if _metadata_complete(metadata) else "already_exists_metadata_incomplete"
+                    catalog.append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": metadata.get("filtered_row_count")})
+                    _append_qa_from_metadata(base=base, spec=spec, metadata=metadata, data_path=data_path, coverage=coverage, field_presence=field_presence, duplicates=duplicates, universe_rows=universe_rows)
+                    status_counts[status] = status_counts.get(status, 0) + 1
+                    completed += 1
+                    emit(events, {**base, "event": status})
+                    update_progress(current)
                     continue
                 if data_path.exists() or meta_path.exists():
                     catalog.append({**base, "status": "incomplete_existing_partition"})
-                    events.write(json.dumps({**base, "event": "incomplete_existing_partition"}, ensure_ascii=False) + "\n")
+                    status_counts["incomplete_existing_partition"] += 1
+                    completed += 1
+                    emit(events, {**base, "event": "incomplete_existing_partition"})
+                    update_progress(current)
                     continue
                 if config.request_sleep > 0:
                     time.sleep(config.request_sleep + random.uniform(0, max(0.0, config.request_jitter)))
-                df, error = _call_with_retry(client, spec.api_name, trade_date, config.retry)
+                df, error = _call_with_retry(client, spec, trade_date, config.retry)
                 if error:
                     catalog.append({**base, "status": "request_failed", "error": error})
-                    events.write(json.dumps({**base, "event": "request_failed", "error": error}, ensure_ascii=False) + "\n")
+                    status_counts["request_failed"] += 1
+                    completed += 1
+                    emit(events, {**base, "event": "request_failed", "error": error})
+                    update_progress(current)
                     continue
                 raw_rows = len(df)
+                df = df.copy()
                 if "ts_code" in df.columns:
-                    df = df.copy()
                     df["canonical_symbol"] = df["ts_code"].map(canonical_symbol_from_ts_code)
                 else:
-                    df = df.copy()
                     df["canonical_symbol"] = pd.Series(dtype="object")
                 if "trade_date" not in df.columns:
                     df["trade_date"] = trade_date
+                allowed_columns = [c for c in (*spec.fields, "canonical_symbol") if c in df.columns]
+                df = df.loc[:, allowed_columns]
                 pre_symbols = int(df["canonical_symbol"].nunique()) if len(df) else 0
                 filtered = df[df["canonical_symbol"].isin(universe)].copy()
                 post_symbols = int(filtered["canonical_symbol"].nunique()) if len(filtered) else 0
@@ -261,15 +366,20 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
                 duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
                 part.mkdir(parents=True, exist_ok=False)
                 filtered.to_parquet(data_path, index=False)
-                metadata = {**base, "status": "ok", "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
+                status = "empty" if raw_rows == 0 else "ok"
+                metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
                 _write_json(meta_path, metadata)
-                catalog.append({**base, "status": "ok", "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
+                catalog.append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
                 coverage.append(metadata)
                 duplicates.append({**base, "duplicate_key_count": duplicate_count})
                 universe_rows.append({**base, "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing})
-                for column in sorted(set(filtered.columns) | {"ts_code", "trade_date", "canonical_symbol"}):
+                for column in sorted(set(filtered.columns) | set(spec.fields) | {"canonical_symbol"}):
                     field_presence.append({**base, "field": column, "present": column in filtered.columns, "null_count": int(filtered[column].isna().sum()) if column in filtered.columns else None, "dtype": str(filtered[column].dtype) if column in filtered.columns else None})
-                events.write(json.dumps({**base, "event": "partition_written", "row_count": len(filtered)}, ensure_ascii=False) + "\n")
+                status_counts[status] += 1
+                completed += 1
+                emit(events, {**base, "event": "partition_written", "row_count": len(filtered)})
+                update_progress(current)
+    update_progress(None, force_stdout=False)
     _write_csv(artifacts / "raw_ingest_catalog.csv", catalog)
     _write_csv(artifacts / "source_coverage_summary.csv", coverage)
     _write_csv(artifacts / "field_presence_summary.csv", field_presence)

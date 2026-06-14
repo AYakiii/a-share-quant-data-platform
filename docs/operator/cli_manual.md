@@ -347,41 +347,86 @@ M1-A formalizes the verified Tushare smoke contracts as local-only Raw acquisiti
 Tushare API -> local staging -> metadata / manifest / QA artifacts
 ```
 
-It still does **not** write Google Drive, does **not** promote, and does **not** build normalized/factor/backtest outputs. M0 remains dry-run/plan-only validation; M1-A allows true local acquisition when `--dry-run` is omitted.
+It still does **not** write Google Drive, does **not** promote, and does **not** build normalized/factor/backtest outputs. Use an independent local `output_root` for each smoke run, for example `/content/outputs/tushare_raw_m1a_20260612_smoke`, so review is not polluted by older partitions.
 
-Dry-run template:
+#### Simplified Colab console
+
+**1) Parameters cell**
+
+```python
+from pathlib import Path
+
+SYMBOLS_FILE = "stock_universe_v1_symbols.txt"
+UNIVERSE_NAME = "stock_universe_v1"
+DATASET_VERSION = "v1_csi500_2021_2025_union"
+START_DATE = "20260612"
+END_DATE = "20260612"
+API_NAMES = "daily,daily_basic,moneyflow,margin_detail"
+OUTPUT_ROOT = "/content/outputs/tushare_raw_m1a_20260612_smoke"
+```
+
+**2) Dry-run cell**
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --dry-run \
-  --symbols-file stock_universe_v1_symbols.txt \
-  --universe-name stock_universe_v1 \
-  --dataset-version v1_csi500_2021_2025_union \
-  --start-date 20260612 \
-  --end-date 20260612 \
-  --api-names daily,daily_basic \
-  --output-root outputs/tushare_raw_m1a \
+  --symbols-file "$SYMBOLS_FILE" \
+  --universe-name "$UNIVERSE_NAME" \
+  --dataset-version "$DATASET_VERSION" \
+  --start-date "$START_DATE" \
+  --end-date "$END_DATE" \
+  --api-names "$API_NAMES" \
+  --output-root "$OUTPUT_ROOT" \
   --max-workers 1 \
   --request-sleep 0.3
 ```
 
-Local acquisition template:
+The CLI prints a compact summary by default. Add `--print-manifest` only when you intentionally need the full manifest JSON.
+
+**3) Run cell**
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
-  --symbols-file stock_universe_v1_symbols.txt \
-  --universe-name stock_universe_v1 \
-  --dataset-version v1_csi500_2021_2025_union \
-  --start-date 20260612 \
-  --end-date 20260612 \
-  --api-names daily,daily_basic,moneyflow,margin_detail \
-  --output-root outputs/tushare_raw_m1a \
+  --symbols-file "$SYMBOLS_FILE" \
+  --universe-name "$UNIVERSE_NAME" \
+  --dataset-version "$DATASET_VERSION" \
+  --start-date "$START_DATE" \
+  --end-date "$END_DATE" \
+  --api-names "$API_NAMES" \
+  --output-root "$OUTPUT_ROOT" \
   --max-workers 1 \
   --request-sleep 0.3 \
   --request-jitter 0.0 \
   --retry 2 \
+  --heartbeat-sec 30 \
   --resume
 ```
+
+During acquisition the runner writes one-line `[heartbeat]` updates and refreshes `<output-root>/artifacts/tushare_raw_acquisition/live_progress.json`. The output root must remain local-only and must not point to Google Drive.
+
+**4) Compact review cell**
+
+```python
+import json
+from pathlib import Path
+import pandas as pd
+
+artifacts = Path(OUTPUT_ROOT) / "artifacts" / "tushare_raw_acquisition"
+manifest = json.loads((artifacts / "tushare_acquisition_manifest.json").read_text())
+catalog = pd.read_csv(artifacts / "raw_ingest_catalog.csv")
+display(catalog[["api_name", "family", "trade_date", "status"]])
+
+for partition in manifest["planned_partitions"]:
+    part = Path(partition)
+    data_path = part / "data.parquet"
+    meta_path = part / "metadata.json"
+    print(part)
+    print("data.parquet", data_path.exists(), "metadata.json", meta_path.exists())
+    if data_path.exists():
+        display(pd.read_parquet(data_path).head(2))
+```
+
+The review cell intentionally follows only `manifest["planned_partitions"]`; it does not scan `<output-root>/data/raw/tushare/**` and does not display historical partitions or full tables.
 
 Selection is parameter/contract driven:
 
@@ -414,4 +459,5 @@ field_presence_summary.csv
 duplicate_key_summary.csv
 universe_filter_summary.csv
 operation_events.jsonl
+live_progress.json
 ```

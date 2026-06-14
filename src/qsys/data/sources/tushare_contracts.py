@@ -24,6 +24,7 @@ class TushareRawIngestConfig:
     retry: int = 2
     dry_run: bool = True
     resume: bool = False
+    heartbeat_sec: float | None = 30.0
     provider: str = "tushare"
 
 
@@ -36,3 +37,4 @@ class TushareSourceSpec:
     partition_key: str = "trade_date"
     fetch_mode: str = "trade_date_full_market"
     primary_key: tuple[str, ...] = ("ts_code", "trade_date")
+    fields: tuple[str, ...] = ()

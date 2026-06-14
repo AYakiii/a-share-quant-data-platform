@@ -129,3 +129,73 @@ def test_resume_skips_complete_partition(tmp_path: Path) -> None:
 def test_output_root_must_not_be_drive(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Google Drive"):
         run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), output_root=Path("/content/gdrive/MyDrive/out"), dry_run=True), require_token=False)
+
+
+def test_fields_contract_passes_fields_and_trims_output(tmp_path: Path) -> None:
+    class FieldsClient:
+        def __init__(self) -> None:
+            self.params: dict[str, str] = {}
+
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            self.params = params
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ"],
+                "trade_date": [params["trade_date"]],
+                "total_share": [1.0],
+                "float_share": [1.0],
+                "free_share": [1.0],
+                "total_mv": [99.0],
+                "pe": [10.0],
+            })
+
+    client = FieldsClient()
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily_basic",)), client=client)
+    assert client.params["fields"] == "ts_code,trade_date,total_share,float_share,free_share"
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_basic" / "daily_basic" / "trade_date=20260612"
+    df = pd.read_parquet(part / "data.parquet")
+    assert list(df.columns) == ["ts_code", "trade_date", "total_share", "float_share", "free_share", "canonical_symbol"]
+
+
+def test_resume_already_exists_backfills_qa_summaries(tmp_path: Path) -> None:
+    symbols = _symbols(tmp_path)
+    run_tushare_raw_ingest(_cfg(tmp_path, symbols), client=MockClient())
+    run_tushare_raw_ingest(_cfg(tmp_path, symbols, resume=True), client=MockClient())
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    assert "already_exists" in (artifacts / "raw_ingest_catalog.csv").read_text(encoding="utf-8")
+    for name in ["source_coverage_summary.csv", "duplicate_key_summary.csv", "universe_filter_summary.csv", "field_presence_summary.csv"]:
+        df = pd.read_csv(artifacts / name)
+        assert not df.empty
+
+
+def test_heartbeat_live_progress_and_events_flush(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cfg = _cfg(tmp_path, _symbols(tmp_path), heartbeat_sec=0.001)
+    run_tushare_raw_ingest(cfg, client=MockClient())
+    out = capsys.readouterr().out
+    assert "[heartbeat]" in out
+    assert "TOKEN" not in out
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    assert (artifacts / "live_progress.json").exists()
+    events = [line for line in (artifacts / "operation_events.jsonl").read_text(encoding="utf-8").splitlines() if line]
+    assert any('"event": "task_started"' in line for line in events)
+    assert any('"event": "partition_written"' in line for line in events)
+    for line in events:
+        assert isinstance(__import__("json").loads(line), dict)
+
+
+def test_cli_summary_default_and_print_manifest(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from qsys.utils.run_tushare_raw_ingest import main
+
+    symbols = _symbols(tmp_path)
+    base = [
+        "--dry-run", "--symbols-file", str(symbols), "--universe-name", "u", "--dataset-version", "v1",
+        "--start-date", "20260612", "--end-date", "20260612", "--output-root", str(tmp_path / "out"), "--api-names", "daily",
+    ]
+    assert main(base) == 0
+    short = capsys.readouterr().out
+    assert "[tushare] output_root=" in short
+    assert "api_names=daily" in short
+    assert "planned_partitions=1" in short
+    assert '"planned_partitions"' not in short
+    assert main(base + ["--print-manifest"]) == 0
+    full = capsys.readouterr().out
+    assert '"planned_partitions"' in full
