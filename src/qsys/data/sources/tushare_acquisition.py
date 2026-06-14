@@ -1,20 +1,34 @@
-"""Tushare Raw acquisition dry-run skeleton."""
+"""Local-only Tushare Raw acquisition."""
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import random
 import re
+import time
+from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+import pandas as pd
 
 from qsys.data.factor_lake.raw_compact import validate_path_segment
-from qsys.data.sources.tushare_client import read_tushare_token
-from qsys.data.sources.tushare_contracts import TushareRawIngestConfig
-from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS
+from qsys.data.sources.tushare_client import TushareClient, read_tushare_token
+from qsys.data.sources.tushare_contracts import TushareRawIngestConfig, TushareSourceSpec
+from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS, source_specs_by_api
 
 CANONICAL_SYMBOL_RE = re.compile(r"^\d{6}$")
 TUSHARE_TS_CODE_RE = re.compile(r"^(\d{6})\.(SZ|SH|BJ)$")
 DATE_RE = re.compile(r"^\d{8}$")
+DRIVE_MARKERS = ("/content/gdrive", "MyDrive", "Google Drive")
+
+
+class TushareQueryClient(Protocol):
+    """Protocol for mockable Tushare clients."""
+
+    def query(self, api_name: str, **params: Any) -> pd.DataFrame: ...
 
 
 def file_sha256(path: str | Path) -> str:
@@ -36,12 +50,7 @@ def canonical_symbol_from_ts_code(ts_code: str) -> str:
 
 
 def load_symbols(path: str | Path) -> list[str]:
-    """Load canonical six-digit symbols from an external Universe file.
-
-    The canonical Universe file is provider-neutral. Tushare ``ts_code`` is a
-    provider-specific API representation and is intentionally not required as
-    input for M0 dry-run validation.
-    """
+    """Load provider-neutral canonical six-digit symbols from an external Universe file."""
     rows = Path(path).read_text(encoding="utf-8-sig").splitlines()
     symbols: list[str] = []
     seen: set[str] = set()
@@ -67,27 +76,65 @@ def staging_root(config: TushareRawIngestConfig) -> Path:
     return config.output_root / "data" / "raw" / config.provider
 
 
-def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
-    """Validate operator inputs and return a token-free dry-run manifest."""
+def artifact_root(config: TushareRawIngestConfig) -> Path:
+    """Return the local artifact root for token-free operation artifacts."""
+    return config.output_root / "artifacts" / "tushare_raw_acquisition"
+
+
+def _date_range(start_date: str, end_date: str) -> list[str]:
+    start = datetime.strptime(start_date, "%Y%m%d")
+    end = datetime.strptime(end_date, "%Y%m%d")
+    days: list[str] = []
+    cur = start
+    while cur <= end:
+        days.append(cur.strftime("%Y%m%d"))
+        cur += timedelta(days=1)
+    return days
+
+
+def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], list[str], list[str], list[TushareSourceSpec], list[str]]:
     if config.provider != "tushare":
         raise ValueError("Tushare raw ingest config provider must be 'tushare'")
     if not str(config.universe_name or "").strip():
         raise ValueError("universe_name is required")
-    if int(config.expected_symbol_count) <= 0:
+    if config.expected_symbol_count is not None and int(config.expected_symbol_count) <= 0:
         raise ValueError("expected_symbol_count must be > 0")
     if not DATE_RE.fullmatch(config.start_date or "") or not DATE_RE.fullmatch(config.end_date or ""):
         raise ValueError("start_date and end_date must be YYYYMMDD")
     if config.start_date > config.end_date:
         raise ValueError("start_date must be <= end_date")
     dataset_version = validate_path_segment(config.dataset_version, label="dataset_version")
-    if require_token:
-        read_tushare_token(allow_prompt=False)
-    symbols = load_symbols(config.symbols_file)
-    if len(symbols) != int(config.expected_symbol_count):
-        raise ValueError(f"expected_symbol_count mismatch: expected {config.expected_symbol_count}, got {len(symbols)}")
-    manifest = {
+    output_text = str(config.output_root)
+    if any(marker in output_text for marker in DRIVE_MARKERS):
+        raise ValueError("output_root must be local-only and must not point to Google Drive")
+    by_api = source_specs_by_api()
+    requested_api_names = list(config.api_names)
+    candidate_api_names = requested_api_names or list(by_api)
+    unknown = sorted(set(candidate_api_names) - set(by_api))
+    if unknown:
+        raise ValueError(f"unknown Tushare api_names: {unknown}")
+    requested_families = list(config.families)
+    if requested_families:
+        valid_families = {spec.source_family for spec in TUSHARE_SOURCE_SPECS}
+        unknown_families = sorted(set(requested_families) - valid_families)
+        if unknown_families:
+            raise ValueError(f"unknown Tushare families: {unknown_families}")
+    specs = [by_api[api] for api in candidate_api_names if not requested_families or by_api[api].source_family in requested_families]
+    if not specs:
+        raise ValueError("api_names/families selection produced no Tushare sources")
+    actual_api_names = [spec.api_name for spec in specs]
+    return dataset_version, requested_api_names, requested_families, actual_api_names, specs, _date_range(config.start_date, config.end_date)
+
+
+def _partition_dir(config: TushareRawIngestConfig, spec: TushareSourceSpec, trade_date: str) -> Path:
+    return staging_root(config) / spec.source_family / spec.api_name / f"{spec.partition_key}={trade_date}"
+
+
+def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], requested_api_names: list[str], requested_families: list[str], specs: list[TushareSourceSpec], trade_dates: list[str]) -> dict[str, Any]:
+    """Build the token-free acquisition manifest."""
+    return {
         "provider": config.provider,
-        "dataset_version": dataset_version,
+        "dataset_version": config.dataset_version,
         "universe_name": config.universe_name,
         "symbols_file": str(config.symbols_file),
         "universe_sha256": file_sha256(config.symbols_file),
@@ -97,14 +144,140 @@ def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_to
         "symbol_input_format": "canonical_symbol",
         "start_date": config.start_date,
         "end_date": config.end_date,
+        "requested_api_names": requested_api_names,
+        "requested_families": requested_families,
+        "api_names": [spec.api_name for spec in specs],
+        "families": sorted({spec.source_family for spec in specs}),
+        "trade_dates": trade_dates,
         "output_root": str(config.output_root),
         "local_staging_root": str(staging_root(config)),
-        "dry_run": True,
-        "sources": [spec.__dict__ for spec in TUSHARE_SOURCE_SPECS],
+        "dry_run": config.dry_run,
+        "resume": config.resume,
+        "max_workers": config.max_workers,
+        "request_sleep": config.request_sleep,
+        "request_jitter": config.request_jitter,
+        "retry": config.retry,
+        "sources": [asdict(spec) for spec in specs],
+        "planned_partitions": [str(_partition_dir(config, spec, d)) for spec in specs for d in trade_dates],
     }
+
+
+def _validate_symbols(config: TushareRawIngestConfig) -> list[str]:
+    symbols = load_symbols(config.symbols_file)
+    if config.expected_symbol_count is not None and len(symbols) != int(config.expected_symbol_count):
+        raise ValueError(f"expected_symbol_count mismatch: expected {config.expected_symbol_count}, got {len(symbols)}")
+    return symbols
+
+
+def run_tushare_raw_ingest_dry_run(config: TushareRawIngestConfig, *, require_token: bool = True) -> dict[str, Any]:
+    """Validate inputs and return a token-free dry-run manifest without calling Tushare APIs."""
+    cfg = TushareRawIngestConfig(**{**config.__dict__, "dry_run": True})
+    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(cfg)
+    if require_token:
+        read_tushare_token(allow_prompt=False)
+    symbols = _validate_symbols(cfg)
+    return build_manifest(cfg, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
+
+
+def _write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = sorted({k for row in rows for k in row}) if rows else ["status"]
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _call_with_retry(client: TushareQueryClient, api_name: str, trade_date: str, retry: int) -> tuple[pd.DataFrame, str | None]:
+    last_error: str | None = None
+    for attempt in range(max(0, retry) + 1):
+        try:
+            return client.query(api_name, trade_date=trade_date), None
+        except Exception as exc:  # noqa: BLE001 - persist token-free failure summary
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt >= retry:
+                break
+    return pd.DataFrame(), last_error
+
+
+def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQueryClient | None = None) -> dict[str, Any]:
+    """Run local-only Tushare raw acquisition and write staging plus QA artifacts."""
+    _, requested_api_names, requested_families, _, specs, trade_dates = _validate_config(config)
+    symbols = _validate_symbols(config)
+    universe = set(symbols)
+    manifest = build_manifest(config, symbols=symbols, requested_api_names=requested_api_names, requested_families=requested_families, specs=specs, trade_dates=trade_dates)
+    artifacts = artifact_root(config)
+    _write_json(artifacts / "tushare_acquisition_manifest.json", manifest)
+    if config.dry_run:
+        return manifest
+    client = client or TushareClient()
+    catalog: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+    field_presence: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    universe_rows: list[dict[str, Any]] = []
+    events_path = artifacts / "operation_events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("w", encoding="utf-8") as events:
+        for spec in specs:
+            for trade_date in trade_dates:
+                part = _partition_dir(config, spec, trade_date)
+                data_path = part / "data.parquet"
+                meta_path = part / "metadata.json"
+                base = {"api_name": spec.api_name, "family": spec.source_family, "trade_date": trade_date, "partition_path": str(part)}
+                if config.resume and data_path.exists() and meta_path.exists():
+                    catalog.append({**base, "status": "already_exists"})
+                    events.write(json.dumps({**base, "event": "already_exists"}, ensure_ascii=False) + "\n")
+                    continue
+                if data_path.exists() or meta_path.exists():
+                    catalog.append({**base, "status": "incomplete_existing_partition"})
+                    events.write(json.dumps({**base, "event": "incomplete_existing_partition"}, ensure_ascii=False) + "\n")
+                    continue
+                if config.request_sleep > 0:
+                    time.sleep(config.request_sleep + random.uniform(0, max(0.0, config.request_jitter)))
+                df, error = _call_with_retry(client, spec.api_name, trade_date, config.retry)
+                if error:
+                    catalog.append({**base, "status": "request_failed", "error": error})
+                    events.write(json.dumps({**base, "event": "request_failed", "error": error}, ensure_ascii=False) + "\n")
+                    continue
+                raw_rows = len(df)
+                if "ts_code" in df.columns:
+                    df = df.copy()
+                    df["canonical_symbol"] = df["ts_code"].map(canonical_symbol_from_ts_code)
+                else:
+                    df = df.copy()
+                    df["canonical_symbol"] = pd.Series(dtype="object")
+                if "trade_date" not in df.columns:
+                    df["trade_date"] = trade_date
+                pre_symbols = int(df["canonical_symbol"].nunique()) if len(df) else 0
+                filtered = df[df["canonical_symbol"].isin(universe)].copy()
+                post_symbols = int(filtered["canonical_symbol"].nunique()) if len(filtered) else 0
+                missing = len(universe - set(filtered["canonical_symbol"].dropna().astype(str)))
+                duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
+                part.mkdir(parents=True, exist_ok=False)
+                filtered.to_parquet(data_path, index=False)
+                metadata = {**base, "status": "ok", "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
+                _write_json(meta_path, metadata)
+                catalog.append({**base, "status": "ok", "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
+                coverage.append(metadata)
+                duplicates.append({**base, "duplicate_key_count": duplicate_count})
+                universe_rows.append({**base, "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing})
+                for column in sorted(set(filtered.columns) | {"ts_code", "trade_date", "canonical_symbol"}):
+                    field_presence.append({**base, "field": column, "present": column in filtered.columns, "null_count": int(filtered[column].isna().sum()) if column in filtered.columns else None, "dtype": str(filtered[column].dtype) if column in filtered.columns else None})
+                events.write(json.dumps({**base, "event": "partition_written", "row_count": len(filtered)}, ensure_ascii=False) + "\n")
+    _write_csv(artifacts / "raw_ingest_catalog.csv", catalog)
+    _write_csv(artifacts / "source_coverage_summary.csv", coverage)
+    _write_csv(artifacts / "field_presence_summary.csv", field_presence)
+    _write_csv(artifacts / "duplicate_key_summary.csv", duplicates)
+    _write_csv(artifacts / "universe_filter_summary.csv", universe_rows)
     return manifest
 
 
 def manifest_json(manifest: dict[str, Any]) -> str:
-    """Serialize a token-free dry-run manifest for console output."""
+    """Serialize a token-free manifest for console output."""
     return json.dumps(manifest, ensure_ascii=False, indent=2)
