@@ -26,7 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--universe-name", required=True)
     parser.add_argument("--dataset-version", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--max-workers", type=int, default=1, help="Reserved concurrency control; M1-A executes conservatively.")
+    parser.add_argument("--max-workers", type=int, default=1, help="Bounded Tushare request concurrency; default is conservative, try 2 first.")
     parser.add_argument("--request-sleep", type=float, default=0.3)
     parser.add_argument("--request-jitter", type=float, default=0.0)
     parser.add_argument("--retry", type=int, default=2)
@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", action="store_true", help="Skip complete existing partitions containing data.parquet and metadata.json.")
     parser.add_argument("--expected-symbol-count", type=int, default=None, help="Optional compatibility guard for older M0 smoke commands.")
     parser.add_argument("--heartbeat-sec", type=float, default=30.0, help="Seconds between one-line heartbeat messages; use 0 to disable.")
+    parser.add_argument("--dates-file", default=None, help="Debug/override only: explicit YYYYMMDD request dates; normal runs use Tushare trade_cal.")
     parser.add_argument("--print-manifest", action="store_true", help="Print the full manifest JSON instead of the compact operator summary.")
     return parser
 
@@ -57,6 +58,7 @@ def config_from_args(args: argparse.Namespace) -> TushareRawIngestConfig:
         dry_run=args.dry_run,
         resume=args.resume,
         heartbeat_sec=args.heartbeat_sec,
+        dates_file=Path(args.dates_file) if args.dates_file else None,
     )
 
 
