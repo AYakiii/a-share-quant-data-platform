@@ -248,19 +248,23 @@ def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path
     assert by_api["planned_partitions"].tolist() == [2, 2]
 
 
-def test_empty_success_is_data_fact_not_abnormal(tmp_path: Path) -> None:
+def test_empty_success_without_columns_is_data_fact_not_contract_failure(tmp_path: Path) -> None:
     class EmptyClient:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
-            return pd.DataFrame(columns=list(DAILY_FIELDS))
+            return pd.DataFrame()
 
     run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=EmptyClient())
     artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    catalog = pd.read_csv(artifacts / "raw_ingest_catalog.csv")
     summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
+    assert catalog.loc[0, "status"] == "empty"
     assert summary["status_counts"]["empty"] == 1
     assert "empty_partitions" not in summary["abnormal_counts"]
+    assert summary["abnormal_counts"]["required_contract_fields_missing"] == 0
     assert summary["rough_check"] == "PASS"
     by_api = pd.read_csv(artifacts / "operator_summary_by_api.csv")
     assert by_api.loc[0, "status_empty"] == 1
+    assert by_api.loc[0, "required_contract_fields_missing"] == 0
     assert by_api.loc[0, "rough_check"] == "PASS"
 
 

@@ -250,14 +250,26 @@ def _required_fields_by_api(manifest: dict[str, Any]) -> dict[str, set[str]]:
     return fields_by_api
 
 
-def _required_field_missing_partitions(field_presence: list[dict[str, str]], manifest: dict[str, Any]) -> set[tuple[str, str]]:
+def _partition_key(row: dict[str, str]) -> tuple[str, str]:
+    return row.get("api_name", ""), row.get("partition_path") or row.get("trade_date", "")
+
+
+def _required_field_missing_partitions(
+    field_presence: list[dict[str, str]],
+    catalog: list[dict[str, str]],
+    coverage: list[dict[str, str]],
+    manifest: dict[str, Any],
+) -> set[tuple[str, str]]:
     fields_by_api = _required_fields_by_api(manifest)
+    skip_partitions = {_partition_key(row) for row in catalog if row.get("status") == "empty"}
+    skip_partitions.update(_partition_key(row) for row in coverage if _to_int(row.get("filtered_row_count"), 0) == 0)
     missing: set[tuple[str, str]] = set()
     for row in field_presence:
-        api_name = row.get("api_name", "")
+        key = _partition_key(row)
+        api_name = key[0]
         field = row.get("field", "")
-        if field in fields_by_api.get(api_name, set()) and _is_false(row.get("present")):
-            missing.add((api_name, row.get("partition_path") or row.get("trade_date", "")))
+        if key not in skip_partitions and field in fields_by_api.get(api_name, set()) and _is_false(row.get("present")):
+            missing.add(key)
     return missing
 
 
@@ -267,7 +279,7 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
     coverage = _read_csv_rows(artifacts / "source_coverage_summary.csv")
     duplicates = _read_csv_rows(artifacts / "duplicate_key_summary.csv")
     field_presence = _read_csv_rows(artifacts / "field_presence_summary.csv")
-    missing_required_fields = _required_field_missing_partitions(field_presence, manifest)
+    missing_required_fields = _required_field_missing_partitions(field_presence, catalog, coverage, manifest)
     api_names = list(manifest.get("api_names", []))
     status_counts = {key: 0 for key in OPERATOR_STATUS_KEYS}
     for row in catalog:
