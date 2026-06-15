@@ -560,3 +560,34 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --heartbeat-sec 10 \
   --resume
 ```
+
+### PR142: Tushare source registry and production gate
+
+Tushare by-trade-date daily APIs are registered in `configs/tushare/source_registry.yaml`. The runner loads this registry by default, so onboarding another reviewed daily API should be a configuration change rather than a Python code change.
+
+Registry rows must stay within the PR142 supported source shape:
+
+- `query_mode: by_trade_date`
+- `calendar_mode: trading_days` or `calendar_days`
+- `universe_filter_mode: ts_code`
+- `compact_bucket: year_from_trade_date`
+- `partition_key: trade_date`
+- `primary_key` and `fields` as explicit ordered lists
+- `status` describing review state, for example `approved` or `candidate`
+- `production_enabled` as the explicit production gate
+
+`approved` sources with `production_enabled: true` are eligible for normal operator runs. A `candidate` source, or any registry source with `production_enabled: false`, is blocked by default even if the operator names it in `--api-names`. To run such a source for explicit review, the operator must add:
+
+```bash
+PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
+  --start-date 20260612 \
+  --end-date 20260612 \
+  --api-names candidate_api \
+  --symbols-file symbols.csv \
+  --universe-name external_universe \
+  --dataset-version v1_candidate_review \
+  --output-root outputs/tushare_raw_candidate \
+  --allow-candidate-sources
+```
+
+To add a reviewed by-trade-date API, add one registry entry with the supported schema, keep `fields` in the exact provider request order expected for raw acquisition, set `status: candidate` and `production_enabled: false` while validating, then switch to `status: approved` and `production_enabled: true` only after review. PR142 intentionally does not support broad Tushare expansion such as `by_ts_code_range`, report-period, snapshot, or event-style source runners; unsupported modes fail fast.

@@ -1,0 +1,56 @@
+{
+  "sources": [
+    {
+      "source_family": "market_price",
+      "api_name": "daily",
+      "fields": ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": ["ts_code", "trade_date"],
+      "universe_filter_mode": "ts_code",
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "market_basic",
+      "api_name": "daily_basic",
+      "fields": ["ts_code", "trade_date", "total_share", "float_share", "free_share"],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": ["ts_code", "trade_date"],
+      "universe_filter_mode": "ts_code",
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "market_flow",
+      "api_name": "moneyflow",
+      "fields": ["ts_code", "trade_date", "buy_sm_vol", "buy_sm_amount", "sell_sm_vol", "sell_sm_amount", "buy_md_vol", "buy_md_amount", "sell_md_vol", "sell_md_amount", "buy_lg_vol", "buy_lg_amount", "sell_lg_vol", "sell_lg_amount", "buy_elg_vol", "buy_elg_amount", "sell_elg_vol", "sell_elg_amount", "net_mf_vol", "net_mf_amount", "trade_count"],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": ["ts_code", "trade_date"],
+      "universe_filter_mode": "ts_code",
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "margin_leverage",
+      "api_name": "margin_detail",
+      "fields": ["ts_code", "trade_date", "rzye", "rzmre", "rzche", "rqyl", "rqmcl", "rqchl", "rqye", "rzrqye"],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": ["ts_code", "trade_date"],
+      "universe_filter_mode": "ts_code",
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    }
+  ]
+}

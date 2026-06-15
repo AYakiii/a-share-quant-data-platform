@@ -35,6 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-symbol-count", type=int, default=None, help="Optional compatibility guard for older M0 smoke commands.")
     parser.add_argument("--heartbeat-sec", type=float, default=30.0, help="Seconds between one-line heartbeat messages; use 0 to disable.")
     parser.add_argument("--dates-file", default=None, help="Debug/override only: explicit YYYYMMDD request dates; normal runs use Tushare trade_cal.")
+    parser.add_argument("--allow-candidate-sources", action="store_true", help="Explicitly allow registry sources with production_enabled=false.")
     parser.add_argument("--print-manifest", action="store_true", help="Print the full manifest JSON instead of the compact operator summary.")
     return parser
 
@@ -57,6 +58,7 @@ def config_from_args(args: argparse.Namespace) -> TushareRawIngestConfig:
         retry=args.retry,
         dry_run=args.dry_run,
         resume=args.resume,
+        allow_candidate_sources=args.allow_candidate_sources,
         heartbeat_sec=args.heartbeat_sec,
         dates_file=Path(args.dates_file) if args.dates_file else None,
     )

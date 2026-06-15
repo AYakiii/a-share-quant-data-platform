@@ -24,6 +24,7 @@ class TushareRawIngestConfig:
     retry: int = 2
     dry_run: bool = True
     resume: bool = False
+    allow_candidate_sources: bool = False
     heartbeat_sec: float | None = 30.0
     dates_file: Path | None = None
     provider: str = "tushare"
@@ -36,7 +37,12 @@ class TushareSourceSpec:
     source_family: str
     api_name: str
     partition_key: str = "trade_date"
+    query_mode: str = "by_trade_date"
     fetch_mode: str = "trade_date_full_market"
     primary_key: tuple[str, ...] = ("ts_code", "trade_date")
     fields: tuple[str, ...] = ()
     calendar_mode: str = "trading_days"
+    universe_filter_mode: str = "ts_code"
+    compact_bucket: str = "year_from_trade_date"
+    status: str = "approved"
+    production_enabled: bool = True
