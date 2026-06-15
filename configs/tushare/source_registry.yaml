@@ -62,8 +62,8 @@
       "primary_key": ["ts_code", "trade_date"],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
-      "status": "candidate",
-      "production_enabled": false
+      "status": "approved",
+      "production_enabled": true
     }
   ]
 }
