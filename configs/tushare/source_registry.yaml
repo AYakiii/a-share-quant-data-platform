@@ -51,6 +51,19 @@
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
       "production_enabled": true
+    },
+    {
+      "source_family": "market_price_adjustment",
+      "api_name": "adj_factor",
+      "fields": ["ts_code", "trade_date", "adj_factor"],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": ["ts_code", "trade_date"],
+      "universe_filter_mode": "ts_code",
+      "compact_bucket": "year_from_trade_date",
+      "status": "candidate",
+      "production_enabled": false
     }
   ]
 }
