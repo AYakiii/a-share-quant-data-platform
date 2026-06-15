@@ -15,7 +15,7 @@ def test_current_four_apis_load_from_yaml() -> None:
     assert all(by_api[api].production_enabled for api in ("daily", "daily_basic", "moneyflow", "margin_detail"))
 
 
-def test_adj_factor_candidate_loads_from_yaml() -> None:
+def test_pr143_adj_factor_candidate_loads_from_yaml() -> None:
     by_api = source_specs_by_api()
     spec = by_api["adj_factor"]
     assert spec.source_family == "market_price_adjustment"
