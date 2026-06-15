@@ -65,5 +65,10 @@ TUSHARE_SOURCE_SPECS: tuple[TushareSourceSpec, ...] = (
 
 
 def source_specs_by_api() -> dict[str, TushareSourceSpec]:
-    """Return Tushare source specs keyed by API name."""
+    """Return legacy Tushare source specs keyed by API name.
+
+    The production runner loads configs/tushare/source_registry.yaml via
+    qsys.data.sources.tushare_source_registry by default. This function remains
+    for compatibility with older callers and tests.
+    """
     return {spec.api_name: spec for spec in TUSHARE_SOURCE_SPECS}
