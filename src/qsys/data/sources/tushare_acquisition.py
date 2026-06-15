@@ -20,7 +20,7 @@ from qsys.data.factor_lake.raw_compact import validate_path_segment
 from qsys.data.sources.tushare_calendar import CalendarPlan, TushareCalendarPlanner, calendar_days
 from qsys.data.sources.tushare_client import TushareClient, read_tushare_token
 from qsys.data.sources.tushare_contracts import TushareRawIngestConfig, TushareSourceSpec
-from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS, source_specs_by_api
+from qsys.data.sources.tushare_source_registry import source_specs_by_api
 
 CANONICAL_SYMBOL_RE = re.compile(r"^\d{6}$")
 TUSHARE_TS_CODE_RE = re.compile(r"^(\d{6})\.(SZ|SH|BJ)$")
@@ -111,11 +111,14 @@ def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], li
         raise ValueError(f"unknown Tushare api_names: {unknown}")
     requested_families = list(config.families)
     if requested_families:
-        valid_families = {spec.source_family for spec in TUSHARE_SOURCE_SPECS}
+        valid_families = {spec.source_family for spec in by_api.values()}
         unknown_families = sorted(set(requested_families) - valid_families)
         if unknown_families:
             raise ValueError(f"unknown Tushare families: {unknown_families}")
     specs = [by_api[api] for api in candidate_api_names if not requested_families or by_api[api].source_family in requested_families]
+    candidate_specs = [spec.api_name for spec in specs if not spec.production_enabled]
+    if candidate_specs and not config.allow_candidate_sources:
+        raise PermissionError(f"candidate Tushare sources require --allow-candidate-sources: {candidate_specs}")
     if not specs:
         raise ValueError("api_names/families selection produced no Tushare sources")
     actual_api_names = [spec.api_name for spec in specs]

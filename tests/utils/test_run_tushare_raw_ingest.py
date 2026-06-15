@@ -453,3 +453,44 @@ def test_pr141_request_pacer_acquire_called_before_provider_query(tmp_path: Path
     monkeypatch.setattr(acquisition.RequestPacer, "acquire", spy_acquire)
     run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path)), client=OrderedClient())
     assert events[:2] == ["acquire", "query"]
+
+
+def test_pr142_unknown_api_fails_loudly(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown Tushare api_names"):
+        run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("no_such_api",), dry_run=True), require_token=False)
+
+
+def test_pr142_candidate_source_blocked_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qsys.data.sources import tushare_acquisition as acquisition
+    from qsys.data.sources.tushare_contracts import TushareSourceSpec
+
+    spec = TushareSourceSpec(source_family="market_price", api_name="candidate_api", fields=("ts_code", "trade_date"), production_enabled=False, status="candidate")
+    monkeypatch.setattr(acquisition, "source_specs_by_api", lambda: {"candidate_api": spec})
+    with pytest.raises(PermissionError, match="--allow-candidate-sources"):
+        run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("candidate_api",), dry_run=True), require_token=False)
+
+
+def test_pr142_candidate_source_allowed_only_with_explicit_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from qsys.data.sources import tushare_acquisition as acquisition
+    from qsys.data.sources.tushare_contracts import TushareSourceSpec
+
+    spec = TushareSourceSpec(source_family="market_price", api_name="candidate_api", fields=("ts_code", "trade_date"), production_enabled=False, status="candidate", calendar_mode="calendar_days")
+    monkeypatch.setattr(acquisition, "source_specs_by_api", lambda: {"candidate_api": spec})
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("candidate_api",), dry_run=True, allow_candidate_sources=True), require_token=False)
+    assert manifest["api_names"] == ["candidate_api"]
+    assert manifest["sources"][0]["production_enabled"] is False
+
+
+def test_pr142_adj_factor_candidate_from_yaml_blocked_by_default(tmp_path: Path) -> None:
+    with pytest.raises(PermissionError, match="--allow-candidate-sources"):
+        run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("adj_factor",), dry_run=True), require_token=False)
+
+
+def test_pr142_adj_factor_candidate_from_yaml_allowed_with_explicit_flag(tmp_path: Path) -> None:
+    manifest = run_tushare_raw_ingest_dry_run(
+        _cfg(tmp_path, _symbols(tmp_path), api_names=("adj_factor",), dry_run=True, allow_candidate_sources=True),
+        require_token=False,
+    )
+    assert manifest["api_names"] == ["adj_factor"]
+    assert manifest["sources"][0]["api_name"] == "adj_factor"
+    assert manifest["sources"][0]["production_enabled"] is False
