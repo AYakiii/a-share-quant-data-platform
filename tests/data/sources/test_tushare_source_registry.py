@@ -9,10 +9,31 @@ from qsys.data.sources.tushare_source_registry import load_tushare_source_specs,
 from qsys.data.sources.tushare_sources import DAILY_BASIC_FIELDS, DAILY_FIELDS, MARGIN_DETAIL_FIELDS, MONEYFLOW_FIELDS
 
 
-def test_current_four_apis_load_from_yaml() -> None:
+def test_current_apis_load_from_yaml() -> None:
     by_api = source_specs_by_api()
-    assert set(by_api) == {"daily", "daily_basic", "moneyflow", "margin_detail"}
-    assert all(spec.production_enabled for spec in by_api.values())
+    assert set(by_api) == {"daily", "daily_basic", "moneyflow", "margin_detail", "adj_factor"}
+
+
+def test_existing_four_approved_sources_remain_unchanged() -> None:
+    by_api = source_specs_by_api()
+    approved = {api: by_api[api] for api in ("daily", "daily_basic", "moneyflow", "margin_detail")}
+    assert all(spec.status == "approved" for spec in approved.values())
+    assert all(spec.production_enabled for spec in approved.values())
+
+
+def test_adj_factor_candidate_contract_loads_from_yaml() -> None:
+    spec = source_specs_by_api()["adj_factor"]
+    assert spec.source_family == "market_price_adjustment"
+    assert spec.api_name == "adj_factor"
+    assert spec.fields == ("ts_code", "trade_date", "adj_factor")
+    assert spec.query_mode == "by_trade_date"
+    assert spec.calendar_mode == "trading_days"
+    assert spec.partition_key == "trade_date"
+    assert spec.primary_key == ("ts_code", "trade_date")
+    assert spec.universe_filter_mode == "ts_code"
+    assert spec.compact_bucket == "year_from_trade_date"
+    assert spec.status == "candidate"
+    assert spec.production_enabled is False
 
 
 def test_yaml_fields_match_existing_contracts_exactly() -> None:
