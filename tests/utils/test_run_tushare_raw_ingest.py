@@ -481,12 +481,12 @@ def test_pr142_candidate_source_allowed_only_with_explicit_flag(tmp_path: Path, 
     assert manifest["sources"][0]["production_enabled"] is False
 
 
-def test_pr142_adj_factor_candidate_from_yaml_blocked_by_default(tmp_path: Path) -> None:
+def test_pr143_adj_factor_candidate_from_yaml_blocked_by_default(tmp_path: Path) -> None:
     with pytest.raises(PermissionError, match="--allow-candidate-sources"):
         run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("adj_factor",), dry_run=True), require_token=False)
 
 
-def test_pr142_adj_factor_candidate_from_yaml_allowed_with_explicit_flag(tmp_path: Path) -> None:
+def test_pr143_adj_factor_candidate_from_yaml_allowed_with_explicit_flag(tmp_path: Path) -> None:
     manifest = run_tushare_raw_ingest_dry_run(
         _cfg(tmp_path, _symbols(tmp_path), api_names=("adj_factor",), dry_run=True, allow_candidate_sources=True),
         require_token=False,

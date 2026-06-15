@@ -563,7 +563,7 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
 
 ### PR142: Tushare source registry and production gate
 
-Tushare by-trade-date daily APIs are registered in `configs/tushare/source_registry.yaml`. The runner loads this registry by default, so onboarding another reviewed daily API should be a configuration change rather than a Python code change. The registry may also contain candidate entries such as `adj_factor`, which remain blocked until explicitly allowed.
+Tushare by-trade-date daily APIs are registered in `configs/tushare/source_registry.yaml`. The runner loads this registry by default, so onboarding another reviewed daily API should be a configuration change rather than a Python code change.
 
 Registry rows must stay within the PR142 supported source shape:
 
@@ -582,7 +582,7 @@ Registry rows must stay within the PR142 supported source shape:
 PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --start-date 20260612 \
   --end-date 20260612 \
-  --api-names adj_factor \
+  --api-names candidate_api \
   --symbols-file symbols.csv \
   --universe-name external_universe \
   --dataset-version v1_candidate_review \
