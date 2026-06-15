@@ -21,7 +21,7 @@ def test_existing_four_approved_sources_remain_unchanged() -> None:
     assert all(spec.production_enabled for spec in approved.values())
 
 
-def test_adj_factor_candidate_contract_loads_from_yaml() -> None:
+def test_adj_factor_approved_contract_loads_from_yaml() -> None:
     spec = source_specs_by_api()["adj_factor"]
     assert spec.source_family == "market_price_adjustment"
     assert spec.api_name == "adj_factor"
@@ -32,8 +32,8 @@ def test_adj_factor_candidate_contract_loads_from_yaml() -> None:
     assert spec.primary_key == ("ts_code", "trade_date")
     assert spec.universe_filter_mode == "ts_code"
     assert spec.compact_bucket == "year_from_trade_date"
-    assert spec.status == "candidate"
-    assert spec.production_enabled is False
+    assert spec.status == "approved"
+    assert spec.production_enabled is True
 
 
 def test_yaml_fields_match_existing_contracts_exactly() -> None:
