@@ -14,7 +14,8 @@
 3. `04_signal_engine.md` + `05_backtest_engine.md`：信号与策略执行层。  
 4. `06_diagnostics.md` + `07_constraints_and_risk_control.md`：评估与风险控制。  
 5. `08_model_review.md`：模型假设与 base model 设计方向。  
-6. `09~12`：可靠性、路线图、项目管理机制、phase 模板。
+6. `13_strategy_contract_mfs_v04.md`：MFS-v0.4 最新策略研究合同，记录 PIT 基本面软筛、学习型 Alpha、风险约束、换手控制和可执行回测路线。  
+7. `09~12`：可靠性、路线图、项目管理机制、phase 模板。
 
 ## 当前状态（代码依据）
 - 已实现：feature store v1、signal engine v1、backtest MVP、diagnostics v1（见 `src/qsys/features`、`src/qsys/signals`、`src/qsys/backtest`、`src/qsys/research`）。
