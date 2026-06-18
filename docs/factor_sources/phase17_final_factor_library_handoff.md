@@ -1,3 +1,5 @@
+> Governance migration notice (2026-06-18): This file is retained in the engineering repository as historical technical documentation. Cross-window handoff memory has been migrated to `AYakiii/a-share-quant-project-governance` in PR #29, target path `handoff_packages/2026-06-18_phase17_final_factor_library_handoff.md`. Do not treat this engineering doc as the current governance source of truth without checking the governance repository.
+
 # Phase 17 Final Factor Library Handoff (17U)
 
 ## 1) What Phase 17 accomplished
