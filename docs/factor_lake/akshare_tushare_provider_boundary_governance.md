@@ -1,3 +1,5 @@
+> Governance migration notice (2026-06-18): This file is retained in the engineering repository as a historical technical audit report. Governance-side evidence memory has been migrated to `AYakiii/a-share-quant-project-governance` in PR #29, target path `evidence_cards/2026-06-18_akshare_tushare_provider_boundary_governance_evidence.md`. Do not treat this engineering doc as the current governance source of truth without checking the governance repository and later engineering PRs.
+
 # AkShare/Tushare Provider Boundary Governance (M0)
 
 ## 1. 修改文件清单
