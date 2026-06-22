@@ -19,7 +19,7 @@ DAILY_FIELDS = (
     "vol",
     "amount",
 )
-DAILY_BASIC_FIELDS = ("ts_code", "trade_date", "total_share", "float_share", "free_share")
+DAILY_BASIC_FIELDS = ("ts_code", "trade_date", "turnover_rate", "turnover_rate_f", "volume_ratio", "total_share", "float_share", "free_share", "total_mv", "circ_mv")
 MARGIN_DETAIL_FIELDS = (
     "ts_code",
     "trade_date",
@@ -61,6 +61,7 @@ TUSHARE_SOURCE_SPECS: tuple[TushareSourceSpec, ...] = (
     TushareSourceSpec(source_family="market_basic", api_name="daily_basic", fields=DAILY_BASIC_FIELDS, calendar_mode="trading_days"),
     TushareSourceSpec(source_family="market_flow", api_name="moneyflow", fields=MONEYFLOW_FIELDS, calendar_mode="trading_days"),
     TushareSourceSpec(source_family="margin_leverage", api_name="margin_detail", fields=MARGIN_DETAIL_FIELDS, calendar_mode="trading_days"),
+    TushareSourceSpec(source_family="market_price_adjustment", api_name="adj_factor", fields=("ts_code", "trade_date", "adj_factor"), calendar_mode="trading_days"),
 )
 
 

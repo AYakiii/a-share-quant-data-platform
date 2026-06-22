@@ -8,7 +8,7 @@ It is not a historical report and it is not a replacement for README. It documen
 
 - Do not run production promotion commands without human review of the prepared package.
 - Do not write Google Drive except through the explicit `raw_lake_compact_cli promote` command.
-- Do not treat Tushare dry-run as real acquisition; it validates operator inputs only.
+- Treat Tushare dry-run as planning/validation only; real Tushare local acquisition requires omitting `--dry-run` and still writes only local staging, never Google Drive.
 - Do not create provider-specific baseline Universe files. Canonical Universe files use six-digit symbols; Tushare `ts_code` is a provider-specific API representation.
 - Keep AkShare legacy compact layout unchanged unless an operator explicitly chooses a non-AkShare provider/dataset version.
 
@@ -19,7 +19,7 @@ It is not a historical report and it is not a replacement for README. It documen
 | `qsys.utils.run_akshare_raw_ingest` | AkShare Raw Lake acquisition for selected families/APIs. | `akshare` | Yes, under `output_root/data/raw/akshare/...` | No | Yes, AkShare | No formal dry-run; use narrow date/family scopes for smoke runs | Active | `output-root`, date window, families, symbols/universe inputs, worker/retry options | Local Raw parquet, metadata, ingest catalog/review artifacts |
 | `qsys.utils.run_akshare_raw_lake_preheat` | Build/execute AkShare preheat lanes for Raw Lake coverage. | `akshare` | Yes, through AkShare ingest runner | No | Yes, AkShare | Planning-oriented modes/options may be available; verify `--help` before use | Active | `output-root`, date window, universe discovery inputs, lane/worker controls | Preheat plans, lane manifests, local Raw staging where executed |
 | `qsys.utils.run_akshare_backfill_tasks` | Execute or dry-run AkShare backfill task CSV/registry plans with AkShare adapters explicitly supplied. | `akshare` | Yes when `--execute` | No | Yes when `--execute` | Yes; default is dry-run unless `--execute` is supplied | Active | `output-root`, `metastore-path`, filters, `max-tasks`, `--execute` | Backfill task result rows, local Raw partitions for executed tasks |
-| `qsys.utils.run_tushare_raw_ingest` | Validate Tushare operator inputs and emit a token-free dry-run manifest. | `tushare` | No formal Raw write in M0; reports intended local staging root | No | No formal historical API pull in M0; only token presence is checked | Required: `--dry-run` | Active skeleton | `symbols-file`, `universe-name`, `dataset-version`, expected count, date window, `output-root`, `TUSHARE_TOKEN` | Token-free dry-run manifest printed to stdout |
+| `qsys.utils.run_tushare_raw_ingest` | Validate or run approved Tushare raw acquisition into local staging. | `tushare` | Yes when not `--dry-run`, under `output_root/data/raw/tushare/...` | No | Yes when not `--dry-run` | Yes | Active | `symbols-file`, `universe-name`, `dataset-version`, expected count, date window, `api-names`, `output-root`, `TUSHARE_TOKEN` | Local Raw parquet/metadata plus token-free manifest and QA artifacts |
 | `qsys.utils.raw_lake_compact_cli prepare` | Build local compact package and Drive collision/readiness plan for review. | Operator-supplied; default `akshare` | Reads local staging | No Drive Raw writes; reads Drive target state | No provider API calls | It is a local prepare/dry-run-like planning step | Active | `provider`, optional/required `dataset-version`, `output-root`, `drive-dwh-root`, `promotion-name`, date window | Local compact package, `compact_manifest.json`, `drive_collision_plan.csv`, `READY_FOR_PROMOTION.json` |
 | `qsys.utils.raw_lake_compact_cli promote` | Human-gated promotion of reviewed compact package to Drive. | From package manifest | No local staging writes | **Yes; only command that writes Drive Raw** | No provider API calls | No | Active, human-gated | `package-root`, `drive-dwh-root`, exact `confirm-promotion`, reviewed bucket opt-ins | Drive Raw files, Drive catalog artifacts, local promotion attempt report |
 | `qsys.utils.raw_lake_compact_cli audit` | Read-only audit of promoted Drive Raw assets. | From promoted manifest | No | No writes; reads Drive | No provider API calls | N/A, read-only | Active | `promotion-name`, `drive-dwh-root` | Console audit summary; no mutation |
@@ -41,15 +41,9 @@ It is not a historical report and it is not a replacement for README. It documen
 5. Only after review, run `qsys.utils.raw_lake_compact_cli promote`.
 6. Run `qsys.utils.raw_lake_compact_cli audit` for read-only verification.
 
-### Tushare current M0 flow
+### Tushare local-only flow
 
-Tushare currently stops at:
-
-```text
-qsys.utils.run_tushare_raw_ingest --dry-run
-```
-
-This validates token presence, canonical Universe lineage, `dataset_version`, expected symbol count, and date inputs. It does **not** perform real Tushare acquisition, does **not** write Drive, and does **not** save tokens.
+Tushare supports a dry-run planning pass and a real local staging pass for approved registry sources. The ingest command validates token presence, canonical Universe lineage, `dataset_version`, expected symbol count, and date inputs; when run without `--dry-run` it calls Tushare and writes local raw parquet/metadata only. It does **not** write Drive, promote data, create provider-specific universe files, or save tokens.
 
 ## Command templates
 
@@ -110,7 +104,9 @@ Notes:
 - `--execute` requires `--max-tasks` for safety.
 - Does not write Drive.
 
-### Tushare dry-run only
+### Tushare dry-run planning
+
+Use dry-run planning to validate local inputs, approved registry selection, date windows, and token-free artifact paths without calling Tushare data APIs or writing Raw parquet.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
@@ -121,28 +117,39 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --output-root outputs/tushare_raw
+  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --output-root outputs/tushare_c1_p0_v1_20220101_20260612
 ```
 
-Future dataset namespace example:
+Dry-run output remains token-free and local. It does not write Google Drive and does not promote compact packages.
+
+### Tushare real local acquisition
+
+Run without `--dry-run` only after the dry-run plan is reviewed. The ingest command calls Tushare and writes local staging under `output_root/data/raw/tushare/...`; Drive writes remain manual-gated through `raw_lake_compact_cli promote`.
 
 ```bash
-PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
-  --dry-run \
-  --symbols-file stock_universe_v2_symbols.txt \
-  --universe-name stock_universe_v2 \
-  --dataset-version v2_all_a_share \
-  --expected-symbol-count 920 \
+PYTHONPATH=src python -u -m qsys.utils.run_tushare_raw_ingest \
+  --symbols-file stock_universe_v1_symbols.txt \
+  --universe-name stock_universe_v1 \
+  --dataset-version v1_csi500_2021_2025_union \
+  --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --output-root outputs/tushare_raw
+  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --output-root outputs/tushare_c1_p0_v1_20220101_20260612 \
+  --max-workers 2 \
+  --request-sleep 0.35 \
+  --request-jitter 0.15 \
+  --retry 3 \
+  --heartbeat-sec 30 \
+  --resume
 ```
 
 Notes:
-- Requires `TUSHARE_TOKEN` in the environment, but does not print or persist it.
-- Does not perform formal Tushare historical API pulls in M0.
-- Canonical Universe files use six-digit symbols such as `000008`; Tushare `ts_code` such as `000008.SZ` is provider-specific API representation.
+- Requires `TUSHARE_TOKEN` in the environment for real acquisition, but the runner must not print or persist it.
+- Canonical Universe files use six-digit symbols such as `000008`; Tushare `ts_code` such as `000008.SZ` is a provider-specific API representation.
 - `dataset_version` is an operator-defined dataset namespace. It is not a code default and not a schema version.
+- Snapshot APIs default `snapshot=<end_date>` unless `--snapshot-date YYYYMMDD` is supplied.
 
 ### Compact prepare
 
@@ -262,7 +269,7 @@ Date window in `YYYYMMDD` format. Tushare dry-run validates format and requires 
 
 ### `output_root`
 
-Local root for staging or dry-run output context. AkShare acquisition writes under this root. Tushare dry-run does not write formal Raw parquet in M0 but reports intended local staging root.
+Local root for staging or dry-run output context. AkShare and real Tushare acquisition write local Raw parquet under this root; Tushare dry-run writes only planning/review artifacts.
 
 ### `drive_dwh_root`
 
@@ -288,7 +295,7 @@ AkShare raw ingest throttling/control string for limiting per-API concurrency wh
 | `run_akshare_raw_lake_preheat` | Yes when executing lanes | No | No | No | Local preheat/review artifacts only | Local files can be deleted manually |
 | `run_akshare_backfill_tasks --dry-run` | No | No | No | No | Local task-result metadata may be written | Yes, local metadata can be removed |
 | `run_akshare_backfill_tasks --execute` | Yes | No | No | No | Local task-result metadata | Local files can be deleted manually; external API reads are not undone |
-| `run_tushare_raw_ingest --dry-run` | No formal Raw write | No | No | No | No Drive/catalog writes | Yes; no formal Raw/Drive mutation |
+| `run_tushare_raw_ingest --dry-run` | No Raw parquet write | No | No | No | Local planning/review artifacts only | Yes; no Raw/Drive mutation |
 | `raw_lake_compact_cli prepare` | No new staging writes | Yes | Yes, for collision planning | No | Local readiness/catalog artifacts | Yes, delete local compact package if not promoted |
 | `raw_lake_compact_cli promote` | No | No | Yes | **Yes** | Yes | Not automatically reversible; requires manual governance |
 | `raw_lake_compact_cli audit` | No | No | Yes | No | No | Read-only |
@@ -298,7 +305,7 @@ Key boundaries:
 - `prepare` does **not** write Drive Raw.
 - `promote` is the only active command that writes Drive Raw.
 - `audit` is read-only.
-- Tushare dry-run does not pull formal API history, does not write Drive, and does not save tokens.
+- Tushare ingest writes local staging only, does not write Drive, and does not save tokens.
 
 ## Legacy / deprecated CLI
 
@@ -324,8 +331,7 @@ Do not actively use these for new operations. They remain for compatibility or h
 | Collision plan SHA mismatch | Reviewed `drive_collision_plan.csv` changed after prepare. | No | Rerun `prepare`, review the new collision plan, then promote only if accepted. |
 | Non-identical overwrite blocked | A Drive target exists with different bytes. | No | Investigate the existing Drive asset and new package. Do not force overwrite. |
 | `READY_FOR_PROMOTION.json` missing | Package has not completed prepare/readiness review. | No | Run `prepare` successfully and review generated readiness artifacts. |
-| `TUSHARE_TOKEN` missing | Tushare dry-run cannot validate token availability. | No | Set `TUSHARE_TOKEN` in the environment or provide it through the supported secure prompt path. Do not write tokens to files/logs. |
-| Tushare command without `--dry-run` | M0 Tushare entrypoint intentionally disables formal pulls. | No | Add `--dry-run`. Real Tushare acquisition requires future implementation and review. |
+| `TUSHARE_TOKEN` missing | Real Tushare acquisition cannot authenticate. | No | Set `TUSHARE_TOKEN` in the environment or provide it through the supported secure prompt path. Do not write tokens to files/logs. |
 
 ## Pre-flight checklist
 
@@ -361,8 +367,10 @@ UNIVERSE_NAME = "stock_universe_v1"
 DATASET_VERSION = "v1_csi500_2021_2025_union"
 START_DATE = "20260612"
 END_DATE = "20260612"
-API_NAMES = "daily,daily_basic,moneyflow,margin_detail"
-OUTPUT_ROOT = "/content/outputs/tushare_raw_m1a_20260612_smoke"
+API_NAMES = "daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange"
+WORK_NAME = "tushare_c1_p0_v1_20220101_20260612"
+ALLOW_DRIVE_PROMOTION = False
+OUTPUT_ROOT = f"/content/outputs/{WORK_NAME}"
 ```
 
 **2) Dry-run cell**
@@ -502,7 +510,7 @@ Raw acquisition records what the provider returns. Empty results and null values
 
 Selection is parameter/contract driven:
 
-- `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail`.
+- `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail,adj_factor` and approved C1 P0 APIs `daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange`.
 - `--families` selects registry families such as `market_price,market_basic,market_flow,margin_leverage`.
 - When both `--api-names` and `--families` are provided, the actual execution set is their intersection. Manifest field `api_names` records the actual selected APIs; `requested_api_names` / `requested_families` record operator input when present.
 - `--symbols-file` must be the external canonical six-digit Universe file; no provider-specific Universe file is generated.
@@ -511,8 +519,10 @@ Selection is parameter/contract driven:
 M1-A local staging layout:
 
 ```text
-<output-root>/data/raw/tushare/<family>/<api>/trade_date=YYYYMMDD/data.parquet
-<output-root>/data/raw/tushare/<family>/<api>/trade_date=YYYYMMDD/metadata.json
+<output-root>/data/raw/tushare/<family>/<api>/<partition-key>=<value>/data.parquet
+<output-root>/data/raw/tushare/market_basic/daily_basic/trade_date=YYYYMMDD/data.parquet
+<output-root>/data/raw/tushare/market_calendar/trade_cal/exchange=SSE/start_date=YYYYMMDD/end_date=YYYYMMDD/data.parquet
+<output-root>/data/raw/tushare/security_master/stock_basic/snapshot=YYYYMMDD/list_status=L/data.parquet
 ```
 
 Token-free review artifacts are written under:
@@ -538,7 +548,7 @@ live_progress.json
 
 Tushare Raw acquisition now treats the trading calendar as a system-acquired resource. Operators normally provide only the universe, dataset version, date window, API names, and a local `output-root`; the runner fetches and caches `trade_cal` under the local artifacts tree and records calendar lineage in the manifest.
 
-Trading-day daily APIs such as `daily`, `daily_basic`, `moneyflow`, and `margin_detail` use `calendar_mode=trading_days`, so requests are planned as `api_name × trade_date` for open trading days only. Future event-style APIs may opt into `calendar_days`; the current runner intentionally supports only one `calendar_mode` per run and fails fast on mixed-mode selections until per-source mixed planning is implemented. The universe is still applied after each full-market raw request via `canonical_symbol`; the runner must not request one symbol at a time for these APIs.
+Trading-day daily APIs such as `daily`, `daily_basic`, `moneyflow`, `margin_detail`, `adj_factor`, and `stk_limit` use `calendar_mode=trading_days`, so requests are planned as `api_name × trade_date` for open trading days only. The runner also supports mixed C1 P0 shapes in the same run: date-param event APIs such as `suspend_d`, range APIs such as `trade_cal` and `namechange`, and snapshot APIs such as `stock_basic`. Universe filtering is controlled per registry source; `trade_cal` uses `universe_filter_mode=none` and is ingested without `ts_code` or `canonical_symbol`, while stock-level APIs preserve canonical six-digit filtering after full-market provider requests.
 
 `--dates-file` is reserved for debug/override use only and is not part of the normal operator flow. `max_workers` enables bounded concurrency, but it does not guarantee linear speedups because Tushare limits, network latency, and API response time still dominate. The default remains `--max-workers 1`; start experiments with `--max-workers 2` plus conservative `--request-sleep` and `--request-jitter` values.
 
@@ -551,7 +561,7 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --dataset-version v1_csi500_2021_2025_union \
   --start-date 20260608 \
   --end-date 20260612 \
-  --api-names daily,daily_basic,moneyflow,margin_detail \
+  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
   --output-root /content/outputs/tushare_raw_m1c_calendar_smoke \
   --max-workers 1 \
   --request-sleep 0.3 \
@@ -561,17 +571,17 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --resume
 ```
 
-### PR142: Tushare source registry and production gate
+### Tushare source registry and production gate
 
-Tushare by-trade-date daily APIs are registered in `configs/tushare/source_registry.yaml`. The runner loads this registry by default, so onboarding another reviewed daily API should be a configuration change rather than a Python code change.
+Tushare APIs are registered in `configs/tushare/source_registry.yaml`. The runner loads this registry by default and supports task-based acquisition for approved registry rows, including by-trade-date, by-date-param, by-date-range, and snapshot-by-param sources.
 
-Registry rows must stay within the PR142 supported source shape:
+Registry rows must stay within the supported source shape:
 
-- `query_mode: by_trade_date`
-- `calendar_mode: trading_days` or `calendar_days`
-- `universe_filter_mode: ts_code`
-- `compact_bucket: year_from_trade_date`
-- `partition_key: trade_date`
+- `query_mode: by_trade_date`, `by_date_param`, `by_date_range`, or `snapshot_by_param`
+- `calendar_mode: trading_days`, `calendar_days`, `range_once`, or `snapshot`
+- `universe_filter_mode: ts_code` or `none`
+- `compact_bucket` appropriate to the partition lineage
+- `partition_key` or `partition_keys`
 - `primary_key` and `fields` as explicit ordered lists
 - `status` describing review state, for example `approved` or `candidate`
 - `production_enabled` as the explicit production gate
@@ -590,4 +600,4 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --allow-candidate-sources
 ```
 
-To add a reviewed by-trade-date API, add one registry entry with the supported schema, keep `fields` in the exact provider request order expected for raw acquisition, set `status: candidate` and `production_enabled: false` while validating, then switch to `status: approved` and `production_enabled: true` only after review. PR142 intentionally does not support broad Tushare expansion such as `by_ts_code_range`, report-period, snapshot, or event-style source runners; unsupported modes fail fast.
+To add a reviewed API, add one registry entry with the supported schema, keep `fields` in the exact provider request order expected for raw acquisition, set `status: candidate` and `production_enabled: false` while validating, then switch to `status: approved` and `production_enabled: true` only after review. Unsupported modes still fail fast in registry validation.

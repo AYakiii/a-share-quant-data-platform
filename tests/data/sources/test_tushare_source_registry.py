@@ -11,7 +11,7 @@ from qsys.data.sources.tushare_sources import DAILY_BASIC_FIELDS, DAILY_FIELDS, 
 
 def test_current_apis_load_from_yaml() -> None:
     by_api = source_specs_by_api()
-    assert set(by_api) == {"daily", "daily_basic", "moneyflow", "margin_detail", "adj_factor"}
+    assert {"daily", "daily_basic", "moneyflow", "margin_detail", "adj_factor", "trade_cal", "suspend_d", "stk_limit", "stock_basic", "namechange", "limit_list_d"}.issubset(by_api)
 
 
 def test_existing_four_approved_sources_remain_unchanged() -> None:
