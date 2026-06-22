@@ -160,10 +160,10 @@ def test_fields_contract_passes_fields_and_trims_output(tmp_path: Path) -> None:
 
     client = FieldsClient()
     run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily_basic",)), client=client)
-    assert client.params["fields"] == "ts_code,trade_date,total_share,float_share,free_share"
+    assert client.params["fields"] == "ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,total_share,float_share,free_share,total_mv,circ_mv"
     part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_basic" / "daily_basic" / "trade_date=20260612"
     df = pd.read_parquet(part / "data.parquet")
-    assert list(df.columns) == ["ts_code", "trade_date", "total_share", "float_share", "free_share", "canonical_symbol"]
+    assert list(df.columns) == ["ts_code", "trade_date", "total_share", "float_share", "free_share", "total_mv", "canonical_symbol"]
 
 
 def test_resume_already_exists_backfills_qa_summaries(tmp_path: Path) -> None:
@@ -413,15 +413,15 @@ def test_pr141_dates_file_override_records_lineage(tmp_path: Path) -> None:
     assert manifest["request_date_count"] == 2
 
 
-def test_pr141_mixed_calendar_modes_fail_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pr141_mixed_calendar_modes_are_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from qsys.data.sources import tushare_acquisition as acquisition
     from qsys.data.sources.tushare_contracts import TushareSourceSpec
 
     daily = TushareSourceSpec(source_family="market_price", api_name="daily", fields=("ts_code",), calendar_mode="trading_days")
     event = TushareSourceSpec(source_family="events", api_name="event_api", fields=("ts_code",), calendar_mode="calendar_days")
     monkeypatch.setattr(acquisition, "source_specs_by_api", lambda: {"daily": daily, "event_api": event})
-    with pytest.raises(NotImplementedError, match="mixed Tushare calendar_mode"):
-        run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily", "event_api"), dry_run=True), require_token=False, client=MockClient())
+    manifest = run_tushare_raw_ingest_dry_run(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily", "event_api"), dry_run=True), require_token=False, client=MockClient())
+    assert set(manifest["api_names"]) == {"daily", "event_api"}
 
 
 def test_pr141_max_workers_2_completes_all_tasks(tmp_path: Path) -> None:
@@ -491,3 +491,56 @@ def test_pr143_adj_factor_approved_source_allowed_by_default(tmp_path: Path) -> 
     assert manifest["families"] == ["market_price_adjustment"]
     assert manifest["sources"][0]["status"] == "approved"
     assert manifest["sources"][0]["production_enabled"] is True
+
+
+def test_c1_p0_registry_loads_and_daily_basic_fields_expand() -> None:
+    from qsys.data.sources.tushare_source_registry import source_specs_by_api
+
+    by_api = source_specs_by_api()
+    expected = {"daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange"}
+    assert expected.issubset(by_api)
+    assert {"turnover_rate", "turnover_rate_f", "volume_ratio", "total_mv", "circ_mv"}.issubset(by_api["daily_basic"].fields)
+    assert {"daily", "moneyflow", "margin_detail", "adj_factor"}.issubset(by_api)
+
+
+def test_c1_p0_mixed_shapes_write_expected_partitions_without_ts_code_for_trade_cal(tmp_path: Path) -> None:
+    class C1Client:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return pd.DataFrame({"exchange": [params.get("exchange", "SSE")], "cal_date": [params["start_date"]], "is_open": [1], "pretrade_date": [""]})
+            if api_name == "stock_basic":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "symbol": ["000001"], "name": ["A"], "list_status": [params["list_status"]]})
+            if api_name == "suspend_d":
+                return pd.DataFrame(columns=["ts_code", "suspend_date", "resume_date", "ann_date", "suspend_reason", "reason_type"])
+            if api_name == "namechange":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["A"], "start_date": [params["start_date"]], "end_date": [params["end_date"]], "change_reason": [""], "ann_date": [params["start_date"]]})
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]], "up_limit": [1.0], "down_limit": [0.9], "limit": ["U"]})
+
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange"), resume=True)
+    run_tushare_raw_ingest(cfg, client=C1Client())
+    root = tmp_path / "out" / "data" / "raw" / "tushare"
+    assert (root / "market_limit" / "stk_limit" / "trade_date=20260612" / "data.parquet").exists()
+    assert (root / "market_limit" / "limit_list_d" / "trade_date=20260612" / "data.parquet").exists()
+    assert (root / "market_tradability" / "suspend_d" / "suspend_date=20260612" / "data.parquet").exists()
+    cal = pd.read_parquet(root / "market_calendar" / "trade_cal" / "exchange=SSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet")
+    assert "canonical_symbol" not in cal.columns
+    assert (root / "security_master" / "stock_basic" / "snapshot=20260622" / "list_status=L" / "data.parquet").exists() or any((root / "security_master" / "stock_basic").glob("snapshot=*/list_status=L/data.parquet"))
+    by_api = pd.read_csv(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary_by_api.csv")
+    assert set(by_api["api_name"]) == set(cfg.api_names)
+
+
+def test_c1_p0_resume_generic_partition(tmp_path: Path) -> None:
+    class CalClient:
+        calls = 0
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            self.calls += 1
+            return pd.DataFrame({"exchange": [params.get("exchange", "SSE")], "cal_date": [params["start_date"]], "is_open": [1], "pretrade_date": [""]})
+
+    client = CalClient()
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("trade_cal",), resume=True)
+    run_tushare_raw_ingest(cfg, client=client)
+    first_calls = client.calls
+    run_tushare_raw_ingest(cfg, client=client)
+    assert client.calls == first_calls
+    catalog = (tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "raw_ingest_catalog.csv").read_text(encoding="utf-8")
+    assert "already_exists" in catalog

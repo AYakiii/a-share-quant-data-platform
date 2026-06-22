@@ -8,10 +8,10 @@ from typing import Any
 from qsys.data.sources.tushare_contracts import TushareSourceSpec
 from qsys.data.sources.tushare_sources import TUSHARE_SOURCE_SPECS as FALLBACK_SOURCE_SPECS
 
-SUPPORTED_QUERY_MODES = {"by_trade_date"}
-SUPPORTED_CALENDAR_MODES = {"trading_days", "calendar_days"}
-SUPPORTED_UNIVERSE_FILTER_MODES = {"ts_code"}
-SUPPORTED_COMPACT_BUCKETS = {"year_from_trade_date"}
+SUPPORTED_QUERY_MODES = {"by_trade_date", "by_date_param", "by_date_range", "snapshot_by_param"}
+SUPPORTED_CALENDAR_MODES = {"trading_days", "calendar_days", "range_once", "snapshot"}
+SUPPORTED_UNIVERSE_FILTER_MODES = {"ts_code", "none"}
+SUPPORTED_COMPACT_BUCKETS = {"year_from_trade_date", "year_from_suspend_date", "window_from_range", "snapshot", "none"}
 
 
 def default_registry_path() -> Path:
@@ -50,8 +50,13 @@ def _validate_supported(spec: TushareSourceSpec) -> None:
         raise NotImplementedError(f"unsupported Tushare universe_filter_mode for {spec.api_name}: {spec.universe_filter_mode}")
     if spec.compact_bucket not in SUPPORTED_COMPACT_BUCKETS:
         raise NotImplementedError(f"unsupported Tushare compact_bucket for {spec.api_name}: {spec.compact_bucket}")
-    if spec.partition_key != "trade_date":
-        raise NotImplementedError(f"unsupported Tushare partition_key for {spec.api_name}: {spec.partition_key}")
+    keys = spec.partition_keys or ((spec.partition_key,) if spec.partition_key else ())
+    if not keys:
+        raise ValueError(f"Tushare source {spec.api_name} must declare partition_key(s)")
+    if spec.query_mode == "by_date_param" and not spec.request_date_param:
+        raise ValueError(f"Tushare source {spec.api_name} requires request_date_param")
+    if spec.query_mode == "by_date_range" and (not spec.range_start_param or not spec.range_end_param):
+        raise ValueError(f"Tushare source {spec.api_name} requires range_start_param/range_end_param")
 
 
 def _spec_from_row(row: Any) -> TushareSourceSpec:
@@ -68,8 +73,15 @@ def _spec_from_row(row: Any) -> TushareSourceSpec:
         query_mode=str(row.get("query_mode") or ""),
         calendar_mode=str(row.get("calendar_mode") or ""),
         partition_key=str(row.get("partition_key") or ""),
+        partition_keys=tuple(row.get("partition_keys") or ()),
+        request_date_param=row.get("request_date_param"),
+        range_start_param=row.get("range_start_param"),
+        range_end_param=row.get("range_end_param"),
+        static_params=row.get("static_params"),
+        param_grid=row.get("param_grid"),
         primary_key=_as_tuple(row.get("primary_key"), field="primary_key", api_name=api_name),
         universe_filter_mode=str(row.get("universe_filter_mode") or ""),
+        empty_result_allowed=bool(row.get("empty_result_allowed", False)),
         compact_bucket=str(row.get("compact_bucket") or ""),
         status=str(row.get("status") or "candidate"),
         production_enabled=bool(row.get("production_enabled", False)),

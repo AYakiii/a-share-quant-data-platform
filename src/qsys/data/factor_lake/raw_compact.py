@@ -45,7 +45,7 @@ DRIVE_RAW_RELATIVE_ROOT = drive_raw_relative_root()
 RAW_RELATIVE_ROOT = LOCAL_INGEST_RAW_RELATIVE_ROOT
 COMPACT_ROOT_PARENT = Path("outputs") / "raw_acquisition_compact"
 SAFE_PROMOTION_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-TIME_KEYS = ("snapshot", "year", "trade_date", "report_date", "date", "start_date", "end_date", "since_date")
+TIME_KEYS = ("snapshot", "year", "trade_date", "suspend_date", "cal_date", "ann_date", "report_date", "date", "start_date", "end_date", "since_date")
 REVIEW_REQUIRED_BUCKET_KINDS = {"scope", "snapshot"}
 FAILED_BACKLOG_STATUSES = {"failed", "timeout", "pending_adapter", "skipped"}
 FAILED_BACKLOG_FIELDS = [
@@ -152,7 +152,7 @@ def classify_bucket(partitions: dict[str, str], *, start_date: str, end_date: st
         return "snapshot", str(partitions["snapshot"])
     if partitions.get("year"):
         return "year", _digits(partitions["year"])[:4]
-    for key in ("trade_date", "report_date", "date"):
+    for key in ("trade_date", "suspend_date", "cal_date", "ann_date", "report_date", "date"):
         if partitions.get(key):
             value = _digits(partitions[key])
             if len(value) < 4:

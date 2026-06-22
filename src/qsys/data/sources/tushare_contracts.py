@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -37,12 +38,29 @@ class TushareSourceSpec:
     source_family: str
     api_name: str
     partition_key: str = "trade_date"
+    partition_keys: tuple[str, ...] = ()
     query_mode: str = "by_trade_date"
     fetch_mode: str = "trade_date_full_market"
+    request_date_param: str | None = None
+    range_start_param: str | None = None
+    range_end_param: str | None = None
+    static_params: dict[str, Any] | None = None
+    param_grid: dict[str, list[str]] | None = None
     primary_key: tuple[str, ...] = ("ts_code", "trade_date")
     fields: tuple[str, ...] = ()
     calendar_mode: str = "trading_days"
     universe_filter_mode: str = "ts_code"
+    empty_result_allowed: bool = False
     compact_bucket: str = "year_from_trade_date"
     status: str = "approved"
     production_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class TushareIngestTask:
+    """One concrete Tushare API request and physical raw partition."""
+
+    spec: TushareSourceSpec
+    request_params: dict[str, Any]
+    partition: dict[str, str]
+    logical_date: str | None = None
