@@ -11,7 +11,7 @@ from qsys.data.sources.tushare_sources import DAILY_BASIC_FIELDS, DAILY_FIELDS, 
 
 def test_current_apis_load_from_yaml() -> None:
     by_api = source_specs_by_api()
-    assert set(by_api) == {"daily", "daily_basic", "moneyflow", "margin_detail", "adj_factor"}
+    assert {"daily", "daily_basic", "moneyflow", "margin_detail", "adj_factor", "trade_cal", "suspend_d", "stk_limit", "stock_basic", "namechange", "limit_list_d"}.issubset(by_api)
 
 
 def test_existing_four_approved_sources_remain_unchanged() -> None:
@@ -61,3 +61,22 @@ def test_unsupported_query_mode_fails_loudly(tmp_path: Path) -> None:
     }]}), encoding="utf-8")
     with pytest.raises(NotImplementedError, match="unsupported Tushare query_mode"):
         load_tushare_source_specs(registry)
+
+
+def test_c1_p0_scope_and_limit_list_review_gate() -> None:
+    by_api = source_specs_by_api()
+    c1_p0 = {api for api, spec in by_api.items() if spec.production_enabled and spec.api_name in {"daily_basic", "stk_limit", "suspend_d", "trade_cal", "stock_basic", "namechange", "limit_list_d"}}
+    assert c1_p0 == {"daily_basic", "stk_limit", "suspend_d", "trade_cal", "stock_basic", "namechange"}
+    limit = by_api["limit_list_d"]
+    assert limit.status == "manual_review"
+    assert limit.production_enabled is False
+
+
+def test_suspend_d_contract_matches_real_trade_date_shape() -> None:
+    spec = source_specs_by_api()["suspend_d"]
+    assert spec.fields == ("ts_code", "trade_date", "suspend_timing", "suspend_type")
+    assert spec.query_mode == "by_trade_date"
+    assert spec.calendar_mode == "trading_days"
+    assert spec.partition_key == "trade_date"
+    assert spec.primary_key == ("ts_code", "trade_date")
+    assert spec.empty_result_allowed is True

@@ -3,11 +3,26 @@
     {
       "source_family": "market_price",
       "api_name": "daily",
-      "fields": ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "vol", "amount"],
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount"
+      ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",
       "partition_key": "trade_date",
-      "primary_key": ["ts_code", "trade_date"],
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
@@ -16,11 +31,25 @@
     {
       "source_family": "market_basic",
       "api_name": "daily_basic",
-      "fields": ["ts_code", "trade_date", "total_share", "float_share", "free_share"],
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "turnover_rate",
+        "turnover_rate_f",
+        "volume_ratio",
+        "total_share",
+        "float_share",
+        "free_share",
+        "total_mv",
+        "circ_mv"
+      ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",
       "partition_key": "trade_date",
-      "primary_key": ["ts_code", "trade_date"],
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
@@ -29,11 +58,36 @@
     {
       "source_family": "market_flow",
       "api_name": "moneyflow",
-      "fields": ["ts_code", "trade_date", "buy_sm_vol", "buy_sm_amount", "sell_sm_vol", "sell_sm_amount", "buy_md_vol", "buy_md_amount", "sell_md_vol", "sell_md_amount", "buy_lg_vol", "buy_lg_amount", "sell_lg_vol", "sell_lg_amount", "buy_elg_vol", "buy_elg_amount", "sell_elg_vol", "sell_elg_amount", "net_mf_vol", "net_mf_amount", "trade_count"],
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "buy_sm_vol",
+        "buy_sm_amount",
+        "sell_sm_vol",
+        "sell_sm_amount",
+        "buy_md_vol",
+        "buy_md_amount",
+        "sell_md_vol",
+        "sell_md_amount",
+        "buy_lg_vol",
+        "buy_lg_amount",
+        "sell_lg_vol",
+        "sell_lg_amount",
+        "buy_elg_vol",
+        "buy_elg_amount",
+        "sell_elg_vol",
+        "sell_elg_amount",
+        "net_mf_vol",
+        "net_mf_amount",
+        "trade_count"
+      ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",
       "partition_key": "trade_date",
-      "primary_key": ["ts_code", "trade_date"],
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
@@ -42,11 +96,25 @@
     {
       "source_family": "margin_leverage",
       "api_name": "margin_detail",
-      "fields": ["ts_code", "trade_date", "rzye", "rzmre", "rzche", "rqyl", "rqmcl", "rqchl", "rqye", "rzrqye"],
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "rzye",
+        "rzmre",
+        "rzche",
+        "rqyl",
+        "rqmcl",
+        "rqchl",
+        "rqye",
+        "rzrqye"
+      ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",
       "partition_key": "trade_date",
-      "primary_key": ["ts_code", "trade_date"],
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
@@ -55,15 +123,190 @@
     {
       "source_family": "market_price_adjustment",
       "api_name": "adj_factor",
-      "fields": ["ts_code", "trade_date", "adj_factor"],
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "adj_factor"
+      ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",
       "partition_key": "trade_date",
-      "primary_key": ["ts_code", "trade_date"],
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
       "universe_filter_mode": "ts_code",
       "compact_bucket": "year_from_trade_date",
       "status": "approved",
       "production_enabled": true
+    },
+    {
+      "source_family": "market_calendar",
+      "api_name": "trade_cal",
+      "fields": [
+        "exchange",
+        "cal_date",
+        "is_open",
+        "pretrade_date"
+      ],
+      "query_mode": "by_date_range",
+      "calendar_mode": "range_once",
+      "partition_keys": [
+        "exchange",
+        "start_date",
+        "end_date"
+      ],
+      "range_start_param": "start_date",
+      "range_end_param": "end_date",
+      "param_grid": {
+        "exchange": [
+          "SSE",
+          "SZSE"
+        ]
+      },
+      "primary_key": [
+        "exchange",
+        "cal_date"
+      ],
+      "universe_filter_mode": "none",
+      "empty_result_allowed": false,
+      "compact_bucket": "window_from_range",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "market_tradability",
+      "api_name": "suspend_d",
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
+      ],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
+      "universe_filter_mode": "ts_code",
+      "empty_result_allowed": true,
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "market_limit",
+      "api_name": "stk_limit",
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "up_limit",
+        "down_limit"
+      ],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
+      "universe_filter_mode": "ts_code",
+      "empty_result_allowed": false,
+      "compact_bucket": "year_from_trade_date",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "security_master",
+      "api_name": "stock_basic",
+      "fields": [
+        "ts_code",
+        "symbol",
+        "name",
+        "area",
+        "industry",
+        "market",
+        "exchange",
+        "list_status",
+        "list_date",
+        "delist_date",
+        "is_hs"
+      ],
+      "query_mode": "snapshot_by_param",
+      "calendar_mode": "snapshot",
+      "partition_keys": [
+        "snapshot",
+        "list_status"
+      ],
+      "param_grid": {
+        "list_status": [
+          "L",
+          "D",
+          "P"
+        ]
+      },
+      "primary_key": [
+        "ts_code",
+        "list_status",
+        "snapshot"
+      ],
+      "universe_filter_mode": "ts_code",
+      "empty_result_allowed": true,
+      "compact_bucket": "snapshot",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "security_master",
+      "api_name": "namechange",
+      "fields": [
+        "ts_code",
+        "name",
+        "start_date",
+        "end_date",
+        "change_reason",
+        "ann_date"
+      ],
+      "query_mode": "by_date_range",
+      "calendar_mode": "range_once",
+      "partition_keys": [
+        "start_date",
+        "end_date"
+      ],
+      "range_start_param": "start_date",
+      "range_end_param": "end_date",
+      "primary_key": [
+        "ts_code",
+        "name",
+        "start_date"
+      ],
+      "universe_filter_mode": "ts_code",
+      "empty_result_allowed": true,
+      "compact_bucket": "window_from_range",
+      "status": "approved",
+      "production_enabled": true
+    },
+    {
+      "source_family": "market_limit",
+      "api_name": "limit_list_d",
+      "fields": [
+        "ts_code",
+        "trade_date"
+      ],
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
+      "primary_key": [
+        "ts_code",
+        "trade_date"
+      ],
+      "universe_filter_mode": "ts_code",
+      "empty_result_allowed": true,
+      "compact_bucket": "year_from_trade_date",
+      "status": "manual_review",
+      "production_enabled": false
     }
   ]
 }
