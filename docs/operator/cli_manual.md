@@ -104,7 +104,9 @@ Notes:
 - `--execute` requires `--max-tasks` for safety.
 - Does not write Drive.
 
-### Tushare dry-run only
+### Tushare dry-run planning
+
+Use dry-run planning to validate local inputs, approved registry selection, date windows, and token-free artifact paths without calling Tushare data APIs or writing Raw parquet.
 
 ```bash
 PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
@@ -115,28 +117,39 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --output-root outputs/tushare_raw
+  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --output-root outputs/tushare_c1_p0_v1_20220101_20260612
 ```
 
-Future dataset namespace example:
+Dry-run output remains token-free and local. It does not write Google Drive and does not promote compact packages.
+
+### Tushare real local acquisition
+
+Run without `--dry-run` only after the dry-run plan is reviewed. The ingest command calls Tushare and writes local staging under `output_root/data/raw/tushare/...`; Drive writes remain manual-gated through `raw_lake_compact_cli promote`.
 
 ```bash
-PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
-  --dry-run \
-  --symbols-file stock_universe_v2_symbols.txt \
-  --universe-name stock_universe_v2 \
-  --dataset-version v2_all_a_share \
-  --expected-symbol-count 920 \
+PYTHONPATH=src python -u -m qsys.utils.run_tushare_raw_ingest \
+  --symbols-file stock_universe_v1_symbols.txt \
+  --universe-name stock_universe_v1 \
+  --dataset-version v1_csi500_2021_2025_union \
+  --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --output-root outputs/tushare_raw
+  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --output-root outputs/tushare_c1_p0_v1_20220101_20260612 \
+  --max-workers 2 \
+  --request-sleep 0.35 \
+  --request-jitter 0.15 \
+  --retry 3 \
+  --heartbeat-sec 30 \
+  --resume
 ```
 
 Notes:
-- Requires `TUSHARE_TOKEN` in the environment, but does not print or persist it.
-- Does not perform formal Tushare historical API pulls in M0.
-- Canonical Universe files use six-digit symbols such as `000008`; Tushare `ts_code` such as `000008.SZ` is provider-specific API representation.
+- Requires `TUSHARE_TOKEN` in the environment for real acquisition, but the runner must not print or persist it.
+- Canonical Universe files use six-digit symbols such as `000008`; Tushare `ts_code` such as `000008.SZ` is a provider-specific API representation.
 - `dataset_version` is an operator-defined dataset namespace. It is not a code default and not a schema version.
+- Snapshot APIs default `snapshot=<end_date>` unless `--snapshot-date YYYYMMDD` is supplied.
 
 ### Compact prepare
 
@@ -256,7 +269,7 @@ Date window in `YYYYMMDD` format. Tushare dry-run validates format and requires 
 
 ### `output_root`
 
-Local root for staging or dry-run output context. AkShare acquisition writes under this root. Tushare dry-run does not write formal Raw parquet in M0 but reports intended local staging root.
+Local root for staging or dry-run output context. AkShare and real Tushare acquisition write local Raw parquet under this root; Tushare dry-run writes only planning/review artifacts.
 
 ### `drive_dwh_root`
 
@@ -282,7 +295,7 @@ AkShare raw ingest throttling/control string for limiting per-API concurrency wh
 | `run_akshare_raw_lake_preheat` | Yes when executing lanes | No | No | No | Local preheat/review artifacts only | Local files can be deleted manually |
 | `run_akshare_backfill_tasks --dry-run` | No | No | No | No | Local task-result metadata may be written | Yes, local metadata can be removed |
 | `run_akshare_backfill_tasks --execute` | Yes | No | No | No | Local task-result metadata | Local files can be deleted manually; external API reads are not undone |
-| `run_tushare_raw_ingest --dry-run` | No formal Raw write | No | No | No | No Drive/catalog writes | Yes; no formal Raw/Drive mutation |
+| `run_tushare_raw_ingest --dry-run` | No Raw parquet write | No | No | No | Local planning/review artifacts only | Yes; no Raw/Drive mutation |
 | `raw_lake_compact_cli prepare` | No new staging writes | Yes | Yes, for collision planning | No | Local readiness/catalog artifacts | Yes, delete local compact package if not promoted |
 | `raw_lake_compact_cli promote` | No | No | Yes | **Yes** | Yes | Not automatically reversible; requires manual governance |
 | `raw_lake_compact_cli audit` | No | No | Yes | No | No | Read-only |
@@ -292,7 +305,7 @@ Key boundaries:
 - `prepare` does **not** write Drive Raw.
 - `promote` is the only active command that writes Drive Raw.
 - `audit` is read-only.
-- Tushare dry-run does not pull formal API history, does not write Drive, and does not save tokens.
+- Tushare ingest writes local staging only, does not write Drive, and does not save tokens.
 
 ## Legacy / deprecated CLI
 
@@ -318,8 +331,7 @@ Do not actively use these for new operations. They remain for compatibility or h
 | Collision plan SHA mismatch | Reviewed `drive_collision_plan.csv` changed after prepare. | No | Rerun `prepare`, review the new collision plan, then promote only if accepted. |
 | Non-identical overwrite blocked | A Drive target exists with different bytes. | No | Investigate the existing Drive asset and new package. Do not force overwrite. |
 | `READY_FOR_PROMOTION.json` missing | Package has not completed prepare/readiness review. | No | Run `prepare` successfully and review generated readiness artifacts. |
-| `TUSHARE_TOKEN` missing | Tushare dry-run cannot validate token availability. | No | Set `TUSHARE_TOKEN` in the environment or provide it through the supported secure prompt path. Do not write tokens to files/logs. |
-| Tushare command without `--dry-run` | M0 Tushare entrypoint intentionally disables formal pulls. | No | Add `--dry-run`. Real Tushare acquisition requires future implementation and review. |
+| `TUSHARE_TOKEN` missing | Real Tushare acquisition cannot authenticate. | No | Set `TUSHARE_TOKEN` in the environment or provide it through the supported secure prompt path. Do not write tokens to files/logs. |
 
 ## Pre-flight checklist
 

@@ -33,6 +33,7 @@ class MockClient:
 
 
 def _symbols(tmp_path: Path) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "symbols.txt"
     path.write_text("000001\n000002\n", encoding="utf-8")
     return path
@@ -241,6 +242,7 @@ def test_operator_summary_artifacts_are_fixed_size_and_token_free(tmp_path: Path
     assert summary["abnormal_counts"] == {
         "bad_status_partitions": 0,
         "failed_partitions": 0,
+        "disallowed_empty_partitions": 0,
         "duplicate_partitions": 0,
         "missing_data_files": 0,
         "missing_metadata_files": 0,
@@ -272,13 +274,13 @@ def test_empty_success_without_columns_is_data_fact_not_contract_failure(tmp_pat
     summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
     assert catalog.loc[0, "status"] == "empty"
     assert summary["status_counts"]["empty"] == 1
-    assert "empty_partitions" not in summary["abnormal_counts"]
+    assert summary["abnormal_counts"]["disallowed_empty_partitions"] == 1
     assert summary["abnormal_counts"]["required_contract_fields_missing"] == 0
-    assert summary["rough_check"] == "PASS"
+    assert summary["rough_check"] == "FAIL"
     by_api = pd.read_csv(artifacts / "operator_summary_by_api.csv")
     assert by_api.loc[0, "status_empty"] == 1
     assert by_api.loc[0, "required_contract_fields_missing"] == 0
-    assert by_api.loc[0, "rough_check"] == "PASS"
+    assert by_api.loc[0, "rough_check"] == "FAIL"
 
 
 def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> None:
@@ -503,30 +505,94 @@ def test_c1_p0_registry_loads_and_daily_basic_fields_expand() -> None:
     assert {"daily", "moneyflow", "margin_detail", "adj_factor"}.issubset(by_api)
 
 
-def test_c1_p0_mixed_shapes_write_expected_partitions_without_ts_code_for_trade_cal(tmp_path: Path) -> None:
+def test_c1_p0_full_mock_ingest_writes_all_expected_partitions(tmp_path: Path) -> None:
     class C1Client:
         def query(self, api_name: str, **params: str) -> pd.DataFrame:
             if api_name == "trade_cal":
                 return pd.DataFrame({"exchange": [params.get("exchange", "SSE")], "cal_date": [params["start_date"]], "is_open": [1], "pretrade_date": [""]})
-            if api_name == "stock_basic":
-                return pd.DataFrame({"ts_code": ["000001.SZ"], "symbol": ["000001"], "name": ["A"], "list_status": [params["list_status"]]})
+            if api_name == "daily_basic":
+                return pd.DataFrame({
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": [params["trade_date"]],
+                    "turnover_rate": [1.0],
+                    "turnover_rate_f": [1.1],
+                    "volume_ratio": [1.2],
+                    "total_share": [10.0],
+                    "float_share": [8.0],
+                    "free_share": [6.0],
+                    "total_mv": [100.0],
+                    "circ_mv": [80.0],
+                })
+            if api_name == "stk_limit":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]], "up_limit": [11.0], "down_limit": [9.0]})
+            if api_name == "limit_list_d":
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]]})
             if api_name == "suspend_d":
-                return pd.DataFrame(columns=["ts_code", "suspend_date", "resume_date", "ann_date", "suspend_reason", "reason_type"])
+                return pd.DataFrame({
+                    "ts_code": ["000001.SZ"],
+                    "suspend_date": [params["suspend_date"]],
+                    "resume_date": [""],
+                    "ann_date": [params["suspend_date"]],
+                    "suspend_reason": ["mock reason"],
+                    "reason_type": ["mock"],
+                })
+            if api_name == "stock_basic":
+                return pd.DataFrame({
+                    "ts_code": ["000001.SZ"],
+                    "symbol": ["000001"],
+                    "name": ["Mock A"],
+                    "area": ["SZ"],
+                    "industry": ["Bank"],
+                    "market": ["主板"],
+                    "exchange": ["SZSE"],
+                    "list_status": [params["list_status"]],
+                    "list_date": ["19910403"],
+                    "delist_date": [""],
+                    "is_hs": ["N"],
+                })
             if api_name == "namechange":
-                return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["A"], "start_date": [params["start_date"]], "end_date": [params["end_date"]], "change_reason": [""], "ann_date": [params["start_date"]]})
-            return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]], "up_limit": [1.0], "down_limit": [0.9], "limit": ["U"]})
+                return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Mock A"], "start_date": [params["start_date"]], "end_date": [params["end_date"]], "change_reason": ["mock"], "ann_date": [params["start_date"]]})
+            raise AssertionError(api_name)
 
-    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange"), resume=True)
+    api_names = ("daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange")
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=api_names, resume=True, snapshot_date="20260612")
     run_tushare_raw_ingest(cfg, client=C1Client())
     root = tmp_path / "out" / "data" / "raw" / "tushare"
+    assert (root / "market_basic" / "daily_basic" / "trade_date=20260612" / "data.parquet").exists()
     assert (root / "market_limit" / "stk_limit" / "trade_date=20260612" / "data.parquet").exists()
     assert (root / "market_limit" / "limit_list_d" / "trade_date=20260612" / "data.parquet").exists()
     assert (root / "market_tradability" / "suspend_d" / "suspend_date=20260612" / "data.parquet").exists()
+    assert (root / "market_calendar" / "trade_cal" / "exchange=SSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet").exists()
+    assert (root / "market_calendar" / "trade_cal" / "exchange=SZSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet").exists()
+    assert (root / "security_master" / "stock_basic" / "snapshot=20260612" / "list_status=L" / "data.parquet").exists()
+    assert (root / "security_master" / "stock_basic" / "snapshot=20260612" / "list_status=D" / "data.parquet").exists()
+    assert (root / "security_master" / "stock_basic" / "snapshot=20260612" / "list_status=P" / "data.parquet").exists()
+    assert (root / "security_master" / "namechange" / "start_date=20260612" / "end_date=20260612" / "data.parquet").exists()
     cal = pd.read_parquet(root / "market_calendar" / "trade_cal" / "exchange=SSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet")
     assert "canonical_symbol" not in cal.columns
-    assert (root / "security_master" / "stock_basic" / "snapshot=20260622" / "list_status=L" / "data.parquet").exists() or any((root / "security_master" / "stock_basic").glob("snapshot=*/list_status=L/data.parquet"))
     by_api = pd.read_csv(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary_by_api.csv")
-    assert set(by_api["api_name"]) == set(cfg.api_names)
+    assert set(by_api["api_name"]) == set(api_names)
+
+
+def test_empty_result_allowed_policy_controls_rough_check(tmp_path: Path) -> None:
+    class EmptyClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return pd.DataFrame({"cal_date": [params["start_date"]], "is_open": [1]})
+            return pd.DataFrame(columns=["ts_code", "trade_date"])
+
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("limit_list_d",)), client=EmptyClient())
+    allowed_summary = pd.read_json(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
+    assert allowed_summary["rough_check"] == "PASS"
+    assert allowed_summary["abnormal_counts"]["disallowed_empty_partitions"] == 0
+
+    other = tmp_path / "disallowed"
+    run_tushare_raw_ingest(_cfg(other, _symbols(other), api_names=("daily_basic",)), client=EmptyClient())
+    disallowed_summary = pd.read_json(other / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
+    assert disallowed_summary["rough_check"] == "FAIL"
+    assert disallowed_summary["abnormal_counts"]["disallowed_empty_partitions"] == 1
+    by_api = pd.read_csv(other / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary_by_api.csv")
+    assert int(by_api.loc[by_api["api_name"] == "daily_basic", "disallowed_empty_partitions"].iloc[0]) == 1
 
 
 def test_c1_p0_resume_generic_partition(tmp_path: Path) -> None:
@@ -544,3 +610,16 @@ def test_c1_p0_resume_generic_partition(tmp_path: Path) -> None:
     assert client.calls == first_calls
     catalog = (tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "raw_ingest_catalog.csv").read_text(encoding="utf-8")
     assert "already_exists" in catalog
+
+
+def test_stock_basic_snapshot_defaults_to_end_date(tmp_path: Path) -> None:
+    class StockBasicClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({"ts_code": ["000001.SZ"], "symbol": ["000001"], "name": ["Mock"], "list_status": [params["list_status"]]})
+
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("stock_basic",), end_date="20260615")
+    manifest = run_tushare_raw_ingest(cfg, client=StockBasicClient())
+    assert manifest["snapshot_date"] == "20260615"
+    assert (tmp_path / "out" / "data" / "raw" / "tushare" / "security_master" / "stock_basic" / "snapshot=20260615" / "list_status=L" / "data.parquet").exists()

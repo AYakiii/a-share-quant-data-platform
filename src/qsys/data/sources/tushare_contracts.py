@@ -28,6 +28,7 @@ class TushareRawIngestConfig:
     allow_candidate_sources: bool = False
     heartbeat_sec: float | None = 30.0
     dates_file: Path | None = None
+    snapshot_date: str | None = None
     provider: str = "tushare"
 
 

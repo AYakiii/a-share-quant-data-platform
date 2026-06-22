@@ -296,8 +296,7 @@
       "api_name": "limit_list_d",
       "fields": [
         "ts_code",
-        "trade_date",
-        "limit"
+        "trade_date"
       ],
       "query_mode": "by_trade_date",
       "calendar_mode": "trading_days",

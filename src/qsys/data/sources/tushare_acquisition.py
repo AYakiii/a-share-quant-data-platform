@@ -97,6 +97,8 @@ def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], li
         raise ValueError("expected_symbol_count must be > 0")
     if not DATE_RE.fullmatch(config.start_date or "") or not DATE_RE.fullmatch(config.end_date or ""):
         raise ValueError("start_date and end_date must be YYYYMMDD")
+    if config.snapshot_date is not None and not DATE_RE.fullmatch(config.snapshot_date):
+        raise ValueError("snapshot_date must be YYYYMMDD")
     if config.start_date > config.end_date:
         raise ValueError("start_date must be <= end_date")
     dataset_version = validate_path_segment(config.dataset_version, label="dataset_version")
@@ -175,7 +177,7 @@ def build_ingest_tasks(config: TushareRawIngestConfig, specs: list[TushareSource
     """Expand source specs into concrete API request tasks."""
     natural_days = _date_range(config.start_date, config.end_date)
     tasks: list[TushareIngestTask] = []
-    snapshot = datetime.utcnow().strftime("%Y%m%d")
+    snapshot = config.snapshot_date or config.end_date
     for spec in specs:
         static = dict(spec.static_params or {})
         grids = _grid_params(spec.param_grid)
@@ -225,6 +227,7 @@ def build_manifest(config: TushareRawIngestConfig, *, symbols: list[str], reques
         "end_date": config.end_date,
         "requested_start_date": config.start_date,
         "requested_end_date": config.end_date,
+        "snapshot_date": config.snapshot_date or config.end_date,
         "date_source": calendar_plan.date_source if calendar_plan else "calendar_days",
         "dates_file": str(config.dates_file) if config.dates_file else None,
         "calendar_source": calendar_plan.calendar_source if calendar_plan else "calendar_range",
@@ -349,6 +352,17 @@ def _required_fields_by_api(manifest: dict[str, Any]) -> dict[str, set[str]]:
     return fields_by_api
 
 
+def _empty_result_allowed_by_api(manifest: dict[str, Any]) -> dict[str, bool]:
+    """Return the registry empty-result policy keyed by API name."""
+    allowed_by_api: dict[str, bool] = {}
+    for source in manifest.get("sources", []):
+        if isinstance(source, dict):
+            api_name = str(source.get("api_name", ""))
+            if api_name:
+                allowed_by_api[api_name] = bool(source.get("empty_result_allowed", False))
+    return allowed_by_api
+
+
 def _partition_key(row: dict[str, str]) -> tuple[str, str]:
     return row.get("api_name", ""), row.get("partition_path") or row.get("trade_date", "")
 
@@ -379,6 +393,7 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
     duplicates = _read_csv_rows(artifacts / "duplicate_key_summary.csv")
     field_presence = _read_csv_rows(artifacts / "field_presence_summary.csv")
     missing_required_fields = _required_field_missing_partitions(field_presence, catalog, coverage, manifest)
+    empty_allowed_by_api = _empty_result_allowed_by_api(manifest)
     api_names = list(manifest.get("api_names", []))
     status_counts = {key: 0 for key in OPERATOR_STATUS_KEYS}
     for row in catalog:
@@ -389,9 +404,13 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
     missing_data_files = sum(1 for row in catalog if row.get("data_path") and not Path(row["data_path"]).exists())
     missing_metadata_files = sum(1 for row in catalog if row.get("metadata_path") and not Path(row["metadata_path"]).exists())
     duplicate_partitions = sum(1 for row in duplicates if _to_int(row.get("duplicate_key_count"), 0) > 0)
+    disallowed_empty_partitions = sum(
+        1 for row in catalog if row.get("status") == "empty" and not empty_allowed_by_api.get(row.get("api_name", ""), False)
+    )
     abnormal_counts = {
         "bad_status_partitions": sum(status_counts.get(status, 0) for status in bad_statuses),
         "failed_partitions": status_counts.get("request_failed", 0),
+        "disallowed_empty_partitions": disallowed_empty_partitions,
         "duplicate_partitions": duplicate_partitions,
         "missing_data_files": missing_data_files,
         "missing_metadata_files": missing_metadata_files,
@@ -424,7 +443,8 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
         dup_counts = [_to_int(row.get("duplicate_key_count"), 0) for row in api_duplicates]
         api_missing_data = sum(1 for row in api_catalog if row.get("data_path") and not Path(row["data_path"]).exists())
         api_missing_meta = sum(1 for row in api_catalog if row.get("metadata_path") and not Path(row["metadata_path"]).exists())
-        api_abnormal = sum(api_status.get(s, 0) for s in bad_statuses) + sum(1 for v in dup_counts if v > 0) + api_missing_data + api_missing_meta + api_required_missing
+        api_disallowed_empty = sum(1 for row in api_catalog if row.get("status") == "empty" and not empty_allowed_by_api.get(api_name, False))
+        api_abnormal = sum(api_status.get(s, 0) for s in bad_statuses) + api_disallowed_empty + sum(1 for v in dup_counts if v > 0) + api_missing_data + api_missing_meta + api_required_missing
         rows_by_api.append({
             "api_name": api_name,
             "planned_partitions": int(manifest.get("planned_partitions_by_api", {}).get(api_name, 0)),
@@ -447,6 +467,7 @@ def _write_operator_summaries(config: TushareRawIngestConfig, manifest: dict[str
             "missing_data_files": api_missing_data,
             "missing_metadata_files": api_missing_meta,
             "required_contract_fields_missing": api_required_missing,
+            "disallowed_empty_partitions": api_disallowed_empty,
             "rough_check": "PASS" if api_abnormal == 0 else "FAIL",
         })
     _write_json(artifacts / "operator_summary.json", summary)

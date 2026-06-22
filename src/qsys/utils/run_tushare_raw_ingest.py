@@ -32,9 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry", type=int, default=2)
     parser.add_argument("--dry-run", "--plan-only", dest="dry_run", action="store_true", help="Generate the plan and artifacts without calling Tushare.")
     parser.add_argument("--resume", action="store_true", help="Skip complete existing partitions containing data.parquet and metadata.json.")
-    parser.add_argument("--expected-symbol-count", type=int, default=None, help="Optional compatibility guard for older M0 smoke commands.")
+    parser.add_argument("--expected-symbol-count", type=int, default=None, help="Optional guard for the expected canonical universe row count.")
     parser.add_argument("--heartbeat-sec", type=float, default=30.0, help="Seconds between one-line heartbeat messages; use 0 to disable.")
     parser.add_argument("--dates-file", default=None, help="Debug/override only: explicit YYYYMMDD request dates; normal runs use Tushare trade_cal.")
+    parser.add_argument("--snapshot-date", default=None, help="Snapshot partition date for snapshot APIs; defaults to --end-date.")
     parser.add_argument("--allow-candidate-sources", action="store_true", help="Explicitly allow registry sources with production_enabled=false.")
     parser.add_argument("--print-manifest", action="store_true", help="Print the full manifest JSON instead of the compact operator summary.")
     return parser
@@ -61,6 +62,7 @@ def config_from_args(args: argparse.Namespace) -> TushareRawIngestConfig:
         allow_candidate_sources=args.allow_candidate_sources,
         heartbeat_sec=args.heartbeat_sec,
         dates_file=Path(args.dates_file) if args.dates_file else None,
+        snapshot_date=args.snapshot_date,
     )
 
 
