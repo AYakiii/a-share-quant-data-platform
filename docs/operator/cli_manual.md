@@ -117,7 +117,7 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --api-names daily_basic,stk_limit,suspend_d,trade_cal,stock_basic,namechange \
   --output-root outputs/tushare_c1_p0_v1_20220101_20260612
 ```
 
@@ -135,7 +135,7 @@ PYTHONPATH=src python -u -m qsys.utils.run_tushare_raw_ingest \
   --expected-symbol-count 846 \
   --start-date 20220101 \
   --end-date 20260612 \
-  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --api-names daily_basic,stk_limit,suspend_d,trade_cal,stock_basic,namechange \
   --output-root outputs/tushare_c1_p0_v1_20220101_20260612 \
   --max-workers 2 \
   --request-sleep 0.35 \
@@ -367,7 +367,7 @@ UNIVERSE_NAME = "stock_universe_v1"
 DATASET_VERSION = "v1_csi500_2021_2025_union"
 START_DATE = "20260612"
 END_DATE = "20260612"
-API_NAMES = "daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange"
+API_NAMES = "daily_basic,stk_limit,suspend_d,trade_cal,stock_basic,namechange"
 WORK_NAME = "tushare_c1_p0_v1_20220101_20260612"
 ALLOW_DRIVE_PROMOTION = False
 OUTPUT_ROOT = f"/content/outputs/{WORK_NAME}"
@@ -510,7 +510,9 @@ Raw acquisition records what the provider returns. Empty results and null values
 
 Selection is parameter/contract driven:
 
-- `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail,adj_factor` and approved C1 P0 APIs `daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange`.
+- `--api-names` selects specific registered APIs such as `daily,daily_basic,moneyflow,margin_detail,adj_factor` and approved C1 P0 APIs `daily_basic,stk_limit,suspend_d,trade_cal,stock_basic,namechange`.
+
+> `limit_list_d` is intentionally excluded from C1 P0 because its official scope is daily limit-up/limit-down and failed-board statistics from 2020 onward, and it does not provide ST stock statistics. It is not a foundational C1 tradability / limit-price audit table. Use daily OHLC plus `stk_limit` for limit-hit / limit-touch audit.
 - `--families` selects registry families such as `market_price,market_basic,market_flow,margin_leverage`.
 - When both `--api-names` and `--families` are provided, the actual execution set is their intersection. Manifest field `api_names` records the actual selected APIs; `requested_api_names` / `requested_families` record operator input when present.
 - `--symbols-file` must be the external canonical six-digit Universe file; no provider-specific Universe file is generated.
@@ -561,7 +563,7 @@ PYTHONPATH=src python -m qsys.utils.run_tushare_raw_ingest \
   --dataset-version v1_csi500_2021_2025_union \
   --start-date 20260608 \
   --end-date 20260612 \
-  --api-names daily_basic,stk_limit,limit_list_d,suspend_d,trade_cal,stock_basic,namechange \
+  --api-names daily_basic,stk_limit,suspend_d,trade_cal,stock_basic,namechange \
   --output-root /content/outputs/tushare_raw_m1c_calendar_smoke \
   --max-workers 1 \
   --request-sleep 0.3 \
