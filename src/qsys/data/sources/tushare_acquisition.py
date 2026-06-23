@@ -545,7 +545,15 @@ def _progress_payload(config: TushareRawIngestConfig, started_at: str, start_ts:
 
 
 def _metadata_complete(metadata: dict[str, Any]) -> bool:
-    required = {"return_row_count", "filtered_row_count", "pre_filter_symbol_count", "post_filter_symbol_count", "universe_missing_count", "duplicate_key_count"}
+    required = {
+        "return_row_count",
+        "filtered_row_count",
+        "pre_filter_symbol_count",
+        "post_filter_symbol_count",
+        "universe_missing_count",
+        "exact_duplicate_row_count",
+        "duplicate_key_count",
+    }
     return required.issubset(metadata)
 
 
@@ -562,7 +570,11 @@ def _append_qa_from_metadata(
 ) -> None:
     """Backfill QA rows from an existing partition metadata file."""
     coverage.append(metadata)
-    duplicates.append({**base, "duplicate_key_count": metadata.get("duplicate_key_count")})
+    duplicates.append({
+        **base,
+        "exact_duplicate_row_count": metadata.get("exact_duplicate_row_count"),
+        "duplicate_key_count": metadata.get("duplicate_key_count"),
+    })
     universe_rows.append({
         **base,
         "pre_filter_symbol_count": metadata.get("pre_filter_symbol_count"),
@@ -698,15 +710,22 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
             pre_symbols = post_symbols = 0
             missing = 0
             filtered = df.copy()
-        duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
+        exact_duplicate_row_count = int(filtered.duplicated(list(filtered.columns)).sum())
+        if exact_duplicate_row_count:
+            filtered = filtered.drop_duplicates().copy()
+        duplicate_count = (
+            int(filtered.duplicated(list(spec.primary_key)).sum())
+            if set(spec.primary_key).issubset(filtered.columns)
+            else -1
+        )
         part.mkdir(parents=True, exist_ok=False)
         filtered.to_parquet(data_path, index=False)
         status = "empty" if raw_rows == 0 else "ok"
-        metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "invalid_ts_code_count": invalid_ts_code_count, "invalid_ts_code_examples": invalid_ts_code_examples, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
+        metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "exact_duplicate_row_count": exact_duplicate_row_count, "duplicate_key_count": duplicate_count, "invalid_ts_code_count": invalid_ts_code_count, "invalid_ts_code_examples": invalid_ts_code_examples, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
         _write_json(meta_path, metadata)
         rows["catalog"].append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
         rows["coverage"].append(metadata)
-        rows["duplicates"].append({**base, "duplicate_key_count": duplicate_count})
+        rows["duplicates"].append({**base, "exact_duplicate_row_count": exact_duplicate_row_count, "duplicate_key_count": duplicate_count})
         rows["universe_rows"].append({**base, "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing})
         field_set = set(filtered.columns) | set(spec.fields)
         if spec.universe_filter_mode == "ts_code":

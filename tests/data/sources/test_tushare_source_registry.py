@@ -74,12 +74,15 @@ def test_c1_p0_registry_contracts_match_smoke_probe() -> None:
     assert suspend.query_mode == "by_trade_date"
     assert suspend.calendar_mode == "trading_days"
     assert suspend.partition_key == "trade_date"
-    assert suspend.primary_key == ("ts_code", "trade_date")
+    assert suspend.primary_key == ("ts_code", "trade_date", "suspend_timing", "suspend_type")
     assert suspend.universe_filter_mode == "ts_code"
     assert suspend.empty_result_allowed is True
     assert suspend.compact_bucket == "year_from_trade_date"
     assert suspend.status == "approved"
     assert suspend.production_enabled is True
+
+    namechange = by_api["namechange"]
+    assert namechange.primary_key == ("ts_code", "name", "start_date", "end_date", "change_reason", "ann_date")
 
     limit_list = by_api["limit_list_d"]
     assert limit_list.status == "manual_review"
