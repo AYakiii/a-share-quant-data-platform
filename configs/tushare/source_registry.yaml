@@ -179,23 +179,22 @@
       "api_name": "suspend_d",
       "fields": [
         "ts_code",
-        "suspend_date",
-        "resume_date",
-        "ann_date",
-        "suspend_reason",
-        "reason_type"
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
       ],
-      "query_mode": "by_date_param",
-      "calendar_mode": "calendar_days",
-      "partition_key": "suspend_date",
-      "request_date_param": "suspend_date",
+      "query_mode": "by_trade_date",
+      "calendar_mode": "trading_days",
+      "partition_key": "trade_date",
       "primary_key": [
         "ts_code",
-        "suspend_date"
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
       ],
       "universe_filter_mode": "ts_code",
       "empty_result_allowed": true,
-      "compact_bucket": "year_from_suspend_date",
+      "compact_bucket": "year_from_trade_date",
       "status": "approved",
       "production_enabled": true
     },
@@ -283,7 +282,10 @@
       "primary_key": [
         "ts_code",
         "name",
-        "start_date"
+        "start_date",
+        "end_date",
+        "change_reason",
+        "ann_date"
       ],
       "universe_filter_mode": "ts_code",
       "empty_result_allowed": true,
@@ -308,8 +310,8 @@
       "universe_filter_mode": "ts_code",
       "empty_result_allowed": true,
       "compact_bucket": "year_from_trade_date",
-      "status": "approved",
-      "production_enabled": true
+      "status": "manual_review",
+      "production_enabled": false
     }
   ]
 }

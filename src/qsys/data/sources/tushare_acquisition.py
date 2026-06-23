@@ -45,10 +45,18 @@ def file_sha256(path: str | Path) -> str:
 
 def canonical_symbol_from_ts_code(ts_code: str) -> str:
     """Convert a provider-specific Tushare ts_code into a canonical six-digit symbol."""
+    canonical_symbol = try_canonical_symbol_from_ts_code(ts_code)
+    if canonical_symbol is None:
+        raise ValueError(f"illegal Tushare ts_code: {ts_code!r}")
+    return canonical_symbol
+
+
+def try_canonical_symbol_from_ts_code(ts_code: str) -> str | None:
+    """Safely convert a standard Tushare ts_code to a canonical symbol, if possible."""
     text = str(ts_code or "").strip().upper()
     match = TUSHARE_TS_CODE_RE.fullmatch(text)
     if not match:
-        raise ValueError(f"illegal Tushare ts_code: {ts_code!r}")
+        return None
     return match.group(1)
 
 
@@ -107,7 +115,7 @@ def _validate_config(config: TushareRawIngestConfig) -> tuple[str, list[str], li
         raise ValueError("output_root must be local-only and must not point to Google Drive")
     by_api = source_specs_by_api()
     requested_api_names = list(config.api_names)
-    candidate_api_names = requested_api_names or list(by_api)
+    candidate_api_names = requested_api_names or [api for api, spec in by_api.items() if spec.production_enabled]
     unknown = sorted(set(candidate_api_names) - set(by_api))
     if unknown:
         raise ValueError(f"unknown Tushare api_names: {unknown}")
@@ -660,8 +668,20 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
             return finish("request_failed", rows, current)
         raw_rows = len(df)
         df = df.copy()
+        invalid_ts_code_count = 0
+        invalid_ts_code_examples: list[str] = []
         if spec.universe_filter_mode == "ts_code" and "ts_code" in df.columns:
-            df["canonical_symbol"] = df["ts_code"].map(canonical_symbol_from_ts_code)
+            df["canonical_symbol"] = df["ts_code"].map(try_canonical_symbol_from_ts_code)
+            invalid_mask = df["canonical_symbol"].isna()
+            invalid_ts_code_count = int(invalid_mask.sum())
+            invalid_ts_code_examples = (
+                df.loc[invalid_mask, "ts_code"]
+                .dropna()
+                .astype(str)
+                .drop_duplicates()
+                .head(10)
+                .tolist()
+            )
         for key, value in task.partition.items():
             if (key in spec.fields or key in spec.primary_key) and key not in df.columns:
                 df[key] = value
@@ -678,11 +698,14 @@ def run_tushare_raw_ingest(config: TushareRawIngestConfig, *, client: TushareQue
             pre_symbols = post_symbols = 0
             missing = 0
             filtered = df.copy()
+        exact_duplicate_row_count = int(filtered.duplicated(list(filtered.columns)).sum())
+        if exact_duplicate_row_count:
+            filtered = filtered.drop_duplicates().copy()
         duplicate_count = int(filtered.duplicated(list(spec.primary_key)).sum()) if set(spec.primary_key).issubset(filtered.columns) else -1
         part.mkdir(parents=True, exist_ok=False)
         filtered.to_parquet(data_path, index=False)
         status = "empty" if raw_rows == 0 else "ok"
-        metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
+        metadata = {**base, "status": status, "return_row_count": raw_rows, "filtered_row_count": len(filtered), "pre_filter_symbol_count": pre_symbols, "post_filter_symbol_count": post_symbols, "universe_missing_count": missing, "duplicate_key_count": duplicate_count, "exact_duplicate_row_count": exact_duplicate_row_count, "invalid_ts_code_count": invalid_ts_code_count, "invalid_ts_code_examples": invalid_ts_code_examples, "dtypes": {c: str(t) for c, t in filtered.dtypes.items()}, "empty_result": raw_rows == 0}
         _write_json(meta_path, metadata)
         rows["catalog"].append({**base, "status": status, "data_path": str(data_path), "metadata_path": str(meta_path), "row_count": len(filtered)})
         rows["coverage"].append(metadata)

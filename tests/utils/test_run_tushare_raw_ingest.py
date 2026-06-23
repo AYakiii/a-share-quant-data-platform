@@ -28,7 +28,7 @@ class MockClient:
         return pd.DataFrame({
             "ts_code": ["000001.SZ", "000002.SZ", "000002.SZ", "600000.SH"],
             "trade_date": [params["trade_date"]] * 4,
-            "close": [1.0, 2.0, 2.0, 3.0],
+            "close": [1.0, 2.0, 2.1, 3.0],
         })
 
 
@@ -36,6 +36,13 @@ def _symbols(tmp_path: Path) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "symbols.txt"
     path.write_text("000001\n000002\n", encoding="utf-8")
+    return path
+
+
+def _symbols_with(tmp_path: Path, symbols: tuple[str, ...]) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "symbols.txt"
+    path.write_text("\n".join(symbols) + "\n", encoding="utf-8")
     return path
 
 
@@ -298,6 +305,7 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
             row["ts_code"] = "000001.SZ"
             row["trade_date"] = params["trade_date"]
             duplicate = {**row}
+            duplicate["close"] = 2.0
             return pd.DataFrame([row, duplicate])
 
     cfg = _cfg(tmp_path, _symbols(tmp_path), start_date="20260611", end_date="20260612", api_names=("daily", "daily_basic"), retry=0)
@@ -499,8 +507,9 @@ def test_c1_p0_registry_loads_and_daily_basic_fields_expand() -> None:
     from qsys.data.sources.tushare_source_registry import source_specs_by_api
 
     by_api = source_specs_by_api()
-    expected = {"daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange"}
+    expected = {"daily_basic", "stk_limit", "suspend_d", "trade_cal", "stock_basic", "namechange"}
     assert expected.issubset(by_api)
+    assert by_api["limit_list_d"].production_enabled is False
     assert {"turnover_rate", "turnover_rate_f", "volume_ratio", "total_mv", "circ_mv"}.issubset(by_api["daily_basic"].fields)
     assert {"daily", "moneyflow", "margin_detail", "adj_factor"}.issubset(by_api)
 
@@ -525,16 +534,12 @@ def test_c1_p0_full_mock_ingest_writes_all_expected_partitions(tmp_path: Path) -
                 })
             if api_name == "stk_limit":
                 return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]], "up_limit": [11.0], "down_limit": [9.0]})
-            if api_name == "limit_list_d":
-                return pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": [params["trade_date"]]})
             if api_name == "suspend_d":
                 return pd.DataFrame({
                     "ts_code": ["000001.SZ"],
-                    "suspend_date": [params["suspend_date"]],
-                    "resume_date": [""],
-                    "ann_date": [params["suspend_date"]],
-                    "suspend_reason": ["mock reason"],
-                    "reason_type": ["mock"],
+                    "trade_date": [params["trade_date"]],
+                    "suspend_timing": ["09:30"],
+                    "suspend_type": ["S"],
                 })
             if api_name == "stock_basic":
                 return pd.DataFrame({
@@ -554,14 +559,13 @@ def test_c1_p0_full_mock_ingest_writes_all_expected_partitions(tmp_path: Path) -
                 return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Mock A"], "start_date": [params["start_date"]], "end_date": [params["end_date"]], "change_reason": ["mock"], "ann_date": [params["start_date"]]})
             raise AssertionError(api_name)
 
-    api_names = ("daily_basic", "stk_limit", "limit_list_d", "suspend_d", "trade_cal", "stock_basic", "namechange")
+    api_names = ("daily_basic", "stk_limit", "suspend_d", "trade_cal", "stock_basic", "namechange")
     cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=api_names, resume=True, snapshot_date="20260612")
     run_tushare_raw_ingest(cfg, client=C1Client())
     root = tmp_path / "out" / "data" / "raw" / "tushare"
     assert (root / "market_basic" / "daily_basic" / "trade_date=20260612" / "data.parquet").exists()
     assert (root / "market_limit" / "stk_limit" / "trade_date=20260612" / "data.parquet").exists()
-    assert (root / "market_limit" / "limit_list_d" / "trade_date=20260612" / "data.parquet").exists()
-    assert (root / "market_tradability" / "suspend_d" / "suspend_date=20260612" / "data.parquet").exists()
+    assert (root / "market_tradability" / "suspend_d" / "trade_date=20260612" / "data.parquet").exists()
     assert (root / "market_calendar" / "trade_cal" / "exchange=SSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet").exists()
     assert (root / "market_calendar" / "trade_cal" / "exchange=SZSE" / "start_date=20260612" / "end_date=20260612" / "data.parquet").exists()
     assert (root / "security_master" / "stock_basic" / "snapshot=20260612" / "list_status=L" / "data.parquet").exists()
@@ -581,7 +585,7 @@ def test_empty_result_allowed_policy_controls_rough_check(tmp_path: Path) -> Non
                 return pd.DataFrame({"cal_date": [params["start_date"]], "is_open": [1]})
             return pd.DataFrame(columns=["ts_code", "trade_date"])
 
-    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("limit_list_d",)), client=EmptyClient())
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("suspend_d",)), client=EmptyClient())
     allowed_summary = pd.read_json(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
     assert allowed_summary["rough_check"] == "PASS"
     assert allowed_summary["abnormal_counts"]["disallowed_empty_partitions"] == 0
@@ -593,6 +597,220 @@ def test_empty_result_allowed_policy_controls_rough_check(tmp_path: Path) -> Non
     assert disallowed_summary["abnormal_counts"]["disallowed_empty_partitions"] == 1
     by_api = pd.read_csv(other / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary_by_api.csv")
     assert int(by_api.loc[by_api["api_name"] == "daily_basic", "disallowed_empty_partitions"].iloc[0]) == 1
+
+
+def test_invalid_provider_ts_code_is_filtered_and_recorded(tmp_path: Path) -> None:
+    class InvalidCodeClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "T00018.SH"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+            })
+
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("suspend_d",))
+    run_tushare_raw_ingest(cfg, client=InvalidCodeClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_tradability" / "suspend_d" / "trade_date=20260612"
+    df = pd.read_parquet(part / "data.parquet")
+    assert df["canonical_symbol"].tolist() == ["000001"]
+
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["invalid_ts_code_count"] == 1
+    assert meta["invalid_ts_code_examples"] == ["T00018.SH"]
+    assert (tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json").exists()
+
+
+def test_stock_basic_special_provider_codes_are_not_mapped_to_six_digit_symbols(tmp_path: Path) -> None:
+    class StockBasicSpecialCodeClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "T600018.SH", "T600018"],
+                "symbol": ["000001", "T600018", "T600018"],
+                "name": ["平安银行", "上港集箱(退)", "上港集箱(退)"],
+                "list_status": [params["list_status"]] * 3,
+            })
+
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("stock_basic",), snapshot_date="20260612")
+    run_tushare_raw_ingest(cfg, client=StockBasicSpecialCodeClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "security_master" / "stock_basic" / "snapshot=20260612" / "list_status=D"
+    df = pd.read_parquet(part / "data.parquet")
+    assert df["canonical_symbol"].tolist() == ["000001"]
+    assert "600018" not in set(df["canonical_symbol"])
+
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["invalid_ts_code_count"] == 2
+    assert meta["invalid_ts_code_examples"] == ["T600018.SH", "T600018"]
+
+
+def test_resume_preserves_invalid_provider_code_metadata_in_qa_artifacts(tmp_path: Path) -> None:
+    class InvalidCodeClient:
+        calls = 0
+
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            self.calls += 1
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "T00018.SH"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+            })
+
+    client = InvalidCodeClient()
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("suspend_d",), resume=True)
+    run_tushare_raw_ingest(cfg, client=client)
+    first_calls = client.calls
+    run_tushare_raw_ingest(cfg, client=client)
+    assert client.calls == first_calls
+
+    coverage = pd.read_csv(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "source_coverage_summary.csv")
+    row = coverage.loc[coverage["api_name"] == "suspend_d"].iloc[0]
+    assert int(row["invalid_ts_code_count"]) == 1
+    assert "T00018.SH" in str(row["invalid_ts_code_examples"])
+
+
+def test_suspend_d_same_stock_date_event_rows_do_not_fail_duplicate_qa(tmp_path: Path) -> None:
+    class SuspendEventClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["300630.SZ", "300630.SZ"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+                "suspend_timing": [None, "09:30-09:41,09:44-09:54"],
+                "suspend_type": ["R", "S"],
+            })
+
+    cfg = _cfg(tmp_path, _symbols_with(tmp_path, ("300630",)), api_names=("suspend_d",))
+    run_tushare_raw_ingest(cfg, client=SuspendEventClient())
+
+    artifacts = tmp_path / "out" / "artifacts" / "tushare_raw_acquisition"
+    duplicates = pd.read_csv(artifacts / "duplicate_key_summary.csv")
+    assert int(duplicates.loc[duplicates["api_name"] == "suspend_d", "duplicate_key_count"].iloc[0]) == 0
+    summary = __import__("json").loads((artifacts / "operator_summary.json").read_text(encoding="utf-8"))
+    assert summary["rough_check"] == "PASS"
+
+
+def test_namechange_exact_duplicates_are_removed_before_wide_event_key_qa(tmp_path: Path) -> None:
+    class NameChangeEventClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame([
+                {
+                    "ts_code": "300114.SZ",
+                    "name": "中航成飞",
+                    "start_date": "20250217",
+                    "end_date": None,
+                    "change_reason": "改名",
+                    "ann_date": "20250207",
+                },
+                {
+                    "ts_code": "300114.SZ",
+                    "name": "中航成飞",
+                    "start_date": "20250217",
+                    "end_date": None,
+                    "change_reason": "改名",
+                    "ann_date": "20250215",
+                },
+                {
+                    "ts_code": "601568.SH",
+                    "name": "北元化工",
+                    "start_date": "20260513",
+                    "end_date": None,
+                    "change_reason": "其他",
+                    "ann_date": "20260508",
+                },
+                {
+                    "ts_code": "601568.SH",
+                    "name": "北元化工",
+                    "start_date": "20260513",
+                    "end_date": None,
+                    "change_reason": "其他",
+                    "ann_date": "20260508",
+                },
+            ])
+
+    cfg = _cfg(tmp_path, _symbols_with(tmp_path, ("300114", "601568")), api_names=("namechange",), start_date="20250201", end_date="20260531")
+    run_tushare_raw_ingest(cfg, client=NameChangeEventClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "security_master" / "namechange" / "start_date=20250201" / "end_date=20260531"
+    df = pd.read_parquet(part / "data.parquet")
+    assert len(df) == 3
+
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["exact_duplicate_row_count"] == 1
+    assert meta["duplicate_key_count"] == 0
+
+    summary = __import__("json").loads((tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json").read_text(encoding="utf-8"))
+    assert summary["rough_check"] == "PASS"
+
+
+def test_non_exact_duplicate_key_rows_still_fail_duplicate_qa(tmp_path: Path) -> None:
+    class DuplicateKeyClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+                "close": [10.0, 10.1],
+            })
+
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("daily",))
+    run_tushare_raw_ingest(cfg, client=DuplicateKeyClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_price" / "daily" / "trade_date=20260612"
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["exact_duplicate_row_count"] == 0
+    assert meta["duplicate_key_count"] == 1
+
+    summary = __import__("json").loads((tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json").read_text(encoding="utf-8"))
+    assert summary["rough_check"] == "FAIL"
+
+
+def test_resume_preserves_exact_duplicate_row_count_in_qa_artifacts(tmp_path: Path) -> None:
+    class NameChangeEventClient:
+        calls = 0
+
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            self.calls += 1
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame([
+                {
+                    "ts_code": "601568.SH",
+                    "name": "北元化工",
+                    "start_date": "20260513",
+                    "end_date": None,
+                    "change_reason": "其他",
+                    "ann_date": "20260508",
+                },
+                {
+                    "ts_code": "601568.SH",
+                    "name": "北元化工",
+                    "start_date": "20260513",
+                    "end_date": None,
+                    "change_reason": "其他",
+                    "ann_date": "20260508",
+                },
+            ])
+
+    client = NameChangeEventClient()
+    cfg = _cfg(tmp_path, _symbols_with(tmp_path, ("601568",)), api_names=("namechange",), start_date="20260501", end_date="20260531", resume=True)
+    run_tushare_raw_ingest(cfg, client=client)
+    first_calls = client.calls
+    run_tushare_raw_ingest(cfg, client=client)
+    assert client.calls == first_calls
+
+    coverage = pd.read_csv(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "source_coverage_summary.csv")
+    assert "exact_duplicate_row_count" in coverage.columns
+    row = coverage.loc[coverage["api_name"] == "namechange"].iloc[0]
+    assert int(row["exact_duplicate_row_count"]) == 1
 
 
 def test_c1_p0_resume_generic_partition(tmp_path: Path) -> None:

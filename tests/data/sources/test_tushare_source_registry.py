@@ -61,3 +61,38 @@ def test_unsupported_query_mode_fails_loudly(tmp_path: Path) -> None:
     }]}), encoding="utf-8")
     with pytest.raises(NotImplementedError, match="unsupported Tushare query_mode"):
         load_tushare_source_specs(registry)
+
+
+def test_c1_p0_registry_contracts_match_smoke_probe() -> None:
+    by_api = source_specs_by_api()
+    c1_p0 = ("daily_basic", "stk_limit", "suspend_d", "trade_cal", "stock_basic", "namechange")
+    assert all(by_api[api].production_enabled for api in c1_p0)
+
+    suspend = by_api["suspend_d"]
+    assert suspend.source_family == "market_tradability"
+    assert suspend.fields == ("ts_code", "trade_date", "suspend_timing", "suspend_type")
+    assert suspend.query_mode == "by_trade_date"
+    assert suspend.calendar_mode == "trading_days"
+    assert suspend.partition_key == "trade_date"
+    assert suspend.primary_key == ("ts_code", "trade_date", "suspend_timing", "suspend_type")
+    assert suspend.universe_filter_mode == "ts_code"
+    assert suspend.empty_result_allowed is True
+    assert suspend.compact_bucket == "year_from_trade_date"
+    assert suspend.status == "approved"
+    assert suspend.production_enabled is True
+
+    limit_list = by_api["limit_list_d"]
+    assert limit_list.status == "manual_review"
+    assert limit_list.production_enabled is False
+
+
+def test_namechange_event_primary_key_includes_full_event_identity() -> None:
+    by_api = source_specs_by_api()
+    assert by_api["namechange"].primary_key == (
+        "ts_code",
+        "name",
+        "start_date",
+        "end_date",
+        "change_reason",
+        "ann_date",
+    )
