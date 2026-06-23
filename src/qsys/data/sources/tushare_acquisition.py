@@ -545,7 +545,7 @@ def _progress_payload(config: TushareRawIngestConfig, started_at: str, start_ts:
 
 
 def _metadata_complete(metadata: dict[str, Any]) -> bool:
-    required = {"return_row_count", "filtered_row_count", "pre_filter_symbol_count", "post_filter_symbol_count", "universe_missing_count", "duplicate_key_count"}
+    required = {"return_row_count", "filtered_row_count", "pre_filter_symbol_count", "post_filter_symbol_count", "universe_missing_count", "duplicate_key_count", "exact_duplicate_row_count"}
     return required.issubset(metadata)
 
 
