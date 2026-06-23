@@ -28,7 +28,7 @@ class MockClient:
         return pd.DataFrame({
             "ts_code": ["000001.SZ", "000002.SZ", "000002.SZ", "600000.SH"],
             "trade_date": [params["trade_date"]] * 4,
-            "close": [1.0, 2.0, 2.0, 3.0],
+            "close": [1.0, 2.0, 2.1, 3.0],
         })
 
 
@@ -297,7 +297,7 @@ def test_operator_summary_abnormal_counts_are_aggregate_only(tmp_path: Path) -> 
             row: dict[str, object] = {field: 1.0 for field in DAILY_FIELDS}
             row["ts_code"] = "000001.SZ"
             row["trade_date"] = params["trade_date"]
-            duplicate = {**row}
+            duplicate = {**row, "close": 2.0}
             return pd.DataFrame([row, duplicate])
 
     cfg = _cfg(tmp_path, _symbols(tmp_path), start_date="20260611", end_date="20260612", api_names=("daily", "daily_basic"), retry=0)
@@ -693,3 +693,99 @@ def test_stock_basic_snapshot_defaults_to_end_date(tmp_path: Path) -> None:
     manifest = run_tushare_raw_ingest(cfg, client=StockBasicClient())
     assert manifest["snapshot_date"] == "20260615"
     assert (tmp_path / "out" / "data" / "raw" / "tushare" / "security_master" / "stock_basic" / "snapshot=20260615" / "list_status=L" / "data.parquet").exists()
+
+
+
+def test_suspend_d_legal_multi_event_key_passes_duplicate_qa(tmp_path: Path) -> None:
+    class SuspendMultiEventClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["300630.SZ", "300630.SZ"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+                "suspend_timing": [None, "09:30-09:41,09:44-09:54"],
+                "suspend_type": ["R", "S"],
+            })
+
+    symbols = tmp_path / "symbols.txt"
+    symbols.write_text("300630\n", encoding="utf-8")
+    run_tushare_raw_ingest(_cfg(tmp_path, symbols, api_names=("suspend_d",)), client=SuspendMultiEventClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_tradability" / "suspend_d" / "trade_date=20260612"
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["duplicate_key_count"] == 0
+    summary = pd.read_json(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
+    assert summary["rough_check"] == "PASS"
+
+
+def test_namechange_exact_duplicate_rows_are_recorded_and_deduped(tmp_path: Path) -> None:
+    class NamechangeClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame([
+                {"ts_code": "300114.SZ", "name": "中航成飞", "start_date": "20250217", "end_date": None, "change_reason": "改名", "ann_date": "20250207"},
+                {"ts_code": "300114.SZ", "name": "中航成飞", "start_date": "20250217", "end_date": None, "change_reason": "改名", "ann_date": "20250215"},
+                {"ts_code": "601568.SH", "name": "北元化工", "start_date": "20260513", "end_date": None, "change_reason": "其他", "ann_date": "20260508"},
+                {"ts_code": "601568.SH", "name": "北元化工", "start_date": "20260513", "end_date": None, "change_reason": "其他", "ann_date": "20260508"},
+            ])
+
+    symbols = tmp_path / "symbols.txt"
+    symbols.write_text("300114\n601568\n", encoding="utf-8")
+    run_tushare_raw_ingest(_cfg(tmp_path, symbols, api_names=("namechange",), start_date="20250201", end_date="20260612"), client=NamechangeClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "security_master" / "namechange" / "start_date=20250201" / "end_date=20260612"
+    assert len(pd.read_parquet(part / "data.parquet")) == 3
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["exact_duplicate_row_count"] == 1
+    assert meta["duplicate_key_count"] == 0
+    summary = pd.read_json(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
+    assert summary["rough_check"] == "PASS"
+
+
+def test_non_exact_duplicate_key_rows_still_fail_qa(tmp_path: Path) -> None:
+    class NonExactDuplicateClient:
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+                "close": [10.0, 10.1],
+            })
+
+    run_tushare_raw_ingest(_cfg(tmp_path, _symbols(tmp_path), api_names=("daily",)), client=NonExactDuplicateClient())
+
+    part = tmp_path / "out" / "data" / "raw" / "tushare" / "market_price" / "daily" / "trade_date=20260612"
+    meta = __import__("json").loads((part / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["exact_duplicate_row_count"] == 0
+    assert meta["duplicate_key_count"] == 1
+    summary = pd.read_json(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "operator_summary.json", typ="series")
+    assert summary["rough_check"] == "FAIL"
+
+
+def test_resume_preserves_exact_duplicate_row_count_in_coverage(tmp_path: Path) -> None:
+    class ExactDuplicateClient:
+        calls = 0
+
+        def query(self, api_name: str, **params: str) -> pd.DataFrame:
+            self.calls += 1
+            if api_name == "trade_cal":
+                return _trade_cal_frame(params["start_date"], params["end_date"])
+            return pd.DataFrame({
+                "ts_code": ["000001.SZ", "000001.SZ"],
+                "trade_date": [params["trade_date"], params["trade_date"]],
+                "close": [10.0, 10.0],
+            })
+
+    client = ExactDuplicateClient()
+    cfg = _cfg(tmp_path, _symbols(tmp_path), api_names=("daily",), resume=True)
+    run_tushare_raw_ingest(cfg, client=client)
+    first_calls = client.calls
+    run_tushare_raw_ingest(cfg, client=client)
+    assert client.calls == first_calls
+
+    coverage = pd.read_csv(tmp_path / "out" / "artifacts" / "tushare_raw_acquisition" / "source_coverage_summary.csv")
+    row = coverage.loc[coverage["api_name"] == "daily"].iloc[0]
+    assert int(row["exact_duplicate_row_count"]) == 1

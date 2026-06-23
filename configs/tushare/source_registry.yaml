@@ -188,7 +188,9 @@
       "partition_key": "trade_date",
       "primary_key": [
         "ts_code",
-        "trade_date"
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
       ],
       "universe_filter_mode": "ts_code",
       "empty_result_allowed": true,
@@ -280,7 +282,10 @@
       "primary_key": [
         "ts_code",
         "name",
-        "start_date"
+        "start_date",
+        "end_date",
+        "change_reason",
+        "ann_date"
       ],
       "universe_filter_mode": "ts_code",
       "empty_result_allowed": true,
