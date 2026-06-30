@@ -285,7 +285,7 @@ def test_secret_like_keys_rejected_except_policy_allowlist(tmp_path: Path) -> No
 
 def test_rejects_drive_like_output_root(tmp_path: Path) -> None:
     payload = _base_payload(tmp_path)
-    payload["output_root"] = "G:/MyDrive/a_share_quant_data/output"
+    payload["output_root"] = "C:/example/Google Drive/a_share_quant_data/output"
     issues = validate_dwh4_tushare_task(task_from_dict(payload))
     assert [issue.code for issue in issues] == ["OUTPUT_ROOT_DRIVE_LIKE"]
 

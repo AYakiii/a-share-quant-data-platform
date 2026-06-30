@@ -5,13 +5,13 @@ Date: 2026-06-29
 Target repository:
 
 ```text
-C:/Users/chinn/Desktop/a-share-quant-data-platform
+<repo-root>
 ```
 
 Construction workspace used for temporary patches:
 
 ```text
-C:/Users/chinn/a_share_quant_workspace/dwh4_dual_entry_single_core_worksite
+<worksite-root>
 ```
 
 Current scaffold status:
@@ -66,7 +66,7 @@ real compact prepare execution
 real promote execution
 real Drive read/write audit execution
 strategy, backtest, portfolio, NAV, Sharpe, drawdown, turnover, or TopN work
-modification of C:/Users/chinn/a_share_quant_workspace as a production system
+modification of <workspace-root> as a production system
 ```
 
 Important project boundary:
@@ -81,8 +81,8 @@ The workspace project is not part of this system improvement.
 Primary work order files:
 
 ```text
-C:/Users/chinn/Downloads/dwh4_dual_entry_single_core_workflow_blueprint.md
-C:/Users/chinn/Downloads/DWH4_0 (1).ipynb
+<local-inputs>/dwh4_dual_entry_single_core_workflow_blueprint.md
+<local-inputs>/DWH4_0.ipynb
 ```
 
 The blueprint established the operating contract:
@@ -428,7 +428,7 @@ token value stored or printed: no
 Focused DWH4 test command:
 
 ```powershell
-$env:PYTHONPATH='C:\Users\chinn\Desktop\a-share-quant-data-platform\src'
+$env:PYTHONPATH = "$PWD\src"
 python -m pytest -q `
   tests/workflows/test_tushare_dwh4_notebook.py `
   tests/workflows/test_tushare_dwh4_task.py `
@@ -452,7 +452,7 @@ DWH4 scaffold logic.
 Full repository test command:
 
 ```powershell
-$env:PYTHONPATH='C:\Users\chinn\Desktop\a-share-quant-data-platform\src'
+$env:PYTHONPATH = "$PWD\src"
 python -m pytest -q
 ```
 

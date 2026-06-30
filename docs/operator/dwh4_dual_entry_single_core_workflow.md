@@ -324,7 +324,7 @@ Run from the repository root with `PYTHONPATH` pointed at `src`. A plan-only
 agent run writes local run artifacts and does not execute subprocesses:
 
 ```powershell
-$env:PYTHONPATH = "C:\Users\chinn\Desktop\a-share-quant-data-platform\src"
+$env:PYTHONPATH = "$PWD\src"
 python -m qsys.utils.run_tushare_dwh4_agent `
   --task configs\tushare\workflows\dwh4_tushare_c1_p0_template.json `
   --stage run-to-prepare `
