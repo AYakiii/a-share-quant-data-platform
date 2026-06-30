@@ -1,0 +1,116 @@
+{
+  "workflow_name": "tushare_20260623V2",
+  "workflow_mode": "dwh4_dual_entry_single_core",
+  "execution_repo": "C:/Users/chinn/Desktop/a-share-quant-data-platform",
+  "ops_workspace": "C:/Users/chinn/Desktop/a-share-quant-data-platform/outputs/dwh4_ops/tushare_20260623V2",
+  "provider": "tushare",
+  "symbols_file": "C:/Users/chinn/Desktop/a-share-quant-data-platform/stock_universe_v1_symbols.txt",
+  "universe_name": "stock_universe_v1",
+  "expected_symbol_count": 846,
+  "dataset_version": "v1_csi500_2021_2025_union",
+  "start_date": "20220101",
+  "end_date": "20260601",
+  "api_names": [
+    "daily_basic",
+    "stk_limit",
+    "suspend_d",
+    "trade_cal",
+    "stock_basic",
+    "namechange"
+  ],
+  "allow_candidate_sources": false,
+  "work_name": "tushare_20260623V2",
+  "output_root": "C:/Users/chinn/Desktop/a-share-quant-data-platform/outputs/tushare_20260623V2",
+  "drive_dwh_root": "G:/MyDrive/a_share_quant_data",
+  "promotion_name": "tushare_20260623V2_compact",
+  "execution": {
+    "max_workers": 16,
+    "request_sleep": 0.2,
+    "request_jitter": 0.08,
+    "retry": 4,
+    "heartbeat_sec": 10,
+    "resume": true
+  },
+  "repo_policy": {
+    "sync_policy": "manual_or_current",
+    "require_clean_worktree": false,
+    "record_git_commit": true
+  },
+  "auto_review_policy": {
+    "require_ingest_rough_check_pass": true,
+    "require_all_api_rough_check_pass": true,
+    "require_zero_bad_status_partitions": true,
+    "require_zero_failed_partitions": true,
+    "require_zero_disallowed_empty_partitions": true,
+    "require_zero_duplicate_partitions": true,
+    "require_zero_missing_data_files": true,
+    "require_zero_missing_metadata_files": true,
+    "require_zero_missing_required_fields": true,
+    "require_compact_qa_all_ok": true,
+    "require_zero_failed_backlog": true,
+    "require_ready_for_promotion": true,
+    "block_non_identical_drive_collision": true
+  },
+  "promotion_policy": {
+    "auto_prepare": true,
+    "auto_promote": false,
+    "require_final_human_confirmation": true,
+    "allow_reviewed_bucket_kinds": [
+      "snapshot"
+    ]
+  },
+  "human_intervention_policy": {
+    "only_token_and_final_promotion": true,
+    "do_not_pause_for_scope_review": true,
+    "do_not_pause_for_ingest_review": true,
+    "do_not_pause_for_compact_review": true,
+    "on_any_review_failure": "stop_and_write_report"
+  },
+  "drive_inventory_policy": {
+    "enabled": true,
+    "scan_raw_tushare": true,
+    "read_parquet_metadata": true,
+    "compute_sha256": true,
+    "fail_on_unreadable_existing_asset": true
+  },
+  "incremental_policy": {
+    "enabled": true,
+    "mode": "drive_aware_incremental",
+    "target_end_date_policy": "latest_open_trading_day",
+    "as_of_date": "today",
+    "data_lag_trading_days": 1,
+    "open_year_policy": {
+      "enabled": true,
+      "replace_current_year_bucket": true,
+      "freeze_closed_years": true,
+      "overlap_trading_days": 3,
+      "clip_overlap_to_open_year": true,
+      "block_on_non_identical_key_conflict": true,
+      "allow_identical_overlap_collapse": true
+    },
+    "stable_latest_policy": {
+      "enabled": true,
+      "range_apis": [
+        "trade_cal",
+        "namechange"
+      ],
+      "snapshot_apis": [
+        "stock_basic"
+      ],
+      "range_bucket": "window=latest",
+      "snapshot_bucket": "snapshot=latest"
+    },
+    "active_manifest_policy": {
+      "enabled": true,
+      "write_active_manifest": true,
+      "active_manifest_path": "catalog/active/tushare/v1_csi500_2021_2025_union/dwh4_tushare_active_manifest.json"
+    }
+  },
+  "drive_mutation_policy": {
+    "allow_delete": false,
+    "allow_verified_replace": true,
+    "require_final_confirmation_for_replace": true,
+    "generate_delete_request_only": true,
+    "backup_old_drive_assets_locally_before_replace": true
+  }
+}
