@@ -194,7 +194,7 @@ def scan_raw_assets(output_root: str | Path, *, provider: str = DEFAULT_PROVIDER
             RawAsset(
                 output_root=str(root),
                 path=str(data_path),
-                relative_path=str(rel),
+                relative_path=rel.as_posix(),
                 source_family=source_family,
                 api_name=api_name,
                 partitions=partitions,
@@ -363,7 +363,7 @@ def compact_raw_lake(
         columns = [str(c) for c in reopened.columns]
         digest = file_sha256(dst)
         ok = rows == expected_rows and columns == (expected_columns or [])
-        rel_dst = str(dst.relative_to(pkg))
+        rel_dst = dst.relative_to(pkg).as_posix()
         qa_rows.append({"relative_path": rel_dst, "source_family": source_family, "api_name": api_name, "bucket_kind": bucket_kind, "bucket_value": bucket_value, "expected_rows": expected_rows, "actual_rows": rows, "expected_columns": len(expected_columns or []), "actual_columns": len(columns), "sha256": digest, "ok": ok})
         if not ok:
             raise ValueError(f"compact QA failed for {rel_dst}")
